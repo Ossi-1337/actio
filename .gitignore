@@ -1,0 +1,57 @@
+# Build output
+bin/
+obj/
+out/
+dist/
+build/
+publish/
+
+# Test and coverage output
+TestResults/
+coverage/
+coverage-*/
+*.coverage
+*.coveragexml
+*.trx
+*.vsp
+*.vspx
+
+# Node and frontend tooling
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+.next/
+.nuxt/
+.vite/
+
+# Local IDE/editor state
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Logs and diagnostics
+*.log
+logs/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.local
+*.secret
+*.secrets
+
+# Actio local runtime state
+.actio/
+actio-runs/
+actio-artifacts/
+actio-cache/
+
+# OS files
+.DS_Store
+Thumbs.db
