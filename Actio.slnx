@@ -2,9 +2,13 @@
   <Folder Name="/src/">
     <Project Path="src/Actio.Cli/Actio.Cli.csproj" />
     <Project Path="src/Actio.Core/Actio.Core.csproj" />
+    <Project Path="src/Actio.Engine/Actio.Engine.csproj" />
+    <Project Path="src/Actio.Runner.Docker/Actio.Runner.Docker.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Actio.Cli.Tests/Actio.Cli.Tests.csproj" />
     <Project Path="tests/Actio.Core.Tests/Actio.Core.Tests.csproj" />
+    <Project Path="tests/Actio.Engine.Tests/Actio.Engine.Tests.csproj" />
+    <Project Path="tests/Actio.Runner.Docker.Tests/Actio.Runner.Docker.Tests.csproj" />
   </Folder>
 </Solution>
