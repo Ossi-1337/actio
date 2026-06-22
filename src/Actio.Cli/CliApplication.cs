@@ -9,20 +9,27 @@ public sealed class CliApplication
     private readonly WorkflowFileResolver _resolver;
     private readonly WorkflowParser _parser;
     private readonly IWorkflowExecutor _executor;
+    private readonly CliParser _cliParser;
 
     public CliApplication()
         : this(
             new WorkflowFileResolver(),
             new WorkflowParser(),
-            new WorkflowExecutor(new DockerRunnerProvider()))
+            new WorkflowExecutor(new DockerRunnerProvider()),
+            new CliParser())
     {
     }
 
-    public CliApplication(WorkflowFileResolver resolver, WorkflowParser parser, IWorkflowExecutor executor)
+    public CliApplication(
+        WorkflowFileResolver resolver,
+        WorkflowParser parser,
+        IWorkflowExecutor executor,
+        CliParser? cliParser = null)
     {
         _resolver = resolver;
         _parser = parser;
         _executor = executor;
+        _cliParser = cliParser ?? new CliParser();
     }
 
     public int Run(string[] args, string workingDirectory, TextWriter output, TextWriter error)
@@ -37,13 +44,37 @@ public sealed class CliApplication
         TextWriter error,
         CancellationToken cancellationToken = default)
     {
-        if (args.Length != 1)
-        {
-            error.WriteLine("Usage: actio <workflow>.yml");
-            return ExitCodes.UsageError;
-        }
+        var command = _cliParser.Parse(args);
 
-        var resolution = _resolver.Resolve(args[0], workingDirectory);
+        switch (command.Kind)
+        {
+            case CliCommandKind.ShowRootHelp:
+                output.WriteLine(CliHelpText.Root);
+                return ExitCodes.Success;
+            case CliCommandKind.ShowRunHelp:
+                output.WriteLine(CliHelpText.Run);
+                return ExitCodes.Success;
+            case CliCommandKind.ShowVersion:
+                output.WriteLine($"actio {CliVersion.GetVersion()}");
+                return ExitCodes.Success;
+            case CliCommandKind.UsageError:
+                WriteUsageError(error, command.ErrorMessage!);
+                return ExitCodes.UsageError;
+            case CliCommandKind.RunWorkflow:
+                return await RunWorkflowAsync(command.WorkflowName!, workingDirectory, output, error, cancellationToken);
+            default:
+                throw new InvalidOperationException($"Unsupported CLI command kind '{command.Kind}'.");
+        }
+    }
+
+    private async Task<int> RunWorkflowAsync(
+        string workflowName,
+        string workingDirectory,
+        TextWriter output,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        var resolution = _resolver.Resolve(workflowName, workingDirectory);
         if (!resolution.Success)
         {
             WriteErrors(error, resolution.Errors);
@@ -74,6 +105,12 @@ public sealed class CliApplication
 
         output.WriteLine($"Success ({executionResult.SuccessfulSteps} / {executionResult.TotalSteps})");
         return ExitCodes.Success;
+    }
+
+    private static void WriteUsageError(TextWriter error, string message)
+    {
+        error.WriteLine(message);
+        error.WriteLine("Run 'actio --help' for usage.");
     }
 
     private static void WriteErrors(TextWriter error, IReadOnlyList<string> errors)
