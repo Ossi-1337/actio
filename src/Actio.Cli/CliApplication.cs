@@ -1,3 +1,5 @@
+using Actio.Core.Workflows;
+
 namespace Actio.Cli;
 
 public sealed class CliApplication

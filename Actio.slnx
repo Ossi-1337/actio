@@ -1,8 +1,10 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/Actio.Cli/Actio.Cli.csproj" />
+    <Project Path="src/Actio.Core/Actio.Core.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Actio.Cli.Tests/Actio.Cli.Tests.csproj" />
+    <Project Path="tests/Actio.Core.Tests/Actio.Core.Tests.csproj" />
   </Folder>
 </Solution>

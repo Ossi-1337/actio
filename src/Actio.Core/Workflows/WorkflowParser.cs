@@ -1,7 +1,7 @@
 using System.Text.RegularExpressions;
 using YamlDotNet.RepresentationModel;
 
-namespace Actio.Cli;
+namespace Actio.Core.Workflows;
 
 public sealed partial class WorkflowParser
 {

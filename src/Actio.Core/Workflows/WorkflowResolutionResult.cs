@@ -1,4 +1,4 @@
-namespace Actio.Cli;
+namespace Actio.Core.Workflows;
 
 public sealed record WorkflowResolutionResult(
     bool Success,

@@ -1,6 +1,6 @@
-using Actio.Cli;
+using Actio.Core.Workflows;
 
-namespace Actio.Cli.Tests;
+namespace Actio.Core.Tests;
 
 public sealed class WorkflowParserTests
 {
