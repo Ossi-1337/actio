@@ -132,6 +132,32 @@ public sealed class WorkflowParserTests
         Assert.Contains(result.Errors, error => error.Contains("unsupported expression", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public void Parse_RejectsConditionReferenceNotDeclaredInNeeds()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              prepare:
+                runs-on: ubuntu-latest
+                outputs:
+                  changed: "true"
+                steps:
+                  - name: Prepare
+                    run: dotnet restore
+              test:
+                if: "${{ needs.prepare.outputs.changed == 'true' }}"
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error.Contains("not declared", StringComparison.OrdinalIgnoreCase));
+    }
+
     private static WorkflowParseResult Parse(string yaml)
     {
         return new WorkflowParser().Parse(new StringReader(yaml));

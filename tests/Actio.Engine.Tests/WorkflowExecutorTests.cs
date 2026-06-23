@@ -1,5 +1,6 @@
 using Actio.Core.Workflows;
 using Actio.Engine.Execution;
+using Actio.Engine.Runs;
 
 namespace Actio.Engine.Tests;
 
@@ -138,8 +139,8 @@ public sealed class WorkflowExecutorTests
     {
         var runner = new FakeRunnerProvider(
             [
-                new StepExecutionResult(0, ["actio.output changed=true"]),
-                new StepExecutionResult(0)
+                new FakeRunnerStep(0, ["actio.output changed=true"]),
+                new FakeRunnerStep(0)
             ]);
         var workflow = CreateWorkflow(
             new WorkflowJob(
@@ -169,6 +170,92 @@ public sealed class WorkflowExecutorTests
         Assert.Equal("prepare", output.JobName);
         Assert.Equal("changed", output.Name);
         Assert.Equal("true", output.Value);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_SkipsJobWhenConditionIsFalse()
+    {
+        var runner = new FakeRunnerProvider(
+            [
+                new FakeRunnerStep(0, ["actio.output changed=false"])
+            ]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "prepare",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Detect changes", "echo actio.output changed=false", null)]),
+            new WorkflowJob(
+                "test",
+                ["prepare"],
+                "${{ needs.prepare.outputs.changed == 'true' }}",
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Test", "dotnet test", null)]));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success);
+        Assert.Equal(1, result.SuccessfulSteps);
+        Assert.Equal(2, result.TotalSteps);
+        Assert.Equal(1, result.SkippedSteps);
+        Assert.Single(runner.Requests);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ReturnsCleanFailureWhenRunStorageInitializationFails()
+    {
+        var runner = new FakeRunnerProvider([0]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Test", "dotnet test", null)]));
+        var store = new ThrowingRunStore(initializeException: new IOException("disk is unavailable"));
+
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Empty(runner.Requests);
+        Assert.Contains(result.Errors, error => error.Contains("initializing run storage", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ReturnsCleanFailureWhenStepLogCannotBeOpened()
+    {
+        var runner = new FakeRunnerProvider([0]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Test", "dotnet test", null)]));
+        var store = new ThrowingRunStore(openStepLogException: new IOException("log path is locked"));
+
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Empty(runner.Requests);
+        Assert.Contains(result.Errors, error => error.Contains("opening log", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -241,17 +328,17 @@ public sealed class WorkflowExecutorTests
 
     private sealed class FakeRunnerProvider : IRunnerProvider
     {
-        private readonly Queue<StepExecutionResult> _results;
+        private readonly Queue<FakeRunnerStep> _steps;
         private readonly bool _supportsRunner;
 
         public FakeRunnerProvider(IEnumerable<int> exitCodes, bool supportsRunner = true)
-            : this(exitCodes.Select(exitCode => new StepExecutionResult(exitCode)), supportsRunner)
+            : this(exitCodes.Select(exitCode => new FakeRunnerStep(exitCode)), supportsRunner)
         {
         }
 
-        public FakeRunnerProvider(IEnumerable<StepExecutionResult> results, bool supportsRunner = true)
+        public FakeRunnerProvider(IEnumerable<FakeRunnerStep> steps, bool supportsRunner = true)
         {
-            _results = new Queue<StepExecutionResult>(results);
+            _steps = new Queue<FakeRunnerStep>(steps);
             _supportsRunner = supportsRunner;
         }
 
@@ -264,12 +351,105 @@ public sealed class WorkflowExecutorTests
 
         public Task<StepExecutionResult> ExecuteStepAsync(
             StepExecutionRequest request,
-            TextWriter output,
-            TextWriter error,
+            IStepOutputSink output,
             CancellationToken cancellationToken = default)
         {
             Requests.Add(request);
-            return Task.FromResult(_results.Dequeue());
+            return ExecuteStepAsync(_steps.Dequeue(), output, cancellationToken);
         }
+
+        private static async Task<StepExecutionResult> ExecuteStepAsync(
+            FakeRunnerStep step,
+            IStepOutputSink output,
+            CancellationToken cancellationToken)
+        {
+            foreach (var line in step.OutputLines)
+            {
+                await output.WriteOutputLineAsync(line, cancellationToken);
+            }
+
+            foreach (var line in step.ErrorLines)
+            {
+                await output.WriteErrorLineAsync(line, cancellationToken);
+            }
+
+            return new StepExecutionResult(step.ExitCode);
+        }
+    }
+
+    private sealed class ThrowingRunStore : IRunStore
+    {
+        private readonly Exception? _initializeException;
+        private readonly Exception? _openStepLogException;
+
+        public ThrowingRunStore(Exception? initializeException = null, Exception? openStepLogException = null)
+        {
+            _initializeException = initializeException;
+            _openStepLogException = openStepLogException;
+        }
+
+        public string CreateRunId()
+        {
+            return "run-1";
+        }
+
+        public Task<RunStoragePaths> InitializeRunAsync(string runId, CancellationToken cancellationToken = default)
+        {
+            if (_initializeException is not null)
+            {
+                throw _initializeException;
+            }
+
+            return Task.FromResult(new RunStoragePaths(runId, null, null));
+        }
+
+        public Task<IStepLog> OpenStepLogAsync(
+            string runId,
+            string jobName,
+            int stepIndex,
+            string stepName,
+            CancellationToken cancellationToken = default)
+        {
+            if (_openStepLogException is not null)
+            {
+                throw _openStepLogException;
+            }
+
+            return Task.FromResult<IStepLog>(NullStepLog.Instance);
+        }
+
+        public Task<ArtifactSaveResult> SaveArtifactsAsync(
+            string runId,
+            string jobName,
+            string projectRoot,
+            IReadOnlyList<WorkflowArtifact> artifacts,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new ArtifactSaveResult([], []));
+        }
+
+        public Task SaveRunRecordAsync(WorkflowRunRecord runRecord, CancellationToken cancellationToken = default)
+        {
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class FakeRunnerStep
+    {
+        public FakeRunnerStep(
+            int exitCode,
+            IReadOnlyList<string>? outputLines = null,
+            IReadOnlyList<string>? errorLines = null)
+        {
+            ExitCode = exitCode;
+            OutputLines = outputLines ?? [];
+            ErrorLines = errorLines ?? [];
+        }
+
+        public int ExitCode { get; }
+
+        public IReadOnlyList<string> OutputLines { get; }
+
+        public IReadOnlyList<string> ErrorLines { get; }
     }
 }

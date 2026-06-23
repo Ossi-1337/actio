@@ -16,16 +16,14 @@ public sealed class NullRunStore : IRunStore
         return Task.FromResult(new RunStoragePaths(runId, null, null));
     }
 
-    public Task<string?> WriteStepLogAsync(
+    public Task<IStepLog> OpenStepLogAsync(
         string runId,
         string jobName,
         int stepIndex,
         string stepName,
-        IReadOnlyList<string> outputLines,
-        IReadOnlyList<string> errorLines,
         CancellationToken cancellationToken = default)
     {
-        return Task.FromResult<string?>(null);
+        return Task.FromResult<IStepLog>(NullStepLog.Instance);
     }
 
     public Task<ArtifactSaveResult> SaveArtifactsAsync(

@@ -218,14 +218,66 @@ public sealed class CliApplicationTests : IDisposable
         using var output = new StringWriter();
         using var error = new StringWriter();
         var executor = new FakeWorkflowExecutor(
-            new WorkflowExecutionResult(WorkflowExecutionStatus.Failed, 0, 1, ["step failed"]));
+            new WorkflowExecutionResult(WorkflowExecutionStatus.Failed, 0, 1, ["step failed"], failedSteps: 1));
 
         var exitCode = CreateApplication(executor).Run(["ci.yml"], _root, output, error);
 
         Assert.Equal(ExitCodes.ValidationError, exitCode);
-        Assert.Contains("Failed (0 / 1)", output.ToString());
+        Assert.Contains("Failed (0 / 1, 1 failed)", output.ToString());
         Assert.Contains("Workflow execution failed:", error.ToString());
         Assert.Contains("step failed", error.ToString());
+    }
+
+    [Fact]
+    public void Run_PrintsWorkflowErrorWhenFailureIsNotAStepFailure()
+    {
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var executor = new FakeWorkflowExecutor(
+            new WorkflowExecutionResult(WorkflowExecutionStatus.Failed, 1, 1, ["artifact failed"]));
+
+        var exitCode = CreateApplication(executor).Run(["ci.yml"], _root, output, error);
+
+        Assert.Equal(ExitCodes.ValidationError, exitCode);
+        Assert.Contains("Failed (1 / 1, workflow error)", output.ToString());
+    }
+
+    [Fact]
+    public void Run_PrintsSkippedStepCount()
+    {
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var executor = new FakeWorkflowExecutor(
+            new WorkflowExecutionResult(WorkflowExecutionStatus.Success, 1, 2, [], skippedSteps: 1));
+
+        var exitCode = CreateApplication(executor).Run(["ci.yml"], _root, output, error);
+
+        Assert.Equal(ExitCodes.Success, exitCode);
+        Assert.Contains("Success (1 / 2, 1 skipped)", output.ToString());
     }
 
     [Fact]

@@ -12,7 +12,9 @@ public sealed record WorkflowExecutionResult
         IReadOnlyList<WorkflowRunOutput>? outputs = null,
         IReadOnlyList<WorkflowRunArtifact>? artifacts = null,
         string? runId = null,
-        string? runRecordPath = null)
+        string? runRecordPath = null,
+        int failedSteps = 0,
+        int skippedSteps = 0)
     {
         Status = status;
         SuccessfulSteps = successfulSteps;
@@ -22,6 +24,8 @@ public sealed record WorkflowExecutionResult
         Artifacts = artifacts ?? [];
         RunId = runId;
         RunRecordPath = runRecordPath;
+        FailedSteps = failedSteps;
+        SkippedSteps = skippedSteps;
     }
 
     public WorkflowExecutionStatus Status { get; init; }
@@ -39,6 +43,10 @@ public sealed record WorkflowExecutionResult
     public string? RunId { get; init; }
 
     public string? RunRecordPath { get; init; }
+
+    public int FailedSteps { get; init; }
+
+    public int SkippedSteps { get; init; }
 
     public bool Success => Status == WorkflowExecutionStatus.Success;
 }

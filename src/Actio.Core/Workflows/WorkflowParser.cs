@@ -1,4 +1,3 @@
-using System.Text.RegularExpressions;
 using YamlDotNet.RepresentationModel;
 
 namespace Actio.Core.Workflows;
@@ -403,17 +402,22 @@ public sealed partial class WorkflowParser
                 continue;
             }
 
-            var match = SupportedConditionRegex().Match(job.If);
-            if (!match.Success)
+            if (!WorkflowConditionExpression.TryParse(job.If, out var condition))
             {
                 errors.Add($"workflow.jobs.{job.Name}.if uses an unsupported expression.");
                 continue;
             }
 
-            var referencedJob = match.Groups["job"].Value;
+            var referencedJob = condition!.ReferencedJob;
             if (!jobs.ContainsKey(referencedJob))
             {
                 errors.Add($"workflow.jobs.{job.Name}.if references unknown job '{referencedJob}'.");
+                continue;
+            }
+
+            if (!job.Needs.Contains(referencedJob, StringComparer.Ordinal))
+            {
+                errors.Add($"workflow.jobs.{job.Name}.if references needs.{referencedJob}, but '{referencedJob}' is not declared in workflow.jobs.{job.Name}.needs.");
             }
         }
     }
@@ -453,7 +457,4 @@ public sealed partial class WorkflowParser
         node = null!;
         return false;
     }
-
-    [GeneratedRegex("^\\$\\{\\{\\s*needs\\.(?<job>[A-Za-z0-9_-]+)\\.outputs\\.(?<output>[A-Za-z0-9_-]+)\\s*==\\s*'(?<value>[^']*)'\\s*\\}\\}$")]
-    private static partial Regex SupportedConditionRegex();
 }

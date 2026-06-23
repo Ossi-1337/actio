@@ -25,20 +25,20 @@ public sealed class DockerRunnerProvider : IRunnerProvider
 
     public async Task<StepExecutionResult> ExecuteStepAsync(
         StepExecutionRequest request,
-        TextWriter output,
-        TextWriter error,
+        IStepOutputSink output,
         CancellationToken cancellationToken = default)
     {
         if (!_imageResolver.TryResolveImage(request.RunsOn, out var image))
         {
             var message = $"Runner '{request.RunsOn}' is not mapped to a Docker image.";
-            error.WriteLine(message);
-            return new StepExecutionResult(1, errorLines: [message]);
+            await output.WriteErrorLineAsync(message, cancellationToken);
+            return new StepExecutionResult(1);
         }
 
+        var containerName = CreateContainerName(request);
         using var process = new Process
         {
-            StartInfo = CreateStartInfo(request, image),
+            StartInfo = CreateStartInfo(request, image, containerName),
             EnableRaisingEvents = true
         };
 
@@ -47,29 +47,36 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             if (!process.Start())
             {
                 const string message = "Docker process could not be started.";
-                error.WriteLine(message);
-                return new StepExecutionResult(1, errorLines: [message]);
+                await output.WriteErrorLineAsync(message, cancellationToken);
+                return new StepExecutionResult(1);
             }
         }
         catch (Win32Exception ex)
         {
             var message = $"Docker could not be started: {ex.Message}";
-            error.WriteLine(message);
-            return new StepExecutionResult(1, errorLines: [message]);
+            await output.WriteErrorLineAsync(message, cancellationToken);
+            return new StepExecutionResult(1);
         }
 
-        var outputLines = new List<string>();
-        var errorLines = new List<string>();
-        var outputTask = RedirectLinesAsync(process.StandardOutput, output, outputLines, cancellationToken);
-        var errorTask = RedirectLinesAsync(process.StandardError, error, errorLines, cancellationToken);
+        var outputTask = RedirectOutputLinesAsync(process.StandardOutput, output, cancellationToken);
+        var errorTask = RedirectErrorLinesAsync(process.StandardError, output, cancellationToken);
 
-        await process.WaitForExitAsync(cancellationToken);
-        await Task.WhenAll(outputTask, errorTask);
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken);
+            await Task.WhenAll(outputTask, errorTask);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            TryKillProcess(process);
+            TryRemoveContainer(containerName);
+            throw;
+        }
 
-        return new StepExecutionResult(process.ExitCode, outputLines, errorLines);
+        return new StepExecutionResult(process.ExitCode);
     }
 
-    private static ProcessStartInfo CreateStartInfo(StepExecutionRequest request, string image)
+    private static ProcessStartInfo CreateStartInfo(StepExecutionRequest request, string image, string containerName)
     {
         var startInfo = new ProcessStartInfo("docker")
         {
@@ -82,6 +89,14 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         startInfo.ArgumentList.Add("run");
         startInfo.ArgumentList.Add("--rm");
         startInfo.ArgumentList.Add("-i");
+        startInfo.ArgumentList.Add("--name");
+        startInfo.ArgumentList.Add(containerName);
+        startInfo.ArgumentList.Add("--label");
+        startInfo.ArgumentList.Add("actio=true");
+        startInfo.ArgumentList.Add("--label");
+        startInfo.ArgumentList.Add($"actio.job={request.JobName}");
+        startInfo.ArgumentList.Add("--label");
+        startInfo.ArgumentList.Add($"actio.step={request.StepName}");
         startInfo.ArgumentList.Add("-v");
         startInfo.ArgumentList.Add($"{Path.GetFullPath(request.ProjectRoot)}:/workspace");
         startInfo.ArgumentList.Add("-w");
@@ -101,16 +116,86 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         return startInfo;
     }
 
-    private static async Task RedirectLinesAsync(
+    private static async Task RedirectOutputLinesAsync(
         TextReader reader,
-        TextWriter writer,
-        List<string> lines,
+        IStepOutputSink output,
         CancellationToken cancellationToken)
     {
         while (await reader.ReadLineAsync(cancellationToken) is { } line)
         {
-            lines.Add(line);
-            writer.WriteLine(line);
+            await output.WriteOutputLineAsync(line, cancellationToken);
+        }
+    }
+
+    private static async Task RedirectErrorLinesAsync(
+        TextReader reader,
+        IStepOutputSink output,
+        CancellationToken cancellationToken)
+    {
+        while (await reader.ReadLineAsync(cancellationToken) is { } line)
+        {
+            await output.WriteErrorLineAsync(line, cancellationToken);
+        }
+    }
+
+    private static string CreateContainerName(StepExecutionRequest request)
+    {
+        var name = $"actio-{SanitizeName(request.JobName)}-{SanitizeName(request.StepName)}-{Guid.NewGuid():N}";
+        return name.Length <= 63 ? name : name[..63].TrimEnd('-');
+    }
+
+    private static string SanitizeName(string value)
+    {
+        var chars = value.ToLowerInvariant()
+            .Select(character => char.IsAsciiLetterOrDigit(character) ? character : '-')
+            .ToArray();
+        var sanitized = new string(chars).Trim('-');
+
+        return string.IsNullOrWhiteSpace(sanitized) ? "step" : sanitized;
+    }
+
+    private static void TryKillProcess(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+        }
+        catch (InvalidOperationException)
+        {
+        }
+        catch (Win32Exception)
+        {
+        }
+    }
+
+    private static void TryRemoveContainer(string containerName)
+    {
+        try
+        {
+            using var cleanup = Process.Start(new ProcessStartInfo("docker")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                ArgumentList =
+                {
+                    "rm",
+                    "-f",
+                    containerName
+                }
+            });
+
+            cleanup?.WaitForExit(5000);
+        }
+        catch (InvalidOperationException)
+        {
+        }
+        catch (Win32Exception)
+        {
         }
     }
 }

@@ -6,7 +6,6 @@ public interface IRunnerProvider
 
     Task<StepExecutionResult> ExecuteStepAsync(
         StepExecutionRequest request,
-        TextWriter output,
-        TextWriter error,
+        IStepOutputSink output,
         CancellationToken cancellationToken = default);
 }

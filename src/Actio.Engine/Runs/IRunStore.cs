@@ -8,13 +8,11 @@ public interface IRunStore
 
     Task<RunStoragePaths> InitializeRunAsync(string runId, CancellationToken cancellationToken = default);
 
-    Task<string?> WriteStepLogAsync(
+    Task<IStepLog> OpenStepLogAsync(
         string runId,
         string jobName,
         int stepIndex,
         string stepName,
-        IReadOnlyList<string> outputLines,
-        IReadOnlyList<string> errorLines,
         CancellationToken cancellationToken = default);
 
     Task<ArtifactSaveResult> SaveArtifactsAsync(

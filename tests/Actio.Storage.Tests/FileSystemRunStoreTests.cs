@@ -38,25 +38,27 @@ public sealed class FileSystemRunStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task WriteStepLogAsync_WritesCapturedOutputAndErrorLines()
+    public async Task OpenStepLogAsync_WritesCapturedOutputAndErrorLines()
     {
         var store = new FileSystemRunStore(_root);
         var runId = "run-logs";
         await store.InitializeRunAsync(runId);
 
-        var logPath = await store.WriteStepLogAsync(
+        await using var log = await store.OpenStepLogAsync(
             runId,
             "test",
             0,
-            "Run tests",
-            ["hello"],
-            ["warning"]);
+            "Run tests");
+        await log.WriteOutputLineAsync("hello");
+        await log.WriteErrorLineAsync("warning");
 
-        Assert.NotNull(logPath);
-        Assert.True(File.Exists(logPath));
-        var log = await File.ReadAllTextAsync(logPath);
-        Assert.Contains("[stdout] hello", log);
-        Assert.Contains("[stderr] warning", log);
+        Assert.NotNull(log.LogPath);
+        Assert.True(File.Exists(log.LogPath));
+        using var stream = File.Open(log.LogPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var reader = new StreamReader(stream);
+        var content = await reader.ReadToEndAsync();
+        Assert.Contains("[stdout] hello", content);
+        Assert.Contains("[stderr] warning", content);
     }
 
     [Fact]

@@ -18,18 +18,18 @@ public sealed class FileSystemRunStore : IRunStore
 
     public FileSystemRunStore(string actioHome)
     {
-        ActioHomePath = Path.GetFullPath(actioHome);
+        ActioHomePath = actioHome;
     }
 
     public string ActioHomePath { get; }
 
-    public string RunsPath => Path.Combine(ActioHomePath, "runs");
+    public string RunsPath => Path.Combine(GetFullActioHomePath(), "runs");
 
-    public string LogsPath => Path.Combine(ActioHomePath, "logs");
+    public string LogsPath => Path.Combine(GetFullActioHomePath(), "logs");
 
-    public string ArtifactsPath => Path.Combine(ActioHomePath, "artifacts");
+    public string ArtifactsPath => Path.Combine(GetFullActioHomePath(), "artifacts");
 
-    public string CachePath => Path.Combine(ActioHomePath, "cache");
+    public string CachePath => Path.Combine(GetFullActioHomePath(), "cache");
 
     public string CreateRunId()
     {
@@ -54,13 +54,11 @@ public sealed class FileSystemRunStore : IRunStore
             Path.Combine(runDirectory, "run.json")));
     }
 
-    public async Task<string?> WriteStepLogAsync(
+    public async Task<IStepLog> OpenStepLogAsync(
         string runId,
         string jobName,
         int stepIndex,
         string stepName,
-        IReadOnlyList<string> outputLines,
-        IReadOnlyList<string> errorLines,
         CancellationToken cancellationToken = default)
     {
         var logDirectory = Path.Combine(
@@ -72,13 +70,13 @@ public sealed class FileSystemRunStore : IRunStore
         var logPath = Path.Combine(
             logDirectory,
             $"{stepIndex + 1:D3}-{SanitizePathSegment(stepName)}.log");
-        var lines = outputLines
-            .Select(line => $"[stdout] {line}")
-            .Concat(errorLines.Select(line => $"[stderr] {line}"))
-            .ToArray();
+        var writer = new StreamWriter(File.Open(logPath, FileMode.Create, FileAccess.Write, FileShare.Read))
+        {
+            AutoFlush = true
+        };
 
-        await File.WriteAllLinesAsync(logPath, lines, cancellationToken);
-        return logPath;
+        await writer.FlushAsync(cancellationToken);
+        return new FileSystemStepLog(logPath, writer);
     }
 
     public Task<ArtifactSaveResult> SaveArtifactsAsync(
@@ -166,6 +164,11 @@ public sealed class FileSystemRunStore : IRunStore
             Directory.CreateDirectory(Path.GetDirectoryName(targetFile)!);
             File.Copy(sourceFile, targetFile, overwrite: true);
         }
+    }
+
+    private string GetFullActioHomePath()
+    {
+        return Path.GetFullPath(ActioHomePath);
     }
 
     private static bool IsUnderRoot(string path, string root)

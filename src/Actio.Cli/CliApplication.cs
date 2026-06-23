@@ -100,12 +100,12 @@ public sealed class CliApplication
         if (!executionResult.Success)
         {
             WriteExecutionErrors(error, executionResult.Errors);
-            output.WriteLine($"Failed ({executionResult.SuccessfulSteps} / {executionResult.TotalSteps})");
+            output.WriteLine(FormatSummary("Failed", executionResult));
             WriteOutputsAndArtifacts(output, executionResult);
             return ExitCodes.ValidationError;
         }
 
-        output.WriteLine($"Success ({executionResult.SuccessfulSteps} / {executionResult.TotalSteps})");
+        output.WriteLine(FormatSummary("Success", executionResult));
         WriteOutputsAndArtifacts(output, executionResult);
         return ExitCodes.Success;
     }
@@ -162,5 +162,28 @@ public sealed class CliApplication
                 output.WriteLine($" - {item.Name}: {item.StoredPath}");
             }
         }
+    }
+
+    private static string FormatSummary(string status, WorkflowExecutionResult result)
+    {
+        var details = new List<string>();
+
+        if (result.FailedSteps > 0)
+        {
+            details.Add($"{result.FailedSteps} failed");
+        }
+
+        if (result.SkippedSteps > 0)
+        {
+            details.Add($"{result.SkippedSteps} skipped");
+        }
+
+        if (!result.Success && result.FailedSteps == 0)
+        {
+            details.Add("workflow error");
+        }
+
+        var suffix = details.Count == 0 ? string.Empty : $", {string.Join(", ", details)}";
+        return $"{status} ({result.SuccessfulSteps} / {result.TotalSteps}{suffix})";
     }
 }

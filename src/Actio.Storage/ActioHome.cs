@@ -7,7 +7,18 @@ public static class ActioHome
         var overridePath = Environment.GetEnvironmentVariable("ACTIO_HOME");
         if (!string.IsNullOrWhiteSpace(overridePath))
         {
-            return Path.GetFullPath(overridePath);
+            try
+            {
+                return Path.GetFullPath(overridePath);
+            }
+            catch (ArgumentException)
+            {
+                return overridePath;
+            }
+            catch (NotSupportedException)
+            {
+                return overridePath;
+            }
         }
 
         if (OperatingSystem.IsWindows())
