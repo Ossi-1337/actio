@@ -1,6 +1,7 @@
 using Actio.Core.Workflows;
 using Actio.Engine.Execution;
 using Actio.Runner.Docker;
+using Actio.Storage;
 
 namespace Actio.Cli;
 
@@ -15,7 +16,7 @@ public sealed class CliApplication
         : this(
             new WorkflowFileResolver(),
             new WorkflowParser(),
-            new WorkflowExecutor(new DockerRunnerProvider()),
+            new WorkflowExecutor(new DockerRunnerProvider(), new FileSystemRunStore()),
             new CliParser())
     {
     }
@@ -91,7 +92,7 @@ public sealed class CliApplication
         var workflow = parseResult.Workflow!;
         var executionResult = await _executor.ExecuteAsync(
             workflow,
-            new WorkflowExecutionOptions(resolution.ProjectRoot!),
+            new WorkflowExecutionOptions(resolution.ProjectRoot!, resolution.WorkflowPath),
             output,
             error,
             cancellationToken);
@@ -100,10 +101,12 @@ public sealed class CliApplication
         {
             WriteExecutionErrors(error, executionResult.Errors);
             output.WriteLine($"Failed ({executionResult.SuccessfulSteps} / {executionResult.TotalSteps})");
+            WriteOutputsAndArtifacts(output, executionResult);
             return ExitCodes.ValidationError;
         }
 
         output.WriteLine($"Success ({executionResult.SuccessfulSteps} / {executionResult.TotalSteps})");
+        WriteOutputsAndArtifacts(output, executionResult);
         return ExitCodes.Success;
     }
 
@@ -135,6 +138,29 @@ public sealed class CliApplication
         foreach (var item in errors)
         {
             error.WriteLine($" - {item}");
+        }
+    }
+
+    private static void WriteOutputsAndArtifacts(TextWriter output, WorkflowExecutionResult result)
+    {
+        if (result.Outputs.Count > 0)
+        {
+            output.WriteLine("output:");
+
+            foreach (var item in result.Outputs)
+            {
+                output.WriteLine($" - {item.JobName}.{item.Name}={item.Value}");
+            }
+        }
+
+        if (result.Artifacts.Count > 0)
+        {
+            output.WriteLine("artifacts:");
+
+            foreach (var item in result.Artifacts)
+            {
+                output.WriteLine($" - {item.Name}: {item.StoredPath}");
+            }
         }
     }
 }

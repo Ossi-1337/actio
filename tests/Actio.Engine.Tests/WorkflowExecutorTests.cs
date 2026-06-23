@@ -70,10 +70,48 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_RejectsNeedsUntilJobDagMilestone()
+    public async Task ExecuteAsync_RunsJobsInDependencyOrder()
     {
-        var runner = new FakeRunnerProvider([0]);
+        var runner = new FakeRunnerProvider([0, 0]);
         var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                ["prepare"],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Test", "dotnet test", null)]),
+            new WorkflowJob(
+                "prepare",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Prepare", "dotnet restore", null)]));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success);
+        Assert.Equal(["prepare", "test"], runner.Requests.Select(request => request.JobName));
+        Assert.Equal(["Prepare", "Test"], runner.Requests.Select(request => request.StepName));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_SkipsDependentJobAfterFailedDependency()
+    {
+        var runner = new FakeRunnerProvider([42]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "prepare",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Prepare", "exit 42", null)]),
             new WorkflowJob(
                 "test",
                 ["prepare"],
@@ -89,8 +127,79 @@ public sealed class WorkflowExecutorTests
             TextWriter.Null);
 
         Assert.False(result.Success);
+        Assert.Equal(0, result.SuccessfulSteps);
+        Assert.Equal(2, result.TotalSteps);
+        Assert.Single(runner.Requests);
+        Assert.Contains(result.Errors, error => error.Contains("exit code 42", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_EvaluatesIfConditionFromCapturedOutputs()
+    {
+        var runner = new FakeRunnerProvider(
+            [
+                new StepExecutionResult(0, ["actio.output changed=true"]),
+                new StepExecutionResult(0)
+            ]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "prepare",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Detect changes", "echo actio.output changed=true", null)]),
+            new WorkflowJob(
+                "test",
+                ["prepare"],
+                "${{ needs.prepare.outputs.changed == 'true' }}",
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Test", "dotnet test", null)]));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success);
+        Assert.Equal(["prepare", "test"], runner.Requests.Select(request => request.JobName));
+        var output = Assert.Single(result.Outputs);
+        Assert.Equal("prepare", output.JobName);
+        Assert.Equal("changed", output.Name);
+        Assert.Equal("true", output.Value);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ReturnsFailureForCircularDependency()
+    {
+        var runner = new FakeRunnerProvider([0]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "one",
+                ["two"],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("One", "echo one", null)]),
+            new WorkflowJob(
+                "two",
+                ["one"],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Two", "echo two", null)]));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
         Assert.Empty(runner.Requests);
-        Assert.Contains(result.Errors, error => error.Contains("job DAG milestone", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("circular", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -132,12 +241,17 @@ public sealed class WorkflowExecutorTests
 
     private sealed class FakeRunnerProvider : IRunnerProvider
     {
-        private readonly Queue<int> _exitCodes;
+        private readonly Queue<StepExecutionResult> _results;
         private readonly bool _supportsRunner;
 
         public FakeRunnerProvider(IEnumerable<int> exitCodes, bool supportsRunner = true)
+            : this(exitCodes.Select(exitCode => new StepExecutionResult(exitCode)), supportsRunner)
         {
-            _exitCodes = new Queue<int>(exitCodes);
+        }
+
+        public FakeRunnerProvider(IEnumerable<StepExecutionResult> results, bool supportsRunner = true)
+        {
+            _results = new Queue<StepExecutionResult>(results);
             _supportsRunner = supportsRunner;
         }
 
@@ -155,7 +269,7 @@ public sealed class WorkflowExecutorTests
             CancellationToken cancellationToken = default)
         {
             Requests.Add(request);
-            return Task.FromResult(new StepExecutionResult(_exitCodes.Dequeue()));
+            return Task.FromResult(_results.Dequeue());
         }
     }
 }

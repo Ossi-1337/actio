@@ -17,6 +17,9 @@ public sealed class WorkflowParserTests
                 runs-on: ubuntu-latest
                 outputs:
                   changed: "true"
+                artifacts:
+                  - name: coverage
+                    path: coverage.txt
                 steps:
                   - name: Prepare
                     run: dotnet restore
@@ -34,6 +37,7 @@ public sealed class WorkflowParserTests
         Assert.Equal(2, result.Workflow.Jobs.Count);
         Assert.Equal(2, result.Workflow.StepCount);
         Assert.Equal(["prepare"], result.Workflow.Jobs["test"].Needs);
+        Assert.Equal("coverage.txt", result.Workflow.Jobs["prepare"].Artifacts[0].Path);
     }
 
     [Fact]

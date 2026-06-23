@@ -1,6 +1,7 @@
 using Actio.Cli;
 using Actio.Core.Workflows;
 using Actio.Engine.Execution;
+using Actio.Engine.Runs;
 
 namespace Actio.Cli.Tests;
 
@@ -225,6 +226,42 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Contains("Failed (0 / 1)", output.ToString());
         Assert.Contains("Workflow execution failed:", error.ToString());
         Assert.Contains("step failed", error.ToString());
+    }
+
+    [Fact]
+    public void Run_PrintsOutputsAndArtifactsFromExecutionResult()
+    {
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        var artifactPath = Path.Combine(_root, "actio-home", "artifacts", "run-1", "test", "report.txt");
+        var executor = new FakeWorkflowExecutor(
+            new WorkflowExecutionResult(
+                WorkflowExecutionStatus.Success,
+                1,
+                1,
+                [],
+                [new WorkflowRunOutput("test", "coverage", "87")],
+                [new WorkflowRunArtifact("test", "report", "report.txt", artifactPath)]));
+
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var exitCode = CreateApplication(executor).Run(["ci.yml"], _root, output, error);
+
+        Assert.Equal(ExitCodes.Success, exitCode);
+        Assert.Contains("output:", output.ToString());
+        Assert.Contains(" - test.coverage=87", output.ToString());
+        Assert.Contains("artifacts:", output.ToString());
+        Assert.Contains($" - report: {artifactPath}", output.ToString());
     }
 
     private CliRunResult RunWithFakeExecutor(string[] args)

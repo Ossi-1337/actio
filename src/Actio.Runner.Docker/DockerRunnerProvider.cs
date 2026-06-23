@@ -31,8 +31,9 @@ public sealed class DockerRunnerProvider : IRunnerProvider
     {
         if (!_imageResolver.TryResolveImage(request.RunsOn, out var image))
         {
-            error.WriteLine($"Runner '{request.RunsOn}' is not mapped to a Docker image.");
-            return new StepExecutionResult(1);
+            var message = $"Runner '{request.RunsOn}' is not mapped to a Docker image.";
+            error.WriteLine(message);
+            return new StepExecutionResult(1, errorLines: [message]);
         }
 
         using var process = new Process
@@ -45,23 +46,27 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         {
             if (!process.Start())
             {
-                error.WriteLine("Docker process could not be started.");
-                return new StepExecutionResult(1);
+                const string message = "Docker process could not be started.";
+                error.WriteLine(message);
+                return new StepExecutionResult(1, errorLines: [message]);
             }
         }
         catch (Win32Exception ex)
         {
-            error.WriteLine($"Docker could not be started: {ex.Message}");
-            return new StepExecutionResult(1);
+            var message = $"Docker could not be started: {ex.Message}";
+            error.WriteLine(message);
+            return new StepExecutionResult(1, errorLines: [message]);
         }
 
-        var outputTask = RedirectLinesAsync(process.StandardOutput, output, cancellationToken);
-        var errorTask = RedirectLinesAsync(process.StandardError, error, cancellationToken);
+        var outputLines = new List<string>();
+        var errorLines = new List<string>();
+        var outputTask = RedirectLinesAsync(process.StandardOutput, output, outputLines, cancellationToken);
+        var errorTask = RedirectLinesAsync(process.StandardError, error, errorLines, cancellationToken);
 
         await process.WaitForExitAsync(cancellationToken);
         await Task.WhenAll(outputTask, errorTask);
 
-        return new StepExecutionResult(process.ExitCode);
+        return new StepExecutionResult(process.ExitCode, outputLines, errorLines);
     }
 
     private static ProcessStartInfo CreateStartInfo(StepExecutionRequest request, string image)
@@ -99,10 +104,12 @@ public sealed class DockerRunnerProvider : IRunnerProvider
     private static async Task RedirectLinesAsync(
         TextReader reader,
         TextWriter writer,
+        List<string> lines,
         CancellationToken cancellationToken)
     {
         while (await reader.ReadLineAsync(cancellationToken) is { } line)
         {
+            lines.Add(line);
             writer.WriteLine(line);
         }
     }

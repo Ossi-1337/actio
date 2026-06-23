@@ -1,17 +1,12 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
     <ProjectReference Include="..\Actio.Core\Actio.Core.csproj" />
     <ProjectReference Include="..\Actio.Engine\Actio.Engine.csproj" />
-    <ProjectReference Include="..\Actio.Runner.Docker\Actio.Runner.Docker.csproj" />
-    <ProjectReference Include="..\Actio.Storage\Actio.Storage.csproj" />
   </ItemGroup>
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
-    <AssemblyName>actio</AssemblyName>
-    <Version>0.1.0</Version>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>

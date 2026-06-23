@@ -18,7 +18,14 @@ public sealed partial class WorkflowParser
         "if",
         "runs-on",
         "outputs",
+        "artifacts",
         "steps"
+    };
+
+    private static readonly HashSet<string> ArtifactKeys = new(StringComparer.Ordinal)
+    {
+        "name",
+        "path"
     };
 
     private static readonly HashSet<string> StepKeys = new(StringComparer.Ordinal)
@@ -116,11 +123,12 @@ public sealed partial class WorkflowParser
             var condition = ReadOptionalScalar(errors, jobMap, "if", $"workflow.jobs.{jobName}.if");
             var runsOn = ReadRequiredScalar(errors, jobMap, "runs-on", $"workflow.jobs.{jobName}.runs-on");
             var outputs = ReadOptionalStringMap(errors, jobMap, "outputs", $"workflow.jobs.{jobName}.outputs");
+            var artifacts = ReadArtifacts(errors, jobMap, jobName);
             var steps = ReadSteps(errors, jobMap, jobName);
 
             if (runsOn is not null)
             {
-                jobs[jobName] = new WorkflowJob(jobName, needs, condition, runsOn, outputs, steps);
+                jobs[jobName] = new WorkflowJob(jobName, needs, condition, runsOn, outputs, artifacts, steps);
             }
         }
 
@@ -167,6 +175,47 @@ public sealed partial class WorkflowParser
         }
 
         return needs;
+    }
+
+    private static IReadOnlyList<WorkflowArtifact> ReadArtifacts(List<string> errors, YamlMappingNode jobMap, string jobName)
+    {
+        var path = $"workflow.jobs.{jobName}.artifacts";
+
+        if (!TryGet(jobMap, "artifacts", out var artifactsNode))
+        {
+            return [];
+        }
+
+        if (artifactsNode is not YamlSequenceNode sequence)
+        {
+            errors.Add($"{path} must be a list.");
+            return [];
+        }
+
+        var artifacts = new List<WorkflowArtifact>();
+
+        for (var index = 0; index < sequence.Children.Count; index++)
+        {
+            var itemPath = $"{path}[{index}]";
+
+            if (sequence.Children[index] is not YamlMappingNode artifactMap)
+            {
+                errors.Add($"{itemPath} must be a mapping.");
+                continue;
+            }
+
+            AddUnknownKeyErrors(errors, artifactMap, ArtifactKeys, itemPath);
+
+            var name = ReadRequiredScalar(errors, artifactMap, "name", $"{itemPath}.name");
+            var artifactPath = ReadRequiredScalar(errors, artifactMap, "path", $"{itemPath}.path");
+
+            if (name is not null && artifactPath is not null)
+            {
+                artifacts.Add(new WorkflowArtifact(name, artifactPath));
+            }
+        }
+
+        return artifacts;
     }
 
     private static IReadOnlyList<WorkflowStep> ReadSteps(List<string> errors, YamlMappingNode jobMap, string jobName)
