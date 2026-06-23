@@ -133,11 +133,14 @@ public sealed class CliApplication
         var actioHome = command.ActioHome ?? ActioHome.Resolve();
         var url = command.Url ?? ActioWebDefaults.DefaultUrl;
 
-        output.WriteLine($"Actio web UI listening on {url}");
+        if (!command.Background)
+        {
+            output.WriteLine($"Actio web UI listening on {url}");
+        }
 
         try
         {
-            await new ActioWebServer().RunAsync(new ActioWebOptions(projectRoot, actioHome, url), cancellationToken);
+            await new ActioWebServer().RunAsync(new ActioWebOptions(projectRoot, actioHome, url, command.Background), cancellationToken);
             return ExitCodes.Success;
         }
         catch (IOException ex)
@@ -242,4 +245,5 @@ public sealed class CliApplication
         var suffix = details.Count == 0 ? string.Empty : $", {string.Join(", ", details)}";
         return $"{status} ({result.SuccessfulSteps} / {result.TotalSteps}{suffix})";
     }
+
 }

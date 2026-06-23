@@ -3,4 +3,5 @@ namespace Actio.Web;
 public sealed record ActioWebOptions(
     string ProjectRoot,
     string ActioHome,
-    string Url = ActioWebDefaults.DefaultUrl);
+    string Url = ActioWebDefaults.DefaultUrl,
+    bool Background = false);

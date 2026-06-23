@@ -92,6 +92,7 @@ public sealed class CliParser
         string? projectRoot = null;
         string? actioHome = null;
         string? url = null;
+        var background = false;
 
         for (var index = 1; index < args.Count; index++)
         {
@@ -99,6 +100,12 @@ public sealed class CliParser
             if (!option.StartsWith("-", StringComparison.Ordinal))
             {
                 return CliCommand.UsageError($"Unexpected argument '{option}' for 'web'.");
+            }
+
+            if (string.Equals(option, "--background", StringComparison.Ordinal))
+            {
+                background = true;
+                continue;
             }
 
             if (index + 1 >= args.Count)
@@ -128,7 +135,7 @@ public sealed class CliParser
             }
         }
 
-        return CliCommand.RunWeb(projectRoot, actioHome, url);
+        return CliCommand.RunWeb(projectRoot, actioHome, url, background);
     }
 
     private static bool IsHelp(string arg)

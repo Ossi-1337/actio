@@ -111,9 +111,20 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         startInfo.ArgumentList.Add(image);
         startInfo.ArgumentList.Add("sh");
         startInfo.ArgumentList.Add("-lc");
-        startInfo.ArgumentList.Add(request.Command);
+        startInfo.ArgumentList.Add(BuildShellScript(request.Command));
 
         return startInfo;
+    }
+
+    internal static string BuildShellScript(string command)
+    {
+        return $"""
+            set -e
+            if (set -o pipefail) 2>/dev/null; then
+              set -o pipefail
+            fi
+            {command}
+            """;
     }
 
     private static async Task RedirectOutputLinesAsync(

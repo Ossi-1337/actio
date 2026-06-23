@@ -133,7 +133,13 @@ public sealed class LocalWebServerLauncher : ILocalWebServerLauncher
 
         try
         {
-            Process.Start(startInfo);
+            using var process = Process.Start(startInfo);
+            if (process is null)
+            {
+                error.WriteLine("Actio web UI could not be started.");
+                return false;
+            }
+
             return true;
         }
         catch (InvalidOperationException ex)
@@ -161,8 +167,8 @@ public sealed class LocalWebServerLauncher : ILocalWebServerLauncher
         {
             FileName = processPath,
             WorkingDirectory = projectRoot,
-            UseShellExecute = false,
-            CreateNoWindow = true
+            UseShellExecute = true,
+            WindowStyle = ProcessWindowStyle.Hidden
         };
 
         if (IsDotnetHost(processPath))
@@ -182,7 +188,7 @@ public sealed class LocalWebServerLauncher : ILocalWebServerLauncher
         startInfo.ArgumentList.Add(_actioHome);
         startInfo.ArgumentList.Add("--url");
         startInfo.ArgumentList.Add(_url);
-        startInfo.Environment["ACTIO_HOME"] = _actioHome;
+        startInfo.ArgumentList.Add("--background");
 
         return startInfo;
     }
