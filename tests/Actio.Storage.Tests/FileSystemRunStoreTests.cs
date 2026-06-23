@@ -38,6 +38,31 @@ public sealed class FileSystemRunStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task ListRunRecordsAsync_ReturnsSavedRunRecords()
+    {
+        var store = new FileSystemRunStore(_root);
+        await store.InitializeRunAsync("run-1");
+        await store.SaveRunRecordAsync(new WorkflowRunRecord(
+            "run-1",
+            "CI",
+            "C:\\repo\\.workflows\\ci.yml",
+            "C:\\repo",
+            "Success",
+            DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow,
+            1,
+            [],
+            [],
+            [],
+            []));
+
+        var records = await store.ListRunRecordsAsync();
+
+        var record = Assert.Single(records);
+        Assert.Equal("run-1", record.RunId);
+    }
+
+    [Fact]
     public async Task OpenStepLogAsync_WritesCapturedOutputAndErrorLines()
     {
         var store = new FileSystemRunStore(_root);

@@ -5,6 +5,7 @@
     <Project Path="src/Actio.Engine/Actio.Engine.csproj" />
     <Project Path="src/Actio.Runner.Docker/Actio.Runner.Docker.csproj" />
     <Project Path="src/Actio.Storage/Actio.Storage.csproj" />
+    <Project Path="src/Actio.Web/Actio.Web.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Actio.Cli.Tests/Actio.Cli.Tests.csproj" />
@@ -12,5 +13,6 @@
     <Project Path="tests/Actio.Engine.Tests/Actio.Engine.Tests.csproj" />
     <Project Path="tests/Actio.Runner.Docker.Tests/Actio.Runner.Docker.Tests.csproj" />
     <Project Path="tests/Actio.Storage.Tests/Actio.Storage.Tests.csproj" />
+    <Project Path="tests/Actio.Web.Tests/Actio.Web.Tests.csproj" />
   </Folder>
 </Solution>

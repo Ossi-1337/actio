@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Actio</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">A</span>
+        <span>Actio</span>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-title">Workflows</div>
+        <nav id="workflow-list" class="workflow-list"></nav>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <h1 id="page-title">Workflow runs</h1>
+          <div id="project-root" class="muted"></div>
+        </div>
+        <div class="filters">
+          <input id="run-filter" type="search" placeholder="Filter workflow runs" autocomplete="off">
+        </div>
+      </header>
+
+      <section class="content-grid">
+        <section class="panel run-panel">
+          <div class="panel-head">
+            <h2>Runs</h2>
+            <span id="run-count" class="muted"></span>
+          </div>
+          <div id="run-list" class="run-list"></div>
+        </section>
+
+        <section id="detail" class="detail"></section>
+      </section>
+    </main>
+  </div>
+
+  <script src="/assets/app.js"></script>
+</body>
+</html>

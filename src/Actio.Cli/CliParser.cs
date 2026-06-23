@@ -14,6 +14,11 @@ public sealed class CliParser
             return ParseRunCommand(args);
         }
 
+        if (string.Equals(args[0], "web", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseWebCommand(args);
+        }
+
         if (args.Count == 1)
         {
             return ParseSingleArgument(args[0]);
@@ -75,6 +80,55 @@ public sealed class CliParser
         }
 
         return CliCommand.RunWorkflow(args[1]);
+    }
+
+    private static CliCommand ParseWebCommand(IReadOnlyList<string> args)
+    {
+        if (args.Count == 2 && IsHelp(args[1]))
+        {
+            return new CliCommand(CliCommandKind.ShowWebHelp);
+        }
+
+        string? projectRoot = null;
+        string? actioHome = null;
+        string? url = null;
+
+        for (var index = 1; index < args.Count; index++)
+        {
+            var option = args[index];
+            if (!option.StartsWith("-", StringComparison.Ordinal))
+            {
+                return CliCommand.UsageError($"Unexpected argument '{option}' for 'web'.");
+            }
+
+            if (index + 1 >= args.Count)
+            {
+                return CliCommand.UsageError($"Missing value for '{option}'.");
+            }
+
+            var value = args[++index];
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return CliCommand.UsageError($"Value for '{option}' cannot be empty.");
+            }
+
+            switch (option)
+            {
+                case "--project-root":
+                    projectRoot = value;
+                    break;
+                case "--actio-home":
+                    actioHome = value;
+                    break;
+                case "--url":
+                    url = value;
+                    break;
+                default:
+                    return CliCommand.UsageError($"Unknown option '{option}' for 'web'.");
+            }
+        }
+
+        return CliCommand.RunWeb(projectRoot, actioHome, url);
     }
 
     private static bool IsHelp(string arg)

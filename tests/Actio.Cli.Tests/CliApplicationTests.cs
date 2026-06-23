@@ -66,6 +66,18 @@ public sealed class CliApplicationTests : IDisposable
     }
 
     [Fact]
+    public void Run_PrintsWebHelp()
+    {
+        var result = RunWithFakeExecutor(["web", "--help"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Contains("Actio web - start the local web UI.", result.Output);
+        Assert.Contains("--project-root", result.Output);
+        Assert.Equal(string.Empty, result.Error);
+        Assert.Null(result.Executor.Workflow);
+    }
+
+    [Fact]
     public void Run_PrintsVersion()
     {
         var result = RunWithFakeExecutor(["--version"]);
@@ -124,6 +136,40 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Contains("Success (1 / 1)", result.Output);
         Assert.Equal("CI", result.Executor.Workflow!.Name);
         Assert.Equal(string.Empty, result.Error);
+    }
+
+    [Fact]
+    public void Run_PrintsViewPipelineLink()
+    {
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var launcher = new FakeWebServerLauncher("http://127.0.0.1:17345/runs/run-1");
+        var executor = new FakeWorkflowExecutor(
+            new WorkflowExecutionResult(
+                WorkflowExecutionStatus.Success,
+                1,
+                1,
+                [],
+                runId: "run-1"));
+
+        var exitCode = CreateApplication(executor, launcher).Run(["ci.yml"], _root, output, error);
+
+        Assert.Equal(ExitCodes.Success, exitCode);
+        Assert.Contains("View pipeline: http://127.0.0.1:17345/runs/run-1", output.ToString());
+        Assert.Equal("run-1", launcher.RunId);
+        Assert.Equal(_root, launcher.ProjectRoot);
     }
 
     [Fact]
@@ -326,9 +372,11 @@ public sealed class CliApplicationTests : IDisposable
         return new CliRunResult(exitCode, output.ToString(), error.ToString(), executor);
     }
 
-    private static CliApplication CreateApplication(FakeWorkflowExecutor executor)
+    private static CliApplication CreateApplication(
+        FakeWorkflowExecutor executor,
+        ILocalWebServerLauncher? launcher = null)
     {
-        return new CliApplication(new WorkflowFileResolver(), new WorkflowParser(), executor);
+        return new CliApplication(new WorkflowFileResolver(), new WorkflowParser(), executor, webServerLauncher: launcher);
     }
 
     private sealed record CliRunResult(
@@ -365,6 +413,31 @@ public sealed class CliApplicationTests : IDisposable
         {
             Workflow = workflow;
             return Task.FromResult(_result);
+        }
+    }
+
+    private sealed class FakeWebServerLauncher : ILocalWebServerLauncher
+    {
+        private readonly string _url;
+
+        public FakeWebServerLauncher(string url)
+        {
+            _url = url;
+        }
+
+        public string? ProjectRoot { get; private set; }
+
+        public string? RunId { get; private set; }
+
+        public Task<string?> EnsureStartedAsync(
+            string projectRoot,
+            string? runId,
+            TextWriter error,
+            CancellationToken cancellationToken = default)
+        {
+            ProjectRoot = projectRoot;
+            RunId = runId;
+            return Task.FromResult<string?>(_url);
         }
     }
 }

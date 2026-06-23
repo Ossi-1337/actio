@@ -153,6 +153,59 @@ public sealed class FileSystemRunStore : IRunStore
         return await JsonSerializer.DeserializeAsync<WorkflowRunRecord>(stream, JsonOptions, cancellationToken);
     }
 
+    public async Task<IReadOnlyList<WorkflowRunRecord>> ListRunRecordsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (!Directory.Exists(RunsPath))
+        {
+            return [];
+        }
+
+        var records = new List<WorkflowRunRecord>();
+
+        string[] runPaths;
+        try
+        {
+            runPaths = Directory.EnumerateFiles(RunsPath, "run.json", SearchOption.AllDirectories).ToArray();
+        }
+        catch (IOException)
+        {
+            return [];
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return [];
+        }
+
+        foreach (var runPath in runPaths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            try
+            {
+                await using var stream = File.OpenRead(runPath);
+                var record = await JsonSerializer.DeserializeAsync<WorkflowRunRecord>(stream, JsonOptions, cancellationToken);
+                if (record is not null)
+                {
+                    records.Add(record);
+                }
+            }
+            catch (JsonException)
+            {
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+        }
+
+        return records
+            .OrderByDescending(record => record.StartedAt)
+            .ToArray();
+    }
+
     private static void CopyDirectory(string sourceDirectory, string targetDirectory)
     {
         Directory.CreateDirectory(targetDirectory);

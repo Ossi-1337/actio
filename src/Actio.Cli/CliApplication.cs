@@ -2,6 +2,7 @@ using Actio.Core.Workflows;
 using Actio.Engine.Execution;
 using Actio.Runner.Docker;
 using Actio.Storage;
+using Actio.Web;
 
 namespace Actio.Cli;
 
@@ -11,13 +12,15 @@ public sealed class CliApplication
     private readonly WorkflowParser _parser;
     private readonly IWorkflowExecutor _executor;
     private readonly CliParser _cliParser;
+    private readonly ILocalWebServerLauncher _webServerLauncher;
 
     public CliApplication()
         : this(
             new WorkflowFileResolver(),
             new WorkflowParser(),
             new WorkflowExecutor(new DockerRunnerProvider(), new FileSystemRunStore()),
-            new CliParser())
+            new CliParser(),
+            new LocalWebServerLauncher())
     {
     }
 
@@ -25,12 +28,14 @@ public sealed class CliApplication
         WorkflowFileResolver resolver,
         WorkflowParser parser,
         IWorkflowExecutor executor,
-        CliParser? cliParser = null)
+        CliParser? cliParser = null,
+        ILocalWebServerLauncher? webServerLauncher = null)
     {
         _resolver = resolver;
         _parser = parser;
         _executor = executor;
         _cliParser = cliParser ?? new CliParser();
+        _webServerLauncher = webServerLauncher ?? new LocalWebServerLauncher();
     }
 
     public int Run(string[] args, string workingDirectory, TextWriter output, TextWriter error)
@@ -55,6 +60,9 @@ public sealed class CliApplication
             case CliCommandKind.ShowRunHelp:
                 output.WriteLine(CliHelpText.Run);
                 return ExitCodes.Success;
+            case CliCommandKind.ShowWebHelp:
+                output.WriteLine(CliHelpText.Web);
+                return ExitCodes.Success;
             case CliCommandKind.ShowVersion:
                 output.WriteLine($"actio {CliVersion.GetVersion()}");
                 return ExitCodes.Success;
@@ -63,6 +71,8 @@ public sealed class CliApplication
                 return ExitCodes.UsageError;
             case CliCommandKind.RunWorkflow:
                 return await RunWorkflowAsync(command.WorkflowName!, workingDirectory, output, error, cancellationToken);
+            case CliCommandKind.RunWeb:
+                return await RunWebAsync(command, workingDirectory, output, error, cancellationToken);
             default:
                 throw new InvalidOperationException($"Unsupported CLI command kind '{command.Kind}'.");
         }
@@ -102,12 +112,39 @@ public sealed class CliApplication
             WriteExecutionErrors(error, executionResult.Errors);
             output.WriteLine(FormatSummary("Failed", executionResult));
             WriteOutputsAndArtifacts(output, executionResult);
+            await WriteViewPipelineLinkAsync(resolution.ProjectRoot!, executionResult.RunId, output, error, cancellationToken);
             return ExitCodes.ValidationError;
         }
 
         output.WriteLine(FormatSummary("Success", executionResult));
         WriteOutputsAndArtifacts(output, executionResult);
+        await WriteViewPipelineLinkAsync(resolution.ProjectRoot!, executionResult.RunId, output, error, cancellationToken);
         return ExitCodes.Success;
+    }
+
+    private async Task<int> RunWebAsync(
+        CliCommand command,
+        string workingDirectory,
+        TextWriter output,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        var projectRoot = command.ProjectRoot ?? _resolver.FindProjectRoot(workingDirectory);
+        var actioHome = command.ActioHome ?? ActioHome.Resolve();
+        var url = command.Url ?? ActioWebDefaults.DefaultUrl;
+
+        output.WriteLine($"Actio web UI listening on {url}");
+
+        try
+        {
+            await new ActioWebServer().RunAsync(new ActioWebOptions(projectRoot, actioHome, url), cancellationToken);
+            return ExitCodes.Success;
+        }
+        catch (IOException ex)
+        {
+            error.WriteLine($"Actio web UI failed: {ex.Message}");
+            return ExitCodes.ValidationError;
+        }
     }
 
     private static void WriteUsageError(TextWriter error, string message)
@@ -161,6 +198,25 @@ public sealed class CliApplication
             {
                 output.WriteLine($" - {item.Name}: {item.StoredPath}");
             }
+        }
+    }
+
+    private async Task WriteViewPipelineLinkAsync(
+        string projectRoot,
+        string? runId,
+        TextWriter output,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        if (runId is null)
+        {
+            return;
+        }
+
+        var url = await _webServerLauncher.EnsureStartedAsync(projectRoot, runId, error, cancellationToken);
+        if (url is not null)
+        {
+            output.WriteLine($"View pipeline: {url}");
         }
     }
 
