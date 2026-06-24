@@ -189,6 +189,32 @@ public sealed class CliApplicationTests : IDisposable
     }
 
     [Fact]
+    public void Run_ColorizesSuccessWhenTerminalSupportsAnsi()
+    {
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var formatter = CreateOutputFormatter(output, redirected: false);
+        var executor = new FakeWorkflowExecutor(new WorkflowExecutionResult(WorkflowExecutionStatus.Success, 1, 1, []));
+
+        var exitCode = CreateApplication(executor, outputFormatter: formatter).Run(["ci.yml"], _root, output, error);
+
+        Assert.Equal(ExitCodes.Success, exitCode);
+        Assert.Contains("\u001b[32mSuccess\u001b[0m (1 / 1)", output.ToString());
+    }
+
+    [Fact]
     public void Run_ExecutesWorkflowShorthand()
     {
         File.WriteAllText(
@@ -241,6 +267,7 @@ public sealed class CliApplicationTests : IDisposable
 
         Assert.Equal(ExitCodes.Success, exitCode);
         Assert.Contains("View pipeline: http://127.0.0.1:17345/runs/run-1", output.ToString());
+        Assert.Contains($"Success (1 / 1){Environment.NewLine}{Environment.NewLine}View pipeline:", output.ToString());
         Assert.Equal("run-1", launcher.RunId);
         Assert.Equal(_root, launcher.ProjectRoot);
     }
@@ -348,6 +375,87 @@ public sealed class CliApplicationTests : IDisposable
     }
 
     [Fact]
+    public void Run_ColorizesFailureWhenTerminalSupportsAnsi()
+    {
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var formatter = CreateOutputFormatter(output, redirected: false);
+        var executor = new FakeWorkflowExecutor(
+            new WorkflowExecutionResult(WorkflowExecutionStatus.Failed, 0, 1, ["step failed"], failedSteps: 1));
+
+        var exitCode = CreateApplication(executor, outputFormatter: formatter).Run(["ci.yml"], _root, output, error);
+
+        Assert.Equal(ExitCodes.ValidationError, exitCode);
+        Assert.Contains("\u001b[31mFailed\u001b[0m (0 / 1, 1 failed)", output.ToString());
+    }
+
+    [Fact]
+    public void Run_DoesNotColorizeStatusWhenOutputIsRedirected()
+    {
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var formatter = CreateOutputFormatter(output, redirected: true);
+        var executor = new FakeWorkflowExecutor(new WorkflowExecutionResult(WorkflowExecutionStatus.Success, 1, 1, []));
+
+        var exitCode = CreateApplication(executor, outputFormatter: formatter).Run(["ci.yml"], _root, output, error);
+
+        Assert.Equal(ExitCodes.Success, exitCode);
+        Assert.Contains("Success (1 / 1)", output.ToString());
+        Assert.DoesNotContain("\u001b[", output.ToString());
+    }
+
+    [Fact]
+    public void Run_DoesNotColorizeStatusWhenNoColorIsSet()
+    {
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var formatter = CreateOutputFormatter(output, redirected: false, noColor: string.Empty);
+        var executor = new FakeWorkflowExecutor(new WorkflowExecutionResult(WorkflowExecutionStatus.Success, 1, 1, []));
+
+        var exitCode = CreateApplication(executor, outputFormatter: formatter).Run(["ci.yml"], _root, output, error);
+
+        Assert.Equal(ExitCodes.Success, exitCode);
+        Assert.Contains("Success (1 / 1)", output.ToString());
+        Assert.DoesNotContain("\u001b[", output.ToString());
+    }
+
+    [Fact]
     public void Run_PrintsWorkflowErrorWhenFailureIsNotAStepFailure()
     {
         File.WriteAllText(
@@ -430,9 +538,81 @@ public sealed class CliApplicationTests : IDisposable
 
         Assert.Equal(ExitCodes.Success, exitCode);
         Assert.Contains("output:", output.ToString());
+        Assert.Contains($"Success (1 / 1){Environment.NewLine}{Environment.NewLine}output:", output.ToString());
         Assert.Contains(" - test.coverage=87", output.ToString());
         Assert.Contains("artifacts:", output.ToString());
+        Assert.Contains($" - test.coverage=87{Environment.NewLine}{Environment.NewLine}artifacts:", output.ToString());
         Assert.Contains($" - report: {artifactPath}", output.ToString());
+    }
+
+    [Fact]
+    public void Run_PrintsClickableArtifactPathWhenTerminalSupportsLinks()
+    {
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        var artifactPath = Path.Combine(_root, "actio-home", "artifacts", "run-1", "test", "report.txt");
+        var executor = new FakeWorkflowExecutor(
+            new WorkflowExecutionResult(
+                WorkflowExecutionStatus.Success,
+                1,
+                1,
+                [],
+                artifacts: [new WorkflowRunArtifact("test", "report", "report.txt", artifactPath)]));
+
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var formatter = CreateOutputFormatter(output, redirected: false);
+
+        var exitCode = CreateApplication(executor, outputFormatter: formatter).Run(["ci.yml"], _root, output, error);
+
+        var expectedUri = new Uri(Path.GetFullPath(artifactPath)).AbsoluteUri;
+        Assert.Equal(ExitCodes.Success, exitCode);
+        Assert.Contains($"\u001b]8;;{expectedUri}\u0007{artifactPath}\u001b]8;;\u0007", output.ToString());
+    }
+
+    [Fact]
+    public void Run_PrintsPlainArtifactPathWhenOutputIsRedirected()
+    {
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        var artifactPath = Path.Combine(_root, "actio-home", "artifacts", "run-1", "test", "report.txt");
+        var executor = new FakeWorkflowExecutor(
+            new WorkflowExecutionResult(
+                WorkflowExecutionStatus.Success,
+                1,
+                1,
+                [],
+                artifacts: [new WorkflowRunArtifact("test", "report", "report.txt", artifactPath)]));
+
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var formatter = CreateOutputFormatter(output, redirected: true);
+
+        var exitCode = CreateApplication(executor, outputFormatter: formatter).Run(["ci.yml"], _root, output, error);
+
+        Assert.Equal(ExitCodes.Success, exitCode);
+        Assert.Contains($" - report: {artifactPath}", output.ToString());
+        Assert.DoesNotContain("\u001b]8;;", output.ToString());
     }
 
     private CliRunResult RunWithFakeExecutor(string[] args)
@@ -448,14 +628,27 @@ public sealed class CliApplicationTests : IDisposable
     private static CliApplication CreateApplication(
         FakeWorkflowExecutor executor,
         ILocalWebServerLauncher? launcher = null,
-        IActionCache? actionCache = null)
+        IActionCache? actionCache = null,
+        CliOutputFormatter? outputFormatter = null)
     {
         return new CliApplication(
             new WorkflowFileResolver(),
             new WorkflowParser(),
             executor,
             webServerLauncher: launcher,
-            actionCache: actionCache);
+            actionCache: actionCache,
+            outputFormatter: outputFormatter);
+    }
+
+    private static CliOutputFormatter CreateOutputFormatter(
+        TextWriter consoleOutput,
+        bool redirected,
+        string? noColor = null)
+    {
+        return new CliOutputFormatter(
+            name => string.Equals(name, "NO_COLOR", StringComparison.Ordinal) ? noColor : null,
+            () => redirected,
+            () => consoleOutput);
     }
 
     private sealed record CliRunResult(

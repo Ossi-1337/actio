@@ -15,6 +15,7 @@ public sealed class CliApplication
     private readonly CliParser _cliParser;
     private readonly ILocalWebServerLauncher _webServerLauncher;
     private readonly IActionCache _actionCache;
+    private readonly CliOutputFormatter _outputFormatter;
 
     public CliApplication()
         : this(
@@ -23,7 +24,8 @@ public sealed class CliApplication
             CreateDefaultExecutor(),
             new CliParser(),
             new LocalWebServerLauncher(),
-            new FileSystemActionCache())
+            new FileSystemActionCache(),
+            new CliOutputFormatter())
     {
     }
 
@@ -33,7 +35,8 @@ public sealed class CliApplication
         IWorkflowExecutor executor,
         CliParser? cliParser = null,
         ILocalWebServerLauncher? webServerLauncher = null,
-        IActionCache? actionCache = null)
+        IActionCache? actionCache = null,
+        CliOutputFormatter? outputFormatter = null)
     {
         _resolver = resolver;
         _parser = parser;
@@ -41,6 +44,7 @@ public sealed class CliApplication
         _cliParser = cliParser ?? new CliParser();
         _webServerLauncher = webServerLauncher ?? new LocalWebServerLauncher();
         _actionCache = actionCache ?? NullActionCache.Instance;
+        _outputFormatter = outputFormatter ?? new CliOutputFormatter();
     }
 
     public int Run(string[] args, string workingDirectory, TextWriter output, TextWriter error)
@@ -128,15 +132,27 @@ public sealed class CliApplication
         if (!executionResult.Success)
         {
             WriteExecutionErrors(error, executionResult.Errors);
-            output.WriteLine(FormatSummary("Failed", executionResult));
-            WriteOutputsAndArtifacts(output, executionResult);
-            await WriteViewPipelineLinkAsync(resolution.ProjectRoot!, executionResult.RunId, output, error, cancellationToken);
+            output.WriteLine(FormatSummary("Failed", executionResult, output));
+            WriteOutputsAndArtifacts(output, executionResult, addLeadingSeparator: true);
+            await WriteViewPipelineLinkAsync(
+                resolution.ProjectRoot!,
+                executionResult.RunId,
+                output,
+                error,
+                addLeadingSeparator: true,
+                cancellationToken);
             return ExitCodes.ValidationError;
         }
 
-        output.WriteLine(FormatSummary("Success", executionResult));
-        WriteOutputsAndArtifacts(output, executionResult);
-        await WriteViewPipelineLinkAsync(resolution.ProjectRoot!, executionResult.RunId, output, error, cancellationToken);
+        output.WriteLine(FormatSummary("Success", executionResult, output));
+        WriteOutputsAndArtifacts(output, executionResult, addLeadingSeparator: true);
+        await WriteViewPipelineLinkAsync(
+            resolution.ProjectRoot!,
+            executionResult.RunId,
+            output,
+            error,
+            addLeadingSeparator: true,
+            cancellationToken);
         return ExitCodes.Success;
     }
 
@@ -262,28 +278,41 @@ public sealed class CliApplication
         {
             error.WriteLine($" - {item}");
         }
+
+        error.WriteLine();
     }
 
-    private static void WriteOutputsAndArtifacts(TextWriter output, WorkflowExecutionResult result)
+    private void WriteOutputsAndArtifacts(
+        TextWriter output,
+        WorkflowExecutionResult result,
+        bool addLeadingSeparator)
     {
+        var wrotePreviousSection = addLeadingSeparator;
+
         if (result.Outputs.Count > 0)
         {
+            WriteSectionBreakIfNeeded(output, wrotePreviousSection);
             output.WriteLine("output:");
 
             foreach (var item in result.Outputs)
             {
                 output.WriteLine($" - {item.JobName}.{item.Name}={item.Value}");
             }
+
+            wrotePreviousSection = true;
         }
 
         if (result.Artifacts.Count > 0)
         {
+            WriteSectionBreakIfNeeded(output, wrotePreviousSection);
             output.WriteLine("artifacts:");
 
             foreach (var item in result.Artifacts)
             {
-                output.WriteLine($" - {item.Name}: {item.StoredPath}");
+                output.WriteLine($" - {item.Name}: {_outputFormatter.FormatFilePath(item.StoredPath, output)}");
             }
+
+            wrotePreviousSection = true;
         }
     }
 
@@ -292,6 +321,7 @@ public sealed class CliApplication
         string? runId,
         TextWriter output,
         TextWriter error,
+        bool addLeadingSeparator,
         CancellationToken cancellationToken)
     {
         if (runId is null)
@@ -302,11 +332,12 @@ public sealed class CliApplication
         var url = await _webServerLauncher.EnsureStartedAsync(projectRoot, runId, error, cancellationToken);
         if (url is not null)
         {
+            WriteSectionBreakIfNeeded(output, addLeadingSeparator);
             output.WriteLine($"View pipeline: {url}");
         }
     }
 
-    private static string FormatSummary(string status, WorkflowExecutionResult result)
+    private string FormatSummary(string status, WorkflowExecutionResult result, TextWriter output)
     {
         var details = new List<string>();
 
@@ -326,7 +357,15 @@ public sealed class CliApplication
         }
 
         var suffix = details.Count == 0 ? string.Empty : $", {string.Join(", ", details)}";
-        return $"{status} ({result.SuccessfulSteps} / {result.TotalSteps}{suffix})";
+        return $"{_outputFormatter.FormatStatus(status, output)} ({result.SuccessfulSteps} / {result.TotalSteps}{suffix})";
+    }
+
+    private static void WriteSectionBreakIfNeeded(TextWriter output, bool wrotePreviousSection)
+    {
+        if (wrotePreviousSection)
+        {
+            output.WriteLine();
+        }
     }
 
 }
