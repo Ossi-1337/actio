@@ -19,6 +19,11 @@ public sealed class CliParser
             return ParseWebCommand(args);
         }
 
+        if (string.Equals(args[0], "cache", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseCacheCommand(args);
+        }
+
         if (args.Count == 1)
         {
             return ParseSingleArgument(args[0]);
@@ -136,6 +141,31 @@ public sealed class CliParser
         }
 
         return CliCommand.RunWeb(projectRoot, actioHome, url, background);
+    }
+
+    private static CliCommand ParseCacheCommand(IReadOnlyList<string> args)
+    {
+        if (args.Count == 1 || args.Count == 2 && IsHelp(args[1]))
+        {
+            return new CliCommand(CliCommandKind.ShowCacheHelp);
+        }
+
+        if (args.Count > 2)
+        {
+            return CliCommand.UsageError($"Unexpected argument '{args[2]}' for 'cache'.");
+        }
+
+        if (args[1].StartsWith("-", StringComparison.Ordinal))
+        {
+            return CliCommand.UsageError($"Unknown option '{args[1]}' for 'cache'.");
+        }
+
+        return args[1] switch
+        {
+            "list" => CliCommand.ListCache(),
+            "clean" => CliCommand.CleanCache(),
+            _ => CliCommand.UsageError($"Unknown cache command '{args[1]}'.")
+        };
     }
 
     private static bool IsHelp(string arg)

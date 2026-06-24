@@ -1,0 +1,37 @@
+namespace Actio.Engine.Actions;
+
+public sealed class NullActionCache : IActionCache
+{
+    public static NullActionCache Instance { get; } = new();
+
+    private NullActionCache()
+    {
+    }
+
+    public Task<ActionCacheEntry> GetOrAddLocalActionAsync(
+        LocalActionCacheRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var entry = new ActionCacheEntry(
+            request.ContentHash,
+            "local",
+            request.Uses,
+            request.SourcePath,
+            request.ContentHash,
+            string.Empty,
+            DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow);
+
+        return Task.FromResult(entry);
+    }
+
+    public Task<IReadOnlyList<ActionCacheEntry>> ListAsync(CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult<IReadOnlyList<ActionCacheEntry>>([]);
+    }
+
+    public Task<int> CleanAsync(CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(0);
+    }
+}

@@ -77,7 +77,7 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
-    public void Parse_RejectsUsesStepsUntilFutureMilestone()
+    public void Parse_AcceptsLocalUsesSteps()
     {
         var result = Parse(
             """
@@ -86,12 +86,30 @@ public sealed class WorkflowParserTests
               test:
                 runs-on: ubuntu-latest
                 steps:
-                  - name: Setup .NET
-                    uses: setup-dotnet
+                  - name: Local action
+                    uses: ./.actio/actions/hello
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal("./.actio/actions/hello", result.Workflow!.Jobs["test"].Steps[0].Uses);
+    }
+
+    [Fact]
+    public void Parse_RejectsUnsupportedUsesFormats()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Checkout
+                    uses: actions/checkout@v4
             """);
 
         Assert.False(result.Success);
-        Assert.Contains(result.Errors, error => error.Contains("future uses/cache extensibility milestone", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("supports only local action references", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

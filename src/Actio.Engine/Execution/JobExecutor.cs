@@ -12,15 +12,18 @@ internal sealed class JobExecutor
     private readonly IRunnerProvider _runnerProvider;
     private readonly IRunStore _runStore;
     private readonly OutputMarkerParser _outputMarkerParser;
+    private readonly LocalActionResolver _actionResolver;
 
     public JobExecutor(
         IRunnerProvider runnerProvider,
         IRunStore runStore,
-        OutputMarkerParser outputMarkerParser)
+        OutputMarkerParser outputMarkerParser,
+        LocalActionResolver actionResolver)
     {
         _runnerProvider = runnerProvider;
         _runStore = runStore;
         _outputMarkerParser = outputMarkerParser;
+        _actionResolver = actionResolver;
     }
 
     public async Task<JobExecutionOutcome> ExecuteAsync(
@@ -72,7 +75,7 @@ internal sealed class JobExecutor
             stepRecords.Add(new StepRunRecord(
                 step.Name,
                 stepResult.Status,
-                step.Run!,
+                stepResult.Command,
                 stepResult.ExitCode,
                 stepResult.LogPath,
                 stepStartedAt,
@@ -150,12 +153,18 @@ internal sealed class JobExecutor
 
         try
         {
+            var command = await ResolveStepCommandAsync(step, projectRoot, cancellationToken);
+            if (!command.Success)
+            {
+                return StepExecutionOutcome.FailedWithoutExitCode(step.Uses ?? string.Empty, command.Errors, collector.LogPath);
+            }
+
             var result = await _runnerProvider.ExecuteStepAsync(
                 new StepExecutionRequest(
                     job.Name,
                     step.Name,
                     job.RunsOn,
-                    step.Run!,
+                    command.Command!,
                     projectRoot,
                     CreateStepEnvironment(workflowEnv)),
                 collector,
@@ -164,13 +173,14 @@ internal sealed class JobExecutor
             if (!result.Success)
             {
                 return StepExecutionOutcome.Failed(
+                    command.Command!,
                     result.ExitCode,
                     collector.LogPath,
                     collector.CapturedOutputs,
                     $"workflow.jobs.{job.Name}.steps.{step.Name} failed with exit code {result.ExitCode}.");
             }
 
-            return StepExecutionOutcome.Succeeded(result.ExitCode, collector.LogPath, collector.CapturedOutputs);
+            return StepExecutionOutcome.Succeeded(command.Command!, result.ExitCode, collector.LogPath, collector.CapturedOutputs);
         }
         catch (Exception ex) when (StorageError.IsRecoverable(ex))
         {
@@ -178,6 +188,22 @@ internal sealed class JobExecutor
                 StorageError.Format($"writing log for job '{job.Name}' step '{step.Name}'", ex),
                 collector.LogPath);
         }
+    }
+
+    private async Task<StepCommandResolution> ResolveStepCommandAsync(
+        WorkflowStep step,
+        string projectRoot,
+        CancellationToken cancellationToken)
+    {
+        if (step.Run is not null)
+        {
+            return StepCommandResolution.Resolved(step.Run);
+        }
+
+        var action = await _actionResolver.ResolveAsync(step, projectRoot, cancellationToken);
+        return action.Success
+            ? StepCommandResolution.Resolved(action.Command!)
+            : StepCommandResolution.Failed(action.Errors);
     }
 
     private static JobExecutionOutcome CompleteJob(
@@ -213,7 +239,7 @@ internal sealed class JobExecutor
     public static IReadOnlyList<StepRunRecord> CreateSkippedStepRecords(IEnumerable<WorkflowStep> steps)
     {
         return steps
-            .Select(step => new StepRunRecord(step.Name, SkippedStatus, step.Run ?? string.Empty, null, null, null, null, 0))
+            .Select(step => new StepRunRecord(step.Name, SkippedStatus, step.Run ?? step.Uses ?? string.Empty, null, null, null, null, 0))
             .ToArray();
     }
 
@@ -230,6 +256,7 @@ internal sealed class JobExecutor
 
     private sealed record StepExecutionOutcome(
         string Status,
+        string Command,
         int? ExitCode,
         string? LogPath,
         IReadOnlyDictionary<string, string> Outputs,
@@ -237,26 +264,48 @@ internal sealed class JobExecutor
         bool CountsAsFailedStep)
     {
         public static StepExecutionOutcome Succeeded(
+            string command,
             int exitCode,
             string? logPath,
             IReadOnlyDictionary<string, string> outputs)
         {
-            return new StepExecutionOutcome(SuccessStatus, exitCode, logPath, outputs, [], false);
+            return new StepExecutionOutcome(SuccessStatus, command, exitCode, logPath, outputs, [], false);
         }
 
         public static StepExecutionOutcome Failed(
+            string command,
             int exitCode,
             string? logPath,
             IReadOnlyDictionary<string, string> outputs,
             string error)
         {
-            return new StepExecutionOutcome(FailedStatus, exitCode, logPath, outputs, [error], true);
+            return new StepExecutionOutcome(FailedStatus, command, exitCode, logPath, outputs, [error], true);
         }
 
         public static StepExecutionOutcome StorageFailed(string error, string? logPath = null)
         {
-            return new StepExecutionOutcome(FailedStatus, null, logPath, new Dictionary<string, string>(), [error], false);
+            return new StepExecutionOutcome(FailedStatus, string.Empty, null, logPath, new Dictionary<string, string>(), [error], false);
         }
+
+        public static StepExecutionOutcome FailedWithoutExitCode(
+            string command,
+            IReadOnlyList<string> errors,
+            string? logPath)
+        {
+            return new StepExecutionOutcome(FailedStatus, command, null, logPath, new Dictionary<string, string>(), errors, true);
+        }
+    }
+
+    private sealed record StepCommandResolution(
+        bool Success,
+        string? Command,
+        IReadOnlyList<string> Errors)
+    {
+        public static StepCommandResolution Resolved(string command)
+            => new(true, command, []);
+
+        public static StepCommandResolution Failed(IReadOnlyList<string> errors)
+            => new(false, null, errors);
     }
 }
 

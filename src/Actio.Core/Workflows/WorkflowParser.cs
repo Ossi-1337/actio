@@ -1,3 +1,4 @@
+using Actio.Core.Actions;
 using YamlDotNet.RepresentationModel;
 
 namespace Actio.Core.Workflows;
@@ -259,7 +260,7 @@ public sealed partial class WorkflowParser
 
             if (run is null && uses is null)
             {
-                errors.Add($"{itemPath} must define run.");
+                errors.Add($"{itemPath} must define run or uses.");
             }
 
             if (run is not null && uses is not null)
@@ -267,9 +268,9 @@ public sealed partial class WorkflowParser
                 errors.Add($"{itemPath} cannot define both run and uses.");
             }
 
-            if (uses is not null)
+            if (uses is not null && !ActionReference.IsSupportedLocalReference(uses))
             {
-                errors.Add($"{itemPath}.uses is reserved for the future uses/cache extensibility milestone.");
+                errors.Add($"{itemPath}.uses supports only local action references starting with './'.");
             }
 
             if (name is not null)

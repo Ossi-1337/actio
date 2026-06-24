@@ -1,4 +1,5 @@
 using Actio.Core.Workflows;
+using Actio.Engine.Actions;
 using Actio.Engine.Execution;
 using Actio.Engine.Runs;
 
@@ -315,6 +316,54 @@ public sealed class WorkflowExecutorTests
         Assert.Contains(result.Errors, error => error.Contains("not supported", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public async Task ExecuteAsync_ResolvesAndExecutesLocalAction()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-action-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(projectRoot, ".actio", "actions", "hello"));
+        await File.WriteAllTextAsync(
+            Path.Combine(projectRoot, ".actio", "actions", "hello", "action.yml"),
+            """
+            name: Hello
+            runs:
+              using: composite
+              steps:
+                - name: First
+                  run: echo first
+                - name: Second
+                  run: echo "actio.output greeting=hello"
+            """);
+
+        try
+        {
+            var runner = new FakeRunnerProvider([new FakeRunnerStep(0, ["actio.output greeting=hello"])]);
+            var cache = new RecordingActionCache();
+            var workflow = CreateWorkflow(
+                new WorkflowJob(
+                    "test",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Use hello", null, "./.actio/actions/hello")]));
+
+            var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+            Assert.Equal("echo first" + Environment.NewLine + "echo \"actio.output greeting=hello\"", runner.Requests[0].Command);
+            Assert.Equal("./.actio/actions/hello", cache.Requests[0].Uses);
+            Assert.Equal("hello", Assert.Single(result.Outputs).Value);
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
     private static WorkflowDocument CreateWorkflow(params WorkflowJob[] jobs)
     {
         return new WorkflowDocument(
@@ -431,6 +480,37 @@ public sealed class WorkflowExecutorTests
         public Task SaveRunRecordAsync(WorkflowRunRecord runRecord, CancellationToken cancellationToken = default)
         {
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class RecordingActionCache : IActionCache
+    {
+        public List<LocalActionCacheRequest> Requests { get; } = [];
+
+        public Task<ActionCacheEntry> GetOrAddLocalActionAsync(
+            LocalActionCacheRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            Requests.Add(request);
+            return Task.FromResult(new ActionCacheEntry(
+                request.ContentHash,
+                "local",
+                request.Uses,
+                request.SourcePath,
+                request.ContentHash,
+                string.Empty,
+                DateTimeOffset.UtcNow,
+                DateTimeOffset.UtcNow));
+        }
+
+        public Task<IReadOnlyList<ActionCacheEntry>> ListAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<IReadOnlyList<ActionCacheEntry>>([]);
+        }
+
+        public Task<int> CleanAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(0);
         }
     }
 

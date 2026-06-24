@@ -1,4 +1,6 @@
+using Actio.Core.Actions;
 using Actio.Core.Workflows;
+using Actio.Engine.Actions;
 using Actio.Engine.Runs;
 
 namespace Actio.Engine.Execution;
@@ -13,12 +15,16 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
     private readonly ConditionEvaluator _conditionEvaluator;
     private readonly JobExecutor _jobExecutor;
 
-    public WorkflowExecutor(IRunnerProvider runnerProvider, IRunStore? runStore = null)
+    public WorkflowExecutor(
+        IRunnerProvider runnerProvider,
+        IRunStore? runStore = null,
+        IActionCache? actionCache = null)
     {
         _runStore = runStore ?? new NullRunStore();
         var outputMarkerParser = new OutputMarkerParser();
         _conditionEvaluator = new ConditionEvaluator();
-        _jobExecutor = new JobExecutor(runnerProvider, _runStore, outputMarkerParser);
+        var actionResolver = new LocalActionResolver(new ActionParser(), actionCache ?? NullActionCache.Instance);
+        _jobExecutor = new JobExecutor(runnerProvider, _runStore, outputMarkerParser, actionResolver);
     }
 
     public async Task<WorkflowExecutionResult> ExecuteAsync(

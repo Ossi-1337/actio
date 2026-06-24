@@ -1,5 +1,6 @@
 using Actio.Cli;
 using Actio.Core.Workflows;
+using Actio.Engine.Actions;
 using Actio.Engine.Execution;
 using Actio.Engine.Runs;
 
@@ -76,6 +77,78 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Equal(string.Empty, result.Error);
         Assert.Null(result.Executor.Workflow);
     }
+
+    [Fact]
+    public void Run_PrintsCacheHelp()
+    {
+        var result = RunWithFakeExecutor(["cache", "--help"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Contains("Actio cache - inspect or clean local cache entries.", result.Output);
+        Assert.Contains("actio cache list", result.Output);
+        Assert.Equal(string.Empty, result.Error);
+        Assert.Null(result.Executor.Workflow);
+    }
+
+    [Fact]
+    public void Run_ListsCacheEntries()
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var cache = new FakeActionCache(
+            [
+                new ActionCacheEntry(
+                    "key-1",
+                    "local",
+                    "./.actio/actions/hello",
+                    "C:\\repo\\.actio\\actions\\hello\\action.yml",
+                    "hash",
+                    "C:\\actio\\cache\\actions\\local\\key-1",
+                    DateTimeOffset.Parse("2026-06-23T10:00:00Z"),
+                    DateTimeOffset.Parse("2026-06-23T11:00:00Z"))
+            ]);
+        var executor = new FakeWorkflowExecutor(new WorkflowExecutionResult(WorkflowExecutionStatus.Success, 1, 1, []));
+
+        var exitCode = CreateApplication(executor, actionCache: cache).Run(["cache", "list"], _root, output, error);
+
+        Assert.Equal(ExitCodes.Success, exitCode);
+        Assert.Contains("cache:", output.ToString());
+        Assert.Contains("local:./.actio/actions/hello", output.ToString());
+        Assert.Contains("key: key-1", output.ToString());
+        Assert.Equal(string.Empty, error.ToString());
+    }
+
+    [Fact]
+    public void Run_CleansCacheEntries()
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var cache = new FakeActionCache([], cleanCount: 2);
+        var executor = new FakeWorkflowExecutor(new WorkflowExecutionResult(WorkflowExecutionStatus.Success, 1, 1, []));
+
+        var exitCode = CreateApplication(executor, actionCache: cache).Run(["cache", "clean"], _root, output, error);
+
+        Assert.Equal(ExitCodes.Success, exitCode);
+        Assert.Equal($"Removed 2 cache entries.{Environment.NewLine}", output.ToString());
+        Assert.True(cache.Cleaned);
+        Assert.Equal(string.Empty, error.ToString());
+    }
+
+    [Fact]
+    public void Run_ReturnsValidationErrorWhenCacheCannotBeListed()
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var cache = new FakeActionCache([], listException: new IOException("cache is locked"));
+        var executor = new FakeWorkflowExecutor(new WorkflowExecutionResult(WorkflowExecutionStatus.Success, 1, 1, []));
+
+        var exitCode = CreateApplication(executor, actionCache: cache).Run(["cache", "list"], _root, output, error);
+
+        Assert.Equal(ExitCodes.ValidationError, exitCode);
+        Assert.Equal(string.Empty, output.ToString());
+        Assert.Contains("Cache could not be listed: cache is locked", error.ToString());
+    }
+
 
     [Fact]
     public void Run_PrintsVersion()
@@ -218,10 +291,10 @@ public sealed class CliApplicationTests : IDisposable
     [Fact]
     public void Run_ReturnsUsageErrorForUnknownCommand()
     {
-        var result = RunWithFakeExecutor(["cache"]);
+        var result = RunWithFakeExecutor(["deploy"]);
 
         Assert.Equal(ExitCodes.UsageError, result.ExitCode);
-        Assert.Contains("Unknown command 'cache'.", result.Error);
+        Assert.Contains("Unknown command 'deploy'.", result.Error);
         Assert.Null(result.Executor.Workflow);
     }
 
@@ -374,9 +447,15 @@ public sealed class CliApplicationTests : IDisposable
 
     private static CliApplication CreateApplication(
         FakeWorkflowExecutor executor,
-        ILocalWebServerLauncher? launcher = null)
+        ILocalWebServerLauncher? launcher = null,
+        IActionCache? actionCache = null)
     {
-        return new CliApplication(new WorkflowFileResolver(), new WorkflowParser(), executor, webServerLauncher: launcher);
+        return new CliApplication(
+            new WorkflowFileResolver(),
+            new WorkflowParser(),
+            executor,
+            webServerLauncher: launcher,
+            actionCache: actionCache);
     }
 
     private sealed record CliRunResult(
@@ -438,6 +517,56 @@ public sealed class CliApplicationTests : IDisposable
             ProjectRoot = projectRoot;
             RunId = runId;
             return Task.FromResult<string?>(_url);
+        }
+    }
+
+    private sealed class FakeActionCache : IActionCache
+    {
+        private readonly IReadOnlyList<ActionCacheEntry> _entries;
+        private readonly int _cleanCount;
+        private readonly Exception? _listException;
+        private readonly Exception? _cleanException;
+
+        public FakeActionCache(
+            IReadOnlyList<ActionCacheEntry> entries,
+            int cleanCount = 0,
+            Exception? listException = null,
+            Exception? cleanException = null)
+        {
+            _entries = entries;
+            _cleanCount = cleanCount;
+            _listException = listException;
+            _cleanException = cleanException;
+        }
+
+        public bool Cleaned { get; private set; }
+
+        public Task<ActionCacheEntry> GetOrAddLocalActionAsync(
+            LocalActionCacheRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            throw new NotSupportedException();
+        }
+
+        public Task<IReadOnlyList<ActionCacheEntry>> ListAsync(CancellationToken cancellationToken = default)
+        {
+            if (_listException is not null)
+            {
+                throw _listException;
+            }
+
+            return Task.FromResult(_entries);
+        }
+
+        public Task<int> CleanAsync(CancellationToken cancellationToken = default)
+        {
+            if (_cleanException is not null)
+            {
+                throw _cleanException;
+            }
+
+            Cleaned = true;
+            return Task.FromResult(_cleanCount);
         }
     }
 }

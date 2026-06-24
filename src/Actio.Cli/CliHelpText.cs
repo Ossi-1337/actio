@@ -9,11 +9,13 @@ public static class CliHelpText
           actio run <workflow>.yml
           actio <workflow>.yml
           actio web
+          actio cache <command>
           actio [options]
 
         Commands:
           run <workflow>.yml   Run a workflow from the project's .workflows directory.
           web                  Start the local Actio web UI.
+          cache                Inspect or clean Actio cache entries.
 
         Arguments:
           <workflow>.yml       Bare workflow filename inside .workflows, for example ci.yml.
@@ -26,6 +28,7 @@ public static class CliHelpText
           actio run ci.yml
           actio ci.yml
           actio web
+          actio cache list
           actio run --help
         """;
 
@@ -68,5 +71,27 @@ public static class CliHelpText
         Examples:
           actio web
           actio web --url http://127.0.0.1:17345
+        """;
+
+    public const string Cache = """
+        Actio cache - inspect or clean local cache entries.
+
+        Usage:
+          actio cache list
+          actio cache clean
+
+        Commands:
+          list                 Show local action cache entries.
+          clean                Remove local action cache entries.
+
+        Options:
+          -h, --help           Show help for the cache command.
+
+        Description:
+          Uses ACTIO_HOME or the user-local Actio storage root.
+
+        Examples:
+          actio cache list
+          actio cache clean
         """;
 }

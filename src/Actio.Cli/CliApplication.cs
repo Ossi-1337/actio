@@ -1,4 +1,5 @@
 using Actio.Core.Workflows;
+using Actio.Engine.Actions;
 using Actio.Engine.Execution;
 using Actio.Runner.Docker;
 using Actio.Storage;
@@ -13,14 +14,16 @@ public sealed class CliApplication
     private readonly IWorkflowExecutor _executor;
     private readonly CliParser _cliParser;
     private readonly ILocalWebServerLauncher _webServerLauncher;
+    private readonly IActionCache _actionCache;
 
     public CliApplication()
         : this(
             new WorkflowFileResolver(),
             new WorkflowParser(),
-            new WorkflowExecutor(new DockerRunnerProvider(), new FileSystemRunStore()),
+            CreateDefaultExecutor(),
             new CliParser(),
-            new LocalWebServerLauncher())
+            new LocalWebServerLauncher(),
+            new FileSystemActionCache())
     {
     }
 
@@ -29,13 +32,15 @@ public sealed class CliApplication
         WorkflowParser parser,
         IWorkflowExecutor executor,
         CliParser? cliParser = null,
-        ILocalWebServerLauncher? webServerLauncher = null)
+        ILocalWebServerLauncher? webServerLauncher = null,
+        IActionCache? actionCache = null)
     {
         _resolver = resolver;
         _parser = parser;
         _executor = executor;
         _cliParser = cliParser ?? new CliParser();
         _webServerLauncher = webServerLauncher ?? new LocalWebServerLauncher();
+        _actionCache = actionCache ?? NullActionCache.Instance;
     }
 
     public int Run(string[] args, string workingDirectory, TextWriter output, TextWriter error)
@@ -63,6 +68,9 @@ public sealed class CliApplication
             case CliCommandKind.ShowWebHelp:
                 output.WriteLine(CliHelpText.Web);
                 return ExitCodes.Success;
+            case CliCommandKind.ShowCacheHelp:
+                output.WriteLine(CliHelpText.Cache);
+                return ExitCodes.Success;
             case CliCommandKind.ShowVersion:
                 output.WriteLine($"actio {CliVersion.GetVersion()}");
                 return ExitCodes.Success;
@@ -73,9 +81,19 @@ public sealed class CliApplication
                 return await RunWorkflowAsync(command.WorkflowName!, workingDirectory, output, error, cancellationToken);
             case CliCommandKind.RunWeb:
                 return await RunWebAsync(command, workingDirectory, output, error, cancellationToken);
+            case CliCommandKind.ListCache:
+                return await ListCacheAsync(output, error, cancellationToken);
+            case CliCommandKind.CleanCache:
+                return await CleanCacheAsync(output, error, cancellationToken);
             default:
                 throw new InvalidOperationException($"Unsupported CLI command kind '{command.Kind}'.");
         }
+    }
+
+    private static IWorkflowExecutor CreateDefaultExecutor()
+    {
+        var runStore = new FileSystemRunStore();
+        return new WorkflowExecutor(new DockerRunnerProvider(), runStore, new FileSystemActionCache());
     }
 
     private async Task<int> RunWorkflowAsync(
@@ -148,6 +166,71 @@ public sealed class CliApplication
             error.WriteLine($"Actio web UI failed: {ex.Message}");
             return ExitCodes.ValidationError;
         }
+    }
+
+    private async Task<int> ListCacheAsync(
+        TextWriter output,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        IReadOnlyList<ActionCacheEntry> entries;
+        try
+        {
+            entries = await _actionCache.ListAsync(cancellationToken);
+        }
+        catch (Exception ex) when (IsRecoverableCacheError(ex))
+        {
+            error.WriteLine($"Cache could not be listed: {ex.Message}");
+            return ExitCodes.ValidationError;
+        }
+
+        if (entries.Count == 0)
+        {
+            output.WriteLine("No cache entries.");
+            return ExitCodes.Success;
+        }
+
+        output.WriteLine("cache:");
+
+        foreach (var entry in entries)
+        {
+            output.WriteLine($" - {entry.Kind}:{entry.Uses}");
+            output.WriteLine($"   key: {entry.Key}");
+            output.WriteLine($"   source: {entry.SourcePath}");
+            output.WriteLine($"   path: {entry.CachePath}");
+            output.WriteLine($"   last used: {entry.LastUsedAt:O}");
+        }
+
+        return ExitCodes.Success;
+    }
+
+    private async Task<int> CleanCacheAsync(
+        TextWriter output,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        int removed;
+        try
+        {
+            removed = await _actionCache.CleanAsync(cancellationToken);
+        }
+        catch (Exception ex) when (IsRecoverableCacheError(ex))
+        {
+            error.WriteLine($"Cache could not be cleaned: {ex.Message}");
+            return ExitCodes.ValidationError;
+        }
+
+        output.WriteLine($"Removed {removed} cache entr{(removed == 1 ? "y" : "ies")}.");
+        return ExitCodes.Success;
+    }
+
+    private static bool IsRecoverableCacheError(Exception exception)
+    {
+        return exception is IOException
+            or UnauthorizedAccessException
+            or System.Security.SecurityException
+            or NotSupportedException
+            or ArgumentException;
     }
 
     private static void WriteUsageError(TextWriter error, string message)
