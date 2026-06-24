@@ -95,7 +95,7 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
-    public void Parse_RejectsUnsupportedUsesFormats()
+    public void Parse_AcceptsGitHubUsesAndWarnsForMutableRef()
     {
         var result = Parse(
             """
@@ -108,8 +108,84 @@ public sealed class WorkflowParserTests
                     uses: actions/checkout@v4
             """);
 
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Contains(result.Warnings, warning => warning.Contains("mutable GitHub ref", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal("actions/checkout@v4", result.Workflow!.Jobs["test"].Steps[0].Uses);
+    }
+
+    [Fact]
+    public void Parse_AcceptsDockerUsesAndWarnsForMutableTag()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Node action
+                    uses: docker://node:22
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Contains(result.Warnings, warning => warning.Contains("mutable Docker image reference", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal("docker://node:22", result.Workflow!.Jobs["test"].Steps[0].Uses);
+    }
+
+    [Fact]
+    public void Parse_AcceptsDockerDigestUsesWithoutMutableWarning()
+    {
+        var digest = new string('a', 64);
+        var result = Parse(
+            $$"""
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Pinned image action
+                    uses: docker://node@sha256:{{digest}}
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Empty(result.Warnings);
+    }
+
+    [Fact]
+    public void Parse_AcceptsGitHubCommitShaUsesWithoutMutableWarning()
+    {
+        var sha = new string('b', 40);
+        var result = Parse(
+            $$"""
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Pinned GitHub action
+                    uses: owner/repo/action@{{sha}}
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Empty(result.Warnings);
+    }
+
+    [Fact]
+    public void Parse_RejectsUnsupportedUsesReferenceShape()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Missing ref
+                    uses: owner/repo
+            """);
+
         Assert.False(result.Success);
-        Assert.Contains(result.Errors, error => error.Contains("supports only local action references", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("Supported formats", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

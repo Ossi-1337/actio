@@ -21,8 +21,8 @@ public static class CliHelpText
           <workflow>.yml       Bare workflow filename inside .workflows, for example ci.yml.
 
         Options:
-          -h, --help           Show help.
-          --version            Show version.
+          -h, --help              Show help.
+          --version               Show version.
 
         Examples:
           actio run ci.yml
@@ -36,17 +36,19 @@ public static class CliHelpText
         Actio run - run a workflow.
 
         Usage:
-          actio run <workflow>.yml
-          actio <workflow>.yml
+          actio run <workflow>.yml [options]
+          actio <workflow>.yml [options]
 
         Arguments:
-          <workflow>.yml       Bare workflow filename inside .workflows, for example ci.yml.
+          <workflow>.yml          Bare workflow filename inside .workflows, for example ci.yml.
 
         Options:
-          -h, --help           Show help for the run command.
+          -h, --help              Show help for the run command.
 
         Description:
           Parses .workflows/<workflow>.yml and executes supported run steps in Docker.
+          Local uses references work today. External action references are validated
+          and warn when mutable, then execute when their action type is supported.
 
         Examples:
           actio run ci.yml

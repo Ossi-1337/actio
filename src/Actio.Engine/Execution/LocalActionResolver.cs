@@ -58,9 +58,14 @@ internal sealed class LocalActionResolver
 
     private static ActionPathResult ResolveActionPath(string uses, string projectRoot)
     {
-        if (!ActionReference.IsSupportedLocalReference(uses))
+        if (!ActionReference.TryParse(uses, out var reference))
         {
-            return ActionPathResult.Failed([$"uses '{uses}' is not supported. Only local references starting with './' are supported."]);
+            return ActionPathResult.Failed([$"uses '{uses}' is not supported. Supported formats are './...', 'docker://...', and 'owner/repo[/path]@ref'."]);
+        }
+
+        if (reference!.IsRemote)
+        {
+            return ActionPathResult.Failed([$"uses '{uses}' is a recognized external action reference, but external action execution is not implemented yet."]);
         }
 
         var fullProjectRoot = Path.GetFullPath(projectRoot);

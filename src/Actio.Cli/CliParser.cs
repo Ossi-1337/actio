@@ -24,9 +24,19 @@ public sealed class CliParser
             return ParseCacheCommand(args);
         }
 
+        if (IsWorkflowFilename(args[0]))
+        {
+            return ParseShorthandRunCommand(args);
+        }
+
         if (args.Count == 1)
         {
             return ParseSingleArgument(args[0]);
+        }
+
+        if (args[0].StartsWith("-", StringComparison.Ordinal))
+        {
+            return CliCommand.UsageError($"Unknown option '{args[0]}'.");
         }
 
         return CliCommand.UsageError($"Unknown command '{args[0]}'.");
@@ -49,11 +59,6 @@ public sealed class CliParser
             return CliCommand.UsageError($"Unknown option '{arg}'.");
         }
 
-        if (IsWorkflowFilename(arg))
-        {
-            return CliCommand.RunWorkflow(arg);
-        }
-
         return CliCommand.UsageError($"Unknown command '{arg}'.");
     }
 
@@ -71,7 +76,9 @@ public sealed class CliParser
 
         if (args.Count > 2)
         {
-            return CliCommand.UsageError($"Unexpected argument '{args[2]}' for 'run'.");
+            return args[2].StartsWith("-", StringComparison.Ordinal)
+                ? CliCommand.UsageError($"Unknown option '{args[2]}' for 'run'.")
+                : CliCommand.UsageError($"Unexpected argument '{args[2]}' for 'run'.");
         }
 
         if (args[1].StartsWith("-", StringComparison.Ordinal))
@@ -85,6 +92,20 @@ public sealed class CliParser
         }
 
         return CliCommand.RunWorkflow(args[1]);
+    }
+
+    private static CliCommand ParseShorthandRunCommand(IReadOnlyList<string> args)
+    {
+        var workflowName = args[0];
+
+        if (args.Count == 1)
+        {
+            return CliCommand.RunWorkflow(workflowName);
+        }
+
+        return args[1].StartsWith("-", StringComparison.Ordinal)
+            ? CliCommand.UsageError($"Unknown option '{args[1]}'.")
+            : CliCommand.UsageError($"Unexpected argument '{args[1]}'.");
     }
 
     private static CliCommand ParseWebCommand(IReadOnlyList<string> args)

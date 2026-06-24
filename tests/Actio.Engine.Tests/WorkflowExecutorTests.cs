@@ -390,6 +390,30 @@ public sealed class WorkflowExecutorTests
         }
     }
 
+    [Fact]
+    public async Task ExecuteAsync_FailsRemoteActionWithoutExecutingRunner()
+    {
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Use remote image", null, "docker://node:22")]));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(Environment.CurrentDirectory),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Empty(runner.Requests);
+        Assert.Contains(result.Errors, error => error.Contains("external action execution is not implemented", StringComparison.OrdinalIgnoreCase));
+    }
+
     private static WorkflowDocument CreateWorkflow(params WorkflowJob[] jobs)
     {
         return new WorkflowDocument(

@@ -51,6 +51,7 @@ public sealed partial class WorkflowParser
     public WorkflowParseResult Parse(TextReader reader)
     {
         var errors = new List<string>();
+        var warnings = new List<string>();
         var yaml = new YamlStream();
 
         try
@@ -71,17 +72,20 @@ public sealed partial class WorkflowParser
 
         var name = ReadRequiredScalar(errors, root, "name", "workflow.name");
         var env = ReadOptionalStringMap(errors, root, "env", "workflow.env");
-        var jobs = ReadJobs(errors, root);
+        var jobs = ReadJobs(errors, warnings, root);
 
         if (errors.Count > 0)
         {
-            return WorkflowParseResult.Failed(errors);
+            return WorkflowParseResult.Failed(errors, warnings);
         }
 
-        return WorkflowParseResult.Parsed(new WorkflowDocument(name!, env, jobs));
+        return WorkflowParseResult.Parsed(new WorkflowDocument(name!, env, jobs), warnings);
     }
 
-    private static IReadOnlyDictionary<string, WorkflowJob> ReadJobs(List<string> errors, YamlMappingNode root)
+    private static IReadOnlyDictionary<string, WorkflowJob> ReadJobs(
+        List<string> errors,
+        List<string> warnings,
+        YamlMappingNode root)
     {
         if (!TryGet(root, "jobs", out var jobsNode))
         {
@@ -124,7 +128,7 @@ public sealed partial class WorkflowParser
             var runsOn = ReadRequiredScalar(errors, jobMap, "runs-on", $"workflow.jobs.{jobName}.runs-on");
             var outputs = ReadOptionalStringMap(errors, jobMap, "outputs", $"workflow.jobs.{jobName}.outputs");
             var artifacts = ReadArtifacts(errors, jobMap, jobName);
-            var steps = ReadSteps(errors, jobMap, jobName);
+            var steps = ReadSteps(errors, warnings, jobMap, jobName);
 
             if (runsOn is not null)
             {
@@ -218,7 +222,11 @@ public sealed partial class WorkflowParser
         return artifacts;
     }
 
-    private static IReadOnlyList<WorkflowStep> ReadSteps(List<string> errors, YamlMappingNode jobMap, string jobName)
+    private static IReadOnlyList<WorkflowStep> ReadSteps(
+        List<string> errors,
+        List<string> warnings,
+        YamlMappingNode jobMap,
+        string jobName)
     {
         var path = $"workflow.jobs.{jobName}.steps";
 
@@ -268,10 +276,7 @@ public sealed partial class WorkflowParser
                 errors.Add($"{itemPath} cannot define both run and uses.");
             }
 
-            if (uses is not null && !ActionReference.IsSupportedLocalReference(uses))
-            {
-                errors.Add($"{itemPath}.uses supports only local action references starting with './'.");
-            }
+            ValidateUsesReference(errors, warnings, itemPath, uses);
 
             if (name is not null)
             {
@@ -280,6 +285,44 @@ public sealed partial class WorkflowParser
         }
 
         return steps;
+    }
+
+    private static void ValidateUsesReference(
+        List<string> errors,
+        List<string> warnings,
+        string itemPath,
+        string? uses)
+    {
+        if (uses is null)
+        {
+            return;
+        }
+
+        if (!ActionReference.TryParse(uses, out var reference))
+        {
+            errors.Add($"{itemPath}.uses has unsupported action reference '{uses}'. Supported formats are './...', 'docker://...', and 'owner/repo[/path]@ref'.");
+            return;
+        }
+
+        if (!reference!.IsRemote)
+        {
+            return;
+        }
+
+        if (reference.IsMutable)
+        {
+            warnings.Add(FormatMutableReferenceWarning(itemPath, reference));
+        }
+    }
+
+    private static string FormatMutableReferenceWarning(string itemPath, ActionReference reference)
+    {
+        return reference.Kind switch
+        {
+            ActionReferenceKind.DockerImage => $"{itemPath}.uses uses mutable Docker image reference '{reference.Value}' ({reference.MutablePart}). Pin with an image digest such as docker://image@sha256:<digest> for safer reuse.",
+            ActionReferenceKind.GitHubRepository => $"{itemPath}.uses uses mutable GitHub ref '{reference.MutablePart}' in '{reference.Value}'. Pin with a commit SHA for safer reuse.",
+            _ => $"{itemPath}.uses uses a mutable external action reference '{reference.Value}'."
+        };
     }
 
     private static IReadOnlyDictionary<string, string> ReadOptionalStringMap(

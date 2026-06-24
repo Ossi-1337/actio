@@ -240,6 +240,72 @@ public sealed class CliApplicationTests : IDisposable
     }
 
     [Fact]
+    public void Run_AcceptsExternalUsesAndPrintsMutableWarning()
+    {
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Node action
+                    uses: docker://node:22
+            """);
+
+        var result = RunWithFakeExecutor(["ci.yml"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Contains("Workflow warnings:", result.Error);
+        Assert.Contains("mutable Docker image reference", result.Error);
+        Assert.Equal("docker://node:22", result.Executor.Workflow!.Jobs["test"].Steps[0].Uses);
+    }
+
+    [Fact]
+    public void Run_AcceptsExternalUsesFromOfficialRunCommand()
+    {
+        var sha = new string('b', 40);
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            $$"""
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Pinned action
+                    uses: owner/repo/action@{{sha}}
+            """);
+
+        var result = RunWithFakeExecutor(["run", "ci.yml"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Equal(string.Empty, result.Error);
+        Assert.Equal($"owner/repo/action@{sha}", result.Executor.Workflow!.Jobs["test"].Steps[0].Uses);
+    }
+
+    [Fact]
+    public void Run_ReturnsUsageErrorForRemovedRemoteActionsFlag()
+    {
+        var result = RunWithFakeExecutor(["run", "--allow-remote-actions"]);
+
+        Assert.Equal(ExitCodes.UsageError, result.ExitCode);
+        Assert.Contains("Unknown option '--allow-remote-actions' for 'run'.", result.Error);
+        Assert.Null(result.Executor.Workflow);
+    }
+
+    [Fact]
+    public void Run_ReturnsUsageErrorForUnknownShorthandOption()
+    {
+        var result = RunWithFakeExecutor(["ci.yml", "--unknown"]);
+
+        Assert.Equal(ExitCodes.UsageError, result.ExitCode);
+        Assert.Contains("Unknown option '--unknown'.", result.Error);
+        Assert.Null(result.Executor.Workflow);
+    }
+
+    [Fact]
     public void Run_PrintsViewPipelineLink()
     {
         File.WriteAllText(

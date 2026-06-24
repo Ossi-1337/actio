@@ -86,7 +86,7 @@ public sealed class CliApplication
                 WriteUsageError(error, command.ErrorMessage!);
                 return ExitCodes.UsageError;
             case CliCommandKind.RunWorkflow:
-                return await RunWorkflowAsync(command.WorkflowName!, workingDirectory, output, error, cancellationToken);
+                return await RunWorkflowAsync(command, workingDirectory, output, error, cancellationToken);
             case CliCommandKind.RunWeb:
                 return await RunWebAsync(command, workingDirectory, output, error, cancellationToken);
             case CliCommandKind.ListCache:
@@ -105,13 +105,13 @@ public sealed class CliApplication
     }
 
     private async Task<int> RunWorkflowAsync(
-        string workflowName,
+        CliCommand command,
         string workingDirectory,
         TextWriter output,
         TextWriter error,
         CancellationToken cancellationToken)
     {
-        var resolution = _resolver.Resolve(workflowName, workingDirectory);
+        var resolution = _resolver.Resolve(command.WorkflowName!, workingDirectory);
         if (!resolution.Success)
         {
             WriteErrors(error, resolution.Errors);
@@ -124,6 +124,8 @@ public sealed class CliApplication
             WriteErrors(error, parseResult.Errors);
             return ExitCodes.ValidationError;
         }
+
+        WriteWarnings(error, parseResult.Warnings);
 
         var workflow = parseResult.Workflow!;
         var runId = _createRunId();
@@ -267,6 +269,23 @@ public sealed class CliApplication
         {
             error.WriteLine($" - {item}");
         }
+    }
+
+    private static void WriteWarnings(TextWriter error, IReadOnlyList<string> warnings)
+    {
+        if (warnings.Count == 0)
+        {
+            return;
+        }
+
+        error.WriteLine("Workflow warnings:");
+
+        foreach (var item in warnings)
+        {
+            error.WriteLine($" - {item}");
+        }
+
+        error.WriteLine();
     }
 
     private static void WriteExecutionErrors(TextWriter error, IReadOnlyList<string> errors)
