@@ -9,6 +9,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
 {
     private const string SuccessStatus = "Success";
     private const string FailedStatus = "Failed";
+    private const string RunningStatus = "Running";
     private const string SkippedStatus = "Skipped";
 
     private readonly IRunStore _runStore;
@@ -63,6 +64,30 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         var jobStatuses = new Dictionary<string, string>(StringComparer.Ordinal);
         var jobOutputs = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal);
         var plan = JobGraphPlanner.Plan(workflow.Jobs);
+        var initialSaveError = await TrySaveRunRecordAsync(
+            CreateRunRecord(
+                runId,
+                workflow,
+                options,
+                RunningStatus,
+                startedAt,
+                DateTimeOffset.UtcNow,
+                jobRecords,
+                runOutputs,
+                runArtifacts,
+                errors),
+            cancellationToken);
+
+        if (initialSaveError is not null)
+        {
+            return new WorkflowExecutionResult(
+                WorkflowExecutionStatus.Failed,
+                0,
+                totalSteps,
+                [initialSaveError],
+                runId: runId,
+                runRecordPath: null);
+        }
 
         if (plan.Errors.Count > 0)
         {
@@ -95,6 +120,26 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 runArtifacts.AddRange(outcome.Job.Artifacts);
                 runOutputs.AddRange(outcome.Job.Outputs.Select(item =>
                     new WorkflowRunOutput(job.Name, item.Key, item.Value)));
+
+                var progressSaveError = await TrySaveRunRecordAsync(
+                    CreateRunRecord(
+                        runId,
+                        workflow,
+                        options,
+                        RunningStatus,
+                        startedAt,
+                        DateTimeOffset.UtcNow,
+                        jobRecords,
+                        runOutputs,
+                        runArtifacts,
+                        errors),
+                    cancellationToken);
+
+                if (progressSaveError is not null)
+                {
+                    errors.Add(progressSaveError);
+                    break;
+                }
             }
         }
 
@@ -104,7 +149,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             runId,
             workflow,
             options,
-            status,
+            status.ToString(),
             startedAt,
             finishedAt,
             jobRecords,
@@ -113,14 +158,11 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             errors);
         var runRecordPath = storagePaths.RunRecordPath;
 
-        try
-        {
-            await _runStore.SaveRunRecordAsync(runRecord, cancellationToken);
-        }
-        catch (Exception ex) when (StorageError.IsRecoverable(ex))
+        var saveError = await TrySaveRunRecordAsync(runRecord, cancellationToken);
+        if (saveError is not null)
         {
             status = WorkflowExecutionStatus.Failed;
-            errors.Add(StorageError.Format("saving run record", ex));
+            errors.Add(saveError);
             runRecordPath = null;
         }
 
@@ -174,7 +216,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         string runId,
         WorkflowDocument workflow,
         WorkflowExecutionOptions options,
-        WorkflowExecutionStatus status,
+        string status,
         DateTimeOffset startedAt,
         DateTimeOffset finishedAt,
         IReadOnlyList<JobRunRecord> jobRecords,
@@ -187,14 +229,29 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             workflow.Name,
             options.WorkflowPath,
             options.ProjectRoot,
-            status.ToString(),
+            status,
             startedAt,
             finishedAt,
             ToDurationMilliseconds(startedAt, finishedAt),
-            jobRecords,
-            runOutputs,
-            runArtifacts,
-            errors);
+            jobRecords.ToArray(),
+            runOutputs.ToArray(),
+            runArtifacts.ToArray(),
+            errors.ToArray());
+    }
+
+    private async Task<string?> TrySaveRunRecordAsync(
+        WorkflowRunRecord runRecord,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _runStore.SaveRunRecordAsync(runRecord, cancellationToken);
+            return null;
+        }
+        catch (Exception ex) when (StorageError.IsRecoverable(ex))
+        {
+            return StorageError.Format("saving run record", ex);
+        }
     }
 
     private static JobExecutionOutcome CreateSkippedJobOutcome(WorkflowJob job, string reason)

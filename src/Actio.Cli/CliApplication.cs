@@ -16,6 +16,7 @@ public sealed class CliApplication
     private readonly ILocalWebServerLauncher _webServerLauncher;
     private readonly IActionCache _actionCache;
     private readonly CliOutputFormatter _outputFormatter;
+    private readonly Func<string> _createRunId;
 
     public CliApplication()
         : this(
@@ -25,7 +26,8 @@ public sealed class CliApplication
             new CliParser(),
             new LocalWebServerLauncher(),
             new FileSystemActionCache(),
-            new CliOutputFormatter())
+            new CliOutputFormatter(),
+            new FileSystemRunStore().CreateRunId)
     {
     }
 
@@ -36,7 +38,8 @@ public sealed class CliApplication
         CliParser? cliParser = null,
         ILocalWebServerLauncher? webServerLauncher = null,
         IActionCache? actionCache = null,
-        CliOutputFormatter? outputFormatter = null)
+        CliOutputFormatter? outputFormatter = null,
+        Func<string>? createRunId = null)
     {
         _resolver = resolver;
         _parser = parser;
@@ -45,6 +48,7 @@ public sealed class CliApplication
         _webServerLauncher = webServerLauncher ?? new LocalWebServerLauncher();
         _actionCache = actionCache ?? NullActionCache.Instance;
         _outputFormatter = outputFormatter ?? new CliOutputFormatter();
+        _createRunId = createRunId ?? new FileSystemRunStore().CreateRunId;
     }
 
     public int Run(string[] args, string workingDirectory, TextWriter output, TextWriter error)
@@ -122,9 +126,23 @@ public sealed class CliApplication
         }
 
         var workflow = parseResult.Workflow!;
+        var runId = _createRunId();
+        var wrotePipelineLink = await WriteViewPipelineLinkAsync(
+            resolution.ProjectRoot!,
+            runId,
+            output,
+            error,
+            addLeadingSeparator: false,
+            cancellationToken);
+
+        if (wrotePipelineLink)
+        {
+            output.WriteLine();
+        }
+
         var executionResult = await _executor.ExecuteAsync(
             workflow,
-            new WorkflowExecutionOptions(resolution.ProjectRoot!, resolution.WorkflowPath),
+            new WorkflowExecutionOptions(resolution.ProjectRoot!, resolution.WorkflowPath, runId),
             output,
             error,
             cancellationToken);
@@ -134,25 +152,11 @@ public sealed class CliApplication
             WriteExecutionErrors(error, executionResult.Errors);
             output.WriteLine(FormatSummary("Failed", executionResult, output));
             WriteOutputsAndArtifacts(output, executionResult, addLeadingSeparator: true);
-            await WriteViewPipelineLinkAsync(
-                resolution.ProjectRoot!,
-                executionResult.RunId,
-                output,
-                error,
-                addLeadingSeparator: true,
-                cancellationToken);
             return ExitCodes.ValidationError;
         }
 
         output.WriteLine(FormatSummary("Success", executionResult, output));
         WriteOutputsAndArtifacts(output, executionResult, addLeadingSeparator: true);
-        await WriteViewPipelineLinkAsync(
-            resolution.ProjectRoot!,
-            executionResult.RunId,
-            output,
-            error,
-            addLeadingSeparator: true,
-            cancellationToken);
         return ExitCodes.Success;
     }
 
@@ -316,7 +320,7 @@ public sealed class CliApplication
         }
     }
 
-    private async Task WriteViewPipelineLinkAsync(
+    private async Task<bool> WriteViewPipelineLinkAsync(
         string projectRoot,
         string? runId,
         TextWriter output,
@@ -326,7 +330,7 @@ public sealed class CliApplication
     {
         if (runId is null)
         {
-            return;
+            return false;
         }
 
         var url = await _webServerLauncher.EnsureStartedAsync(projectRoot, runId, error, cancellationToken);
@@ -334,7 +338,10 @@ public sealed class CliApplication
         {
             WriteSectionBreakIfNeeded(output, addLeadingSeparator);
             output.WriteLine($"View pipeline: {url}");
+            return true;
         }
+
+        return false;
     }
 
     private string FormatSummary(string status, WorkflowExecutionResult result, TextWriter output)

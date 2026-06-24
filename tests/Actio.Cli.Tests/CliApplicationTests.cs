@@ -185,6 +185,7 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Equal(ExitCodes.Success, exitCode);
         Assert.Contains("Success (1 / 1)", output.ToString());
         Assert.Equal("CI", executor.Workflow!.Name);
+        Assert.Equal("run-1", executor.Options!.RunId);
         Assert.Equal(string.Empty, error.ToString());
     }
 
@@ -234,6 +235,7 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Equal(ExitCodes.Success, result.ExitCode);
         Assert.Contains("Success (1 / 1)", result.Output);
         Assert.Equal("CI", result.Executor.Workflow!.Name);
+        Assert.Equal("run-1", result.Executor.Options!.RunId);
         Assert.Equal(string.Empty, result.Error);
     }
 
@@ -263,13 +265,47 @@ public sealed class CliApplicationTests : IDisposable
                 [],
                 runId: "run-1"));
 
-        var exitCode = CreateApplication(executor, launcher).Run(["ci.yml"], _root, output, error);
+        var exitCode = CreateApplication(executor, launcher, createRunId: () => "run-1").Run(["ci.yml"], _root, output, error);
 
         Assert.Equal(ExitCodes.Success, exitCode);
         Assert.Contains("View pipeline: http://127.0.0.1:17345/runs/run-1", output.ToString());
-        Assert.Contains($"Success (1 / 1){Environment.NewLine}{Environment.NewLine}View pipeline:", output.ToString());
+        Assert.Contains($"View pipeline: http://127.0.0.1:17345/runs/run-1{Environment.NewLine}{Environment.NewLine}Success (1 / 1)", output.ToString());
         Assert.Equal("run-1", launcher.RunId);
         Assert.Equal(_root, launcher.ProjectRoot);
+        Assert.Equal("run-1", executor.Options!.RunId);
+    }
+
+    [Fact]
+    public void Run_PrintsViewPipelineLinkBeforeExecutionOutput()
+    {
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var launcher = new FakeWebServerLauncher("http://127.0.0.1:17345/runs/run-early");
+        var executor = new FakeWorkflowExecutor(
+            new WorkflowExecutionResult(WorkflowExecutionStatus.Success, 1, 1, [], runId: "run-early"),
+            outputLine: "[test] Test");
+
+        var exitCode = CreateApplication(executor, launcher, createRunId: () => "run-early").Run(["ci.yml"], _root, output, error);
+
+        var text = output.ToString();
+        var linkIndex = text.IndexOf("View pipeline:", StringComparison.Ordinal);
+        var executionOutputIndex = text.IndexOf("[test] Test", StringComparison.Ordinal);
+        Assert.Equal(ExitCodes.Success, exitCode);
+        Assert.True(linkIndex >= 0);
+        Assert.True(executionOutputIndex >= 0);
+        Assert.True(linkIndex < executionOutputIndex);
     }
 
     [Fact]
@@ -629,15 +665,17 @@ public sealed class CliApplicationTests : IDisposable
         FakeWorkflowExecutor executor,
         ILocalWebServerLauncher? launcher = null,
         IActionCache? actionCache = null,
-        CliOutputFormatter? outputFormatter = null)
+        CliOutputFormatter? outputFormatter = null,
+        Func<string>? createRunId = null)
     {
         return new CliApplication(
             new WorkflowFileResolver(),
             new WorkflowParser(),
             executor,
-            webServerLauncher: launcher,
+            webServerLauncher: launcher ?? new FakeWebServerLauncher(null),
             actionCache: actionCache,
-            outputFormatter: outputFormatter);
+            outputFormatter: outputFormatter,
+            createRunId: createRunId ?? (() => "run-1"));
     }
 
     private static CliOutputFormatter CreateOutputFormatter(
@@ -668,13 +706,17 @@ public sealed class CliApplicationTests : IDisposable
     private sealed class FakeWorkflowExecutor : IWorkflowExecutor
     {
         private readonly WorkflowExecutionResult _result;
+        private readonly string? _outputLine;
 
-        public FakeWorkflowExecutor(WorkflowExecutionResult result)
+        public FakeWorkflowExecutor(WorkflowExecutionResult result, string? outputLine = null)
         {
             _result = result;
+            _outputLine = outputLine;
         }
 
         public WorkflowDocument? Workflow { get; private set; }
+
+        public WorkflowExecutionOptions? Options { get; private set; }
 
         public Task<WorkflowExecutionResult> ExecuteAsync(
             WorkflowDocument workflow,
@@ -684,15 +726,22 @@ public sealed class CliApplicationTests : IDisposable
             CancellationToken cancellationToken = default)
         {
             Workflow = workflow;
+            Options = options;
+
+            if (_outputLine is not null)
+            {
+                output.WriteLine(_outputLine);
+            }
+
             return Task.FromResult(_result);
         }
     }
 
     private sealed class FakeWebServerLauncher : ILocalWebServerLauncher
     {
-        private readonly string _url;
+        private readonly string? _url;
 
-        public FakeWebServerLauncher(string url)
+        public FakeWebServerLauncher(string? url)
         {
             _url = url;
         }

@@ -46,6 +46,51 @@ public sealed class ActioWebDataServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task GetRunsAsync_RefreshesRunningDuration()
+    {
+        var startedAt = DateTimeOffset.Parse("2026-06-24T10:00:00Z");
+        var workflowPath = WriteWorkflow("ci.yml", "CI");
+        await SaveRunAsync(CreateRun(
+            "run-1",
+            "CI",
+            workflowPath,
+            status: "Running",
+            startedAt: startedAt,
+            finishedAt: startedAt,
+            durationMilliseconds: 0));
+
+        var service = CreateService(new FixedTimeProvider(startedAt.AddSeconds(7)));
+
+        var run = Assert.Single(await service.GetRunsAsync());
+
+        Assert.Equal("Running", run.Status);
+        Assert.Equal(7000, run.DurationMilliseconds);
+    }
+
+    [Fact]
+    public async Task GetRunAsync_RefreshesRunningDuration()
+    {
+        var startedAt = DateTimeOffset.Parse("2026-06-24T10:00:00Z");
+        var workflowPath = WriteWorkflow("ci.yml", "CI");
+        await SaveRunAsync(CreateRun(
+            "run-1",
+            "CI",
+            workflowPath,
+            status: "Running",
+            startedAt: startedAt,
+            finishedAt: startedAt,
+            durationMilliseconds: 0));
+
+        var service = CreateService(new FixedTimeProvider(startedAt.AddSeconds(9)));
+
+        var run = await service.GetRunAsync("run-1");
+
+        Assert.NotNull(run);
+        Assert.Equal("Running", run.Status);
+        Assert.Equal(9000, run.DurationMilliseconds);
+    }
+
+    [Fact]
     public async Task GetStepLogAsync_ReturnsLogContent()
     {
         var workflowPath = WriteWorkflow("ci.yml", "CI");
@@ -100,9 +145,13 @@ public sealed class ActioWebDataServiceTests : IDisposable
         Assert.Null(run);
     }
 
-    private ActioWebDataService CreateService()
+    private ActioWebDataService CreateService(TimeProvider? timeProvider = null)
     {
-        return new ActioWebDataService(new ActioWebOptions(_projectRoot, _actioHome));
+        return new ActioWebDataService(
+            new ActioWebOptions(_projectRoot, _actioHome),
+            new FileSystemRunStore(_actioHome),
+            new Actio.Core.Workflows.WorkflowParser(),
+            timeProvider);
     }
 
     private string WriteWorkflow(string fileName, string name)
@@ -135,8 +184,14 @@ public sealed class ActioWebDataServiceTests : IDisposable
         string workflowPath,
         string? projectRoot = null,
         string? logPath = null,
-        string? artifactPath = null)
+        string? artifactPath = null,
+        string status = "Success",
+        DateTimeOffset? startedAt = null,
+        DateTimeOffset? finishedAt = null,
+        long durationMilliseconds = 10)
     {
+        var start = startedAt ?? DateTimeOffset.UtcNow;
+        var finish = finishedAt ?? start;
         var artifact = artifactPath is null
             ? Array.Empty<WorkflowRunArtifact>()
             : [new WorkflowRunArtifact("test", "report", "report.txt", artifactPath)];
@@ -146,28 +201,43 @@ public sealed class ActioWebDataServiceTests : IDisposable
             workflowName,
             workflowPath,
             projectRoot ?? _projectRoot,
-            "Success",
-            DateTimeOffset.UtcNow,
-            DateTimeOffset.UtcNow,
-            10,
+            status,
+            start,
+            finish,
+            durationMilliseconds,
             [
                 new JobRunRecord(
                     "test",
-                    "Success",
+                    status,
                     "ubuntu-latest",
                     [],
                     null,
-                    DateTimeOffset.UtcNow,
-                    DateTimeOffset.UtcNow,
-                    10,
+                    start,
+                    finish,
+                    durationMilliseconds,
                     new Dictionary<string, string>(),
-                    [new StepRunRecord("Test", "Success", "dotnet test", 0, logPath, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, 10)],
+                    [new StepRunRecord("Test", status, "dotnet test", 0, logPath, start, finish, durationMilliseconds)],
                     artifact,
                     [])
             ],
             [],
             artifact,
             []);
+    }
+
+    private sealed class FixedTimeProvider : TimeProvider
+    {
+        private readonly DateTimeOffset _utcNow;
+
+        public FixedTimeProvider(DateTimeOffset utcNow)
+        {
+            _utcNow = utcNow;
+        }
+
+        public override DateTimeOffset GetUtcNow()
+        {
+            return _utcNow;
+        }
     }
 
     public void Dispose()

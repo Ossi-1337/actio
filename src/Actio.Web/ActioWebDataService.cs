@@ -11,20 +11,23 @@ public sealed class ActioWebDataService
     private readonly ActioWebOptions _options;
     private readonly FileSystemRunStore _runStore;
     private readonly WorkflowParser _workflowParser;
+    private readonly TimeProvider _timeProvider;
 
     public ActioWebDataService(ActioWebOptions options)
-        : this(options, new FileSystemRunStore(options.ActioHome), new WorkflowParser())
+        : this(options, new FileSystemRunStore(options.ActioHome), new WorkflowParser(), TimeProvider.System)
     {
     }
 
     public ActioWebDataService(
         ActioWebOptions options,
         FileSystemRunStore runStore,
-        WorkflowParser workflowParser)
+        WorkflowParser workflowParser,
+        TimeProvider? timeProvider = null)
     {
         _options = options;
         _runStore = runStore;
         _workflowParser = workflowParser;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public string ProjectRoot => Path.GetFullPath(_options.ProjectRoot);
@@ -88,7 +91,7 @@ public sealed class ActioWebDataService
         try
         {
             var run = await _runStore.ReadRunRecordAsync(runId, cancellationToken);
-            return run is not null && IsProjectRun(run) ? run : null;
+            return run is not null && IsProjectRun(run) ? RefreshRunningDuration(run) : null;
         }
         catch (Exception ex) when (IsRecoverableFileReadError(ex))
         {
@@ -195,7 +198,7 @@ public sealed class ActioWebDataService
     private async Task<IReadOnlyList<WorkflowRunRecord>> GetProjectRunsAsync(CancellationToken cancellationToken)
     {
         var runs = await _runStore.ListRunRecordsAsync(cancellationToken);
-        return runs.Where(IsProjectRun).ToArray();
+        return runs.Where(IsProjectRun).Select(RefreshRunningDuration).ToArray();
     }
 
     private bool IsProjectRun(WorkflowRunRecord run)
@@ -215,6 +218,21 @@ public sealed class ActioWebDataService
     {
         return path.EndsWith(".yml", StringComparison.OrdinalIgnoreCase) ||
             path.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private WorkflowRunRecord RefreshRunningDuration(WorkflowRunRecord run)
+    {
+        if (!string.Equals(run.Status, "Running", StringComparison.Ordinal))
+        {
+            return run;
+        }
+
+        var now = _timeProvider.GetUtcNow();
+        return run with
+        {
+            FinishedAt = now,
+            DurationMilliseconds = Math.Max(0, (long)(now - run.StartedAt).TotalMilliseconds)
+        };
     }
 
     private static bool IsSamePath(string? left, string? right)

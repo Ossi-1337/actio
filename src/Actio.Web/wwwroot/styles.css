@@ -11,6 +11,33 @@
   --success: #3fb950;
   --danger: #f85149;
   --warning: #d29922;
+  --running: #58a6ff;
+  --brand-text: #06101f;
+  --row-hover: #1c2129;
+  --item-hover: #21262d;
+  --pre-bg: #090c10;
+  --toggle-active-bg: #1f6feb;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f6f8fa;
+  --panel: #ffffff;
+  --panel-2: #eef2f6;
+  --line: #d0d7de;
+  --line-soft: #eaeef2;
+  --text: #1f2328;
+  --muted: #59636e;
+  --accent: #0969da;
+  --success: #1a7f37;
+  --danger: #cf222e;
+  --warning: #9a6700;
+  --running: #0969da;
+  --brand-text: #ffffff;
+  --row-hover: #eef2f6;
+  --item-hover: #dbeafe;
+  --pre-bg: #f6f8fa;
+  --toggle-active-bg: #0969da;
 }
 
 * {
@@ -68,7 +95,7 @@ input {
   height: 28px;
   border-radius: 6px;
   background: var(--accent);
-  color: #06101f;
+  color: var(--brand-text);
   font-weight: 800;
 }
 
@@ -98,7 +125,7 @@ input {
 
 .workflow-item:hover,
 .workflow-item.active {
-  background: #21262d;
+  background: var(--item-hover);
   text-decoration: none;
 }
 
@@ -121,6 +148,13 @@ input {
   border-bottom: 1px solid var(--line);
 }
 
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
 h1,
 h2,
 h3,
@@ -137,6 +171,32 @@ h1 {
   display: flex;
   justify-content: flex-end;
   min-width: 260px;
+}
+
+.theme-toggle {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(58px, 1fr));
+  min-width: 128px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.theme-toggle button {
+  border: 0;
+  background: var(--panel-2);
+  color: var(--muted);
+  cursor: pointer;
+  padding: 7px 10px;
+}
+
+.theme-toggle button + button {
+  border-left: 1px solid var(--line);
+}
+
+.theme-toggle button.active {
+  background: var(--toggle-active-bg);
+  color: #ffffff;
 }
 
 input[type="search"] {
@@ -192,7 +252,7 @@ input[type="search"] {
 
 .run-row:hover,
 .run-row.active {
-  background: #1c2129;
+  background: var(--row-hover);
   text-decoration: none;
 }
 
@@ -231,6 +291,10 @@ input[type="search"] {
 
 .status-skipped {
   background: var(--warning);
+}
+
+.status-running {
+  background: var(--running);
 }
 
 .detail {
@@ -332,7 +396,7 @@ pre {
   max-height: 360px;
   padding: 12px 14px;
   border-top: 1px solid var(--line-soft);
-  background: #090c10;
+  background: var(--pre-bg);
 }
 
 .link-list {
@@ -348,6 +412,18 @@ pre {
   padding: 5px 9px;
   background: var(--panel-2);
   color: var(--text);
+}
+
+.pill.status-success,
+.pill.status-failed,
+.pill.status-running {
+  border-color: transparent;
+  color: #ffffff;
+}
+
+.pill.status-skipped {
+  border-color: transparent;
+  color: #1f2328;
 }
 
 .empty {
@@ -375,8 +451,17 @@ pre {
     flex-direction: column;
   }
 
+  .topbar-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .filters {
     min-width: 0;
     justify-content: stretch;
+  }
+
+  .theme-toggle {
+    width: min(260px, 100%);
   }
 }

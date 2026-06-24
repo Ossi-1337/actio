@@ -42,6 +42,32 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_SavesRunningRunRecordsBeforeFinalRecord()
+    {
+        var runner = new FakeRunnerProvider([0]);
+        var store = new RecordingRunStore();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Test", "dotnet test", null)]));
+
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success);
+        Assert.Equal(["Running", "Running", "Success"], store.SavedRecords.Select(record => record.Status));
+        Assert.Empty(store.SavedRecords[0].Jobs);
+        Assert.Equal("test", Assert.Single(store.SavedRecords[1].Jobs).Name);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_StopsAfterFailedStep()
     {
         var runner = new FakeRunnerProvider([0, 42]);
@@ -479,6 +505,47 @@ public sealed class WorkflowExecutorTests
 
         public Task SaveRunRecordAsync(WorkflowRunRecord runRecord, CancellationToken cancellationToken = default)
         {
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class RecordingRunStore : IRunStore
+    {
+        public List<WorkflowRunRecord> SavedRecords { get; } = [];
+
+        public string CreateRunId()
+        {
+            return "run-1";
+        }
+
+        public Task<RunStoragePaths> InitializeRunAsync(string runId, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new RunStoragePaths(runId, null, null));
+        }
+
+        public Task<IStepLog> OpenStepLogAsync(
+            string runId,
+            string jobName,
+            int stepIndex,
+            string stepName,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<IStepLog>(NullStepLog.Instance);
+        }
+
+        public Task<ArtifactSaveResult> SaveArtifactsAsync(
+            string runId,
+            string jobName,
+            string projectRoot,
+            IReadOnlyList<WorkflowArtifact> artifacts,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new ArtifactSaveResult([], []));
+        }
+
+        public Task SaveRunRecordAsync(WorkflowRunRecord runRecord, CancellationToken cancellationToken = default)
+        {
+            SavedRecords.Add(runRecord);
             return Task.CompletedTask;
         }
     }

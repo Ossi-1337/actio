@@ -1,8 +1,20 @@
+const pollActiveMilliseconds = 2000;
+const pollIdleMilliseconds = 5000;
+const pollHiddenMilliseconds = 15000;
+const themeStorageKey = "actio-theme";
+
 const state = {
   workflows: [],
   runs: [],
   selectedRunId: location.pathname.startsWith("/runs/") ? decodeURIComponent(location.pathname.split("/").pop()) : null,
-  filter: ""
+  filter: "",
+  projectRoot: "",
+  openLogs: new Set(),
+  logContents: new Map(),
+  workflowFiles: new Map(),
+  refreshTimer: null,
+  detailRequestId: 0,
+  theme: loadTheme()
 };
 
 const el = {
@@ -12,12 +24,24 @@ const el = {
   title: document.querySelector("#page-title"),
   projectRoot: document.querySelector("#project-root"),
   runCount: document.querySelector("#run-count"),
-  filter: document.querySelector("#run-filter")
+  filter: document.querySelector("#run-filter"),
+  themeToggle: document.querySelector("#theme-toggle")
 };
+
+applyTheme(state.theme);
 
 el.filter.addEventListener("input", () => {
   state.filter = el.filter.value.trim().toLowerCase();
   renderRuns();
+});
+
+el.themeToggle.addEventListener("click", event => {
+  const button = event.target.closest("[data-theme-choice]");
+  if (!button) {
+    return;
+  }
+
+  setTheme(button.dataset.themeChoice);
 });
 
 window.addEventListener("popstate", () => {
@@ -25,31 +49,45 @@ window.addEventListener("popstate", () => {
   render();
 });
 
+document.addEventListener("visibilitychange", () => {
+  scheduleRefresh(document.hidden ? pollHiddenMilliseconds : 0);
+});
+
 load();
 
 async function load() {
+  try {
+    await refreshData({ selectLatestRun: true });
+  } catch {
+    el.detail.innerHTML = `<section class="summary"><div class="empty">Actio web data is not available.</div></section>`;
+  } finally {
+    scheduleRefresh();
+  }
+}
+
+async function refreshData(options = {}) {
   const [health, workflows, runs] = await Promise.all([
     fetchJson("/api/health"),
     fetchJson("/api/workflows"),
     fetchJson("/api/runs")
   ]);
 
+  state.projectRoot = health.projectRoot;
   state.workflows = workflows;
   state.runs = runs;
-  el.projectRoot.textContent = health.projectRoot;
+  el.projectRoot.textContent = state.projectRoot;
 
-  if (!state.selectedRunId && runs.length > 0) {
-    state.selectedRunId = runs[0].runId;
-    history.replaceState(null, "", `/runs/${encodeURIComponent(state.selectedRunId)}`);
+  if (options.selectLatestRun && !state.selectedRunId && runs.length > 0) {
+    selectRun(runs[0].runId, { replaceHistory: true, renderNow: false });
   }
 
-  render();
+  await render();
 }
 
-function render() {
+async function render() {
   renderWorkflows();
   renderRuns();
-  renderDetail();
+  await renderDetail();
 }
 
 function renderWorkflows() {
@@ -96,16 +134,16 @@ function renderRuns() {
   `).join("");
 
   el.runs.querySelectorAll("[data-run]").forEach(item => {
-    item.addEventListener("click", event => {
+    item.addEventListener("click", async event => {
       event.preventDefault();
-      state.selectedRunId = item.dataset.run;
-      history.pushState(null, "", `/runs/${encodeURIComponent(state.selectedRunId)}`);
-      render();
+      await selectRun(item.dataset.run);
     });
   });
 }
 
 async function renderDetail() {
+  const requestId = ++state.detailRequestId;
+
   if (!state.selectedRunId) {
     el.detail.innerHTML = `<section class="summary"><div class="empty">No run selected.</div></section>`;
     return;
@@ -115,8 +153,16 @@ async function renderDetail() {
   try {
     run = await fetchJson(`/api/runs/${encodeURIComponent(state.selectedRunId)}`);
   } catch {
+    if (requestId !== state.detailRequestId) {
+      return;
+    }
+
     el.title.textContent = "Workflow runs";
-    el.detail.innerHTML = `<section class="summary"><div class="empty">Run is not available.</div></section>`;
+    el.detail.innerHTML = `<section class="summary"><div class="empty">Run is not available yet.</div></section>`;
+    return;
+  }
+
+  if (requestId !== state.detailRequestId) {
     return;
   }
 
@@ -131,7 +177,8 @@ async function renderDetail() {
   ].join("");
 
   wireLogButtons(run);
-  loadWorkflowFile(run.runId);
+  await loadWorkflowFile(run.runId);
+  await refreshOpenLogs(run);
 }
 
 function renderSummary(run) {
@@ -139,7 +186,7 @@ function renderSummary(run) {
     <section class="summary">
       <div class="summary-head">
         <h2>${escapeHtml(run.workflowName)}</h2>
-        <span class="pill">${escapeHtml(run.status)}</span>
+        <span class="pill ${statusClass(run.status)}">${escapeHtml(run.status)}</span>
       </div>
       <div class="summary-grid">
         ${summaryCell("Started", formatDate(run.startedAt))}
@@ -153,7 +200,7 @@ function renderSummary(run) {
 
 function renderGraph(run) {
   if (run.jobs.length === 0) {
-    return `<section class="summary"><div class="empty">No jobs recorded.</div></section>`;
+    return `<section class="summary"><div class="empty">No jobs recorded yet.</div></section>`;
   }
 
   return `
@@ -214,58 +261,84 @@ function renderJobs(run) {
     <section class="job-section">
       <div class="job-head">
         <h2>${escapeHtml(job.name)}</h2>
-        <span class="pill">${escapeHtml(job.status)}</span>
+        <span class="pill ${statusClass(job.status)}">${escapeHtml(job.status)}</span>
       </div>
       <div class="job-body">
         ${job.errors.length ? `<div class="empty">${job.errors.map(escapeHtml).join("<br>")}</div>` : ""}
-        ${job.steps.map(step => `
-          <div class="step-row">
-            <span class="status-dot ${statusClass(step.status)}"></span>
-            <span>
-              <span class="job-name">${escapeHtml(step.name)}</span>
-              <span class="run-sub muted">${escapeHtml(step.status)} · ${formatDuration(step.durationMilliseconds)}</span>
-            </span>
-            ${step.logPath ? `<button class="log-button" data-job="${escapeHtml(job.name)}" data-step="${escapeHtml(step.name)}">Log</button>` : `<span class="muted">No log</span>`}
-          </div>
-          <pre class="log-view" hidden data-log="${escapeHtml(job.name)}|${escapeHtml(step.name)}"></pre>
-        `).join("")}
+        ${job.steps.map(step => renderStep(run, job, step)).join("")}
       </div>
     </section>
   `).join("");
 }
 
+function renderStep(run, job, step) {
+  const key = logKey(run.runId, job.name, step.name);
+  const isOpen = state.openLogs.has(key);
+  const content = state.logContents.get(key) ?? "Loading...";
+
+  return `
+    <div class="step-row">
+      <span class="status-dot ${statusClass(step.status)}"></span>
+      <span>
+        <span class="job-name">${escapeHtml(step.name)}</span>
+        <span class="run-sub muted">${escapeHtml(step.status)} · ${formatDuration(step.durationMilliseconds)}</span>
+      </span>
+      ${step.logPath ? `<button class="log-button" data-log-key="${escapeHtml(key)}" data-job="${escapeHtml(job.name)}" data-step="${escapeHtml(step.name)}">Log</button>` : `<span class="muted">No log</span>`}
+    </div>
+    <pre class="log-view" ${isOpen ? "" : "hidden"} data-log-key="${escapeHtml(key)}" data-job="${escapeHtml(job.name)}" data-step="${escapeHtml(step.name)}">${escapeHtml(content)}</pre>
+  `;
+}
+
 function renderWorkflowFileShell(run) {
+  const content = state.workflowFiles.get(run.runId) ?? "Loading...";
+
   return `
     <section class="workflow-file">
       <div class="summary-head"><h2>Workflow file</h2></div>
-      <pre id="workflow-file-${escapeHtml(run.runId)}">Loading...</pre>
+      <pre id="workflow-file-${escapeHtml(run.runId)}">${escapeHtml(content)}</pre>
     </section>
   `;
 }
 
 function wireLogButtons(run) {
-  document.querySelectorAll("[data-job][data-step]").forEach(button => {
+  document.querySelectorAll(".log-button[data-log-key][data-job][data-step]").forEach(button => {
     button.addEventListener("click", async () => {
-      const job = button.dataset.job;
-      const step = button.dataset.step;
-      const target = Array.from(document.querySelectorAll("[data-log]"))
-        .find(item => item.dataset.log === `${job}|${step}`);
+      const key = button.dataset.logKey;
+      const target = Array.from(document.querySelectorAll(".log-view"))
+        .find(item => item.dataset.logKey === key);
 
       if (!target) {
         return;
       }
 
-      if (target.hidden) {
-        try {
-          target.textContent = await fetchText(`/api/runs/${encodeURIComponent(run.runId)}/logs?job=${encodeURIComponent(job)}&step=${encodeURIComponent(step)}`);
-        } catch {
-          target.textContent = "Log is not available.";
-        }
+      if (state.openLogs.has(key)) {
+        state.openLogs.delete(key);
+        target.hidden = true;
+        return;
       }
 
-      target.hidden = !target.hidden;
+      state.openLogs.add(key);
+      target.hidden = false;
+      await refreshLog(run.runId, button.dataset.job, button.dataset.step, target, key);
     });
   });
+}
+
+async function refreshOpenLogs(run) {
+  const targets = Array.from(document.querySelectorAll(".log-view:not([hidden])"));
+
+  await Promise.all(targets.map(target =>
+    refreshLog(run.runId, target.dataset.job, target.dataset.step, target, target.dataset.logKey)));
+}
+
+async function refreshLog(runId, job, step, target, key) {
+  try {
+    const content = await fetchText(`/api/runs/${encodeURIComponent(runId)}/logs?job=${encodeURIComponent(job)}&step=${encodeURIComponent(step)}`);
+    state.logContents.set(key, content);
+    target.textContent = content;
+  } catch {
+    target.textContent = "Log is not available.";
+  }
 }
 
 async function loadWorkflowFile(runId) {
@@ -274,11 +347,68 @@ async function loadWorkflowFile(runId) {
     return;
   }
 
+  if (state.workflowFiles.has(runId)) {
+    target.textContent = state.workflowFiles.get(runId);
+    return;
+  }
+
   try {
-    target.textContent = await fetchText(`/api/runs/${encodeURIComponent(runId)}/workflow-file`);
+    const content = await fetchText(`/api/runs/${encodeURIComponent(runId)}/workflow-file`);
+    state.workflowFiles.set(runId, content);
+    target.textContent = content;
   } catch {
     target.textContent = "Workflow file is not available.";
   }
+}
+
+async function selectRun(runId, options = {}) {
+  state.selectedRunId = runId;
+
+  if (options.replaceHistory) {
+    history.replaceState(null, "", `/runs/${encodeURIComponent(runId)}`);
+  } else {
+    history.pushState(null, "", `/runs/${encodeURIComponent(runId)}`);
+  }
+
+  if (options.renderNow !== false) {
+    renderRuns();
+    await renderDetail();
+  }
+}
+
+function scheduleRefresh(delay = nextPollDelay()) {
+  window.clearTimeout(state.refreshTimer);
+  state.refreshTimer = window.setTimeout(refreshFromPoll, delay);
+}
+
+async function refreshFromPoll() {
+  if (document.hidden) {
+    scheduleRefresh();
+    return;
+  }
+
+  try {
+    await refreshData();
+  } catch {
+  } finally {
+    scheduleRefresh();
+  }
+}
+
+function nextPollDelay() {
+  if (document.hidden) {
+    return pollHiddenMilliseconds;
+  }
+
+  return hasActiveRun() ? pollActiveMilliseconds : pollIdleMilliseconds;
+}
+
+function hasActiveRun() {
+  return state.runs.some(run => isActiveStatus(run.status));
+}
+
+function isActiveStatus(status) {
+  return String(status ?? "").toLowerCase() === "running";
 }
 
 function filteredRuns() {
@@ -326,6 +456,7 @@ function statusClass(status) {
   if (value === "success") return "status-success";
   if (value === "failed") return "status-failed";
   if (value === "skipped") return "status-skipped";
+  if (value === "running") return "status-running";
   return "";
 }
 
@@ -346,6 +477,37 @@ function formatDuration(milliseconds) {
 
 function shortRunId(runId) {
   return runId.length > 12 ? runId.slice(0, 12) : runId;
+}
+
+function logKey(runId, job, step) {
+  return `${runId}|${job}|${step}`;
+}
+
+function setTheme(theme) {
+  state.theme = theme === "light" ? "light" : "dark";
+  applyTheme(state.theme);
+
+  try {
+    localStorage.setItem(themeStorageKey, state.theme);
+  } catch {
+  }
+}
+
+function loadTheme() {
+  try {
+    return localStorage.getItem(themeStorageKey) === "light" ? "light" : "dark";
+  } catch {
+    return "dark";
+  }
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  el.themeToggle.querySelectorAll("[data-theme-choice]").forEach(button => {
+    const active = button.dataset.themeChoice === theme;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
 }
 
 function escapeHtml(value) {

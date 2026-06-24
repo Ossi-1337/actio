@@ -135,8 +135,24 @@ public sealed class FileSystemRunStore : IRunStore
         Directory.CreateDirectory(runDirectory);
 
         var runPath = Path.Combine(runDirectory, "run.json");
-        await using var stream = File.Create(runPath);
-        await JsonSerializer.SerializeAsync(stream, runRecord, JsonOptions, cancellationToken);
+        var tempPath = Path.Combine(runDirectory, $"run.{Guid.NewGuid():N}.tmp");
+
+        try
+        {
+            await using (var stream = File.Create(tempPath))
+            {
+                await JsonSerializer.SerializeAsync(stream, runRecord, JsonOptions, cancellationToken);
+            }
+
+            File.Move(tempPath, runPath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+            {
+                File.Delete(tempPath);
+            }
+        }
     }
 
     public async Task<WorkflowRunRecord?> ReadRunRecordAsync(
