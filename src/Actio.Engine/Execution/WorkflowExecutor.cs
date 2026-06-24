@@ -24,7 +24,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         _runStore = runStore ?? new NullRunStore();
         var outputMarkerParser = new OutputMarkerParser();
         _conditionEvaluator = new ConditionEvaluator();
-        var actionResolver = new LocalActionResolver(new ActionParser(), actionCache ?? NullActionCache.Instance);
+        var actionResolver = new ActionResolver(new ActionParser(), actionCache ?? NullActionCache.Instance);
         _jobExecutor = new JobExecutor(runnerProvider, _runStore, outputMarkerParser, actionResolver);
     }
 

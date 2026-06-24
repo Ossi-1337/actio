@@ -25,6 +25,26 @@ public sealed class NullActionCache : IActionCache
         return Task.FromResult(entry);
     }
 
+    public Task<ActionCacheEntry> GetOrAddDockerImageActionAsync(
+        DockerImageActionCacheRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var entry = new ActionCacheEntry(
+            request.Image,
+            "docker",
+            request.Uses,
+            request.Image,
+            request.Image,
+            string.Empty,
+            now,
+            now,
+            request.IsPinned ? request.Image : null,
+            request.IsPinned ? null : request.MutablePart);
+
+        return Task.FromResult(entry);
+    }
+
     public Task<IReadOnlyList<ActionCacheEntry>> ListAsync(CancellationToken cancellationToken = default)
     {
         return Task.FromResult<IReadOnlyList<ActionCacheEntry>>([]);

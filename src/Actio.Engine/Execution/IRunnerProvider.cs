@@ -8,4 +8,9 @@ public interface IRunnerProvider
         StepExecutionRequest request,
         IStepOutputSink output,
         CancellationToken cancellationToken = default);
+
+    Task<StepExecutionResult> ExecuteDockerActionAsync(
+        DockerActionExecutionRequest request,
+        IStepOutputSink output,
+        CancellationToken cancellationToken = default);
 }

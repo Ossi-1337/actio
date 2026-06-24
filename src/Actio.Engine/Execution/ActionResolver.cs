@@ -5,12 +5,12 @@ using Actio.Engine.Actions;
 
 namespace Actio.Engine.Execution;
 
-internal sealed class LocalActionResolver
+internal sealed class ActionResolver
 {
     private readonly ActionParser _parser;
     private readonly IActionCache _cache;
 
-    public LocalActionResolver(ActionParser parser, IActionCache cache)
+    public ActionResolver(ActionParser parser, IActionCache cache)
     {
         _parser = parser;
         _cache = cache;
@@ -26,7 +26,27 @@ internal sealed class LocalActionResolver
             return ActionResolutionResult.Failed(["Step does not define uses."]);
         }
 
-        var actionPathResult = ResolveActionPath(step.Uses, projectRoot);
+        if (!ActionReference.TryParse(step.Uses, out var reference))
+        {
+            return ActionResolutionResult.Failed([$"uses '{step.Uses}' is not supported. Supported formats are './...', 'docker://...', and 'owner/repo[/path]@ref'."]);
+        }
+
+        return reference!.Kind switch
+        {
+            ActionReferenceKind.Local => await ResolveLocalActionAsync(step, projectRoot, cancellationToken),
+            ActionReferenceKind.DockerImage => await ResolveDockerImageActionAsync(step, reference, cancellationToken),
+            ActionReferenceKind.GitHubRepository => ActionResolutionResult.Failed([$"uses '{step.Uses}' is a recognized external GitHub action reference, but GitHub action execution is not implemented yet."]),
+            _ => ActionResolutionResult.Failed([$"uses '{step.Uses}' is not supported."])
+        };
+    }
+
+    private async Task<ActionResolutionResult> ResolveLocalActionAsync(
+        WorkflowStep step,
+        string projectRoot,
+        CancellationToken cancellationToken)
+    {
+        var uses = step.Uses!;
+        var actionPathResult = ResolveLocalActionPath(uses, projectRoot);
         if (!actionPathResult.Success)
         {
             return ActionResolutionResult.Failed(actionPathResult.Errors);
@@ -42,32 +62,43 @@ internal sealed class LocalActionResolver
         {
             var contentHash = await ComputeContentHashAsync(actionPathResult.ActionPath!, cancellationToken);
             var cacheEntry = await _cache.GetOrAddLocalActionAsync(
-                new LocalActionCacheRequest(step.Uses, actionPathResult.ActionPath!, contentHash),
+                new LocalActionCacheRequest(uses, actionPathResult.ActionPath!, contentHash),
                 cancellationToken);
 
-            return ActionResolutionResult.Resolved(
+            return ActionResolutionResult.ResolvedLocalAction(
                 parseResult.Action!,
                 cacheEntry,
                 BuildCommand(parseResult.Action!));
         }
         catch (Exception ex) when (StorageError.IsRecoverable(ex))
         {
-            return ActionResolutionResult.Failed([StorageError.Format($"caching action '{step.Uses}'", ex)]);
+            return ActionResolutionResult.Failed([StorageError.Format($"caching action '{uses}'", ex)]);
         }
     }
 
-    private static ActionPathResult ResolveActionPath(string uses, string projectRoot)
+    private async Task<ActionResolutionResult> ResolveDockerImageActionAsync(
+        WorkflowStep step,
+        ActionReference reference,
+        CancellationToken cancellationToken)
     {
-        if (!ActionReference.TryParse(uses, out var reference))
-        {
-            return ActionPathResult.Failed([$"uses '{uses}' is not supported. Supported formats are './...', 'docker://...', and 'owner/repo[/path]@ref'."]);
-        }
+        var uses = step.Uses!;
 
-        if (reference!.IsRemote)
+        try
         {
-            return ActionPathResult.Failed([$"uses '{uses}' is a recognized external action reference, but external action execution is not implemented yet."]);
-        }
+            var cacheEntry = await _cache.GetOrAddDockerImageActionAsync(
+                new DockerImageActionCacheRequest(uses, reference.Target, reference.IsPinned, reference.MutablePart),
+                cancellationToken);
 
+            return ActionResolutionResult.ResolvedDockerImage(uses, reference.Target, cacheEntry);
+        }
+        catch (Exception ex) when (StorageError.IsRecoverable(ex))
+        {
+            return ActionResolutionResult.Failed([StorageError.Format($"caching action '{uses}'", ex)]);
+        }
+    }
+
+    private static ActionPathResult ResolveLocalActionPath(string uses, string projectRoot)
+    {
         var fullProjectRoot = Path.GetFullPath(projectRoot);
         var candidate = Path.GetFullPath(Path.Combine(fullProjectRoot, uses));
         if (!IsUnderRoot(candidate, fullProjectRoot))
@@ -151,18 +182,29 @@ internal sealed record ActionResolutionResult(
     ActionDocument? Action,
     ActionCacheEntry? CacheEntry,
     string? Command,
+    string? DockerImage,
     IReadOnlyList<string> Errors)
 {
-    public static ActionResolutionResult Resolved(
+    public bool IsDockerImageAction => DockerImage is not null;
+
+    public static ActionResolutionResult ResolvedLocalAction(
         ActionDocument action,
         ActionCacheEntry cacheEntry,
         string command)
     {
-        return new ActionResolutionResult(true, action, cacheEntry, command, []);
+        return new ActionResolutionResult(true, action, cacheEntry, command, null, []);
+    }
+
+    public static ActionResolutionResult ResolvedDockerImage(
+        string command,
+        string dockerImage,
+        ActionCacheEntry cacheEntry)
+    {
+        return new ActionResolutionResult(true, null, cacheEntry, command, dockerImage, []);
     }
 
     public static ActionResolutionResult Failed(IReadOnlyList<string> errors)
     {
-        return new ActionResolutionResult(false, null, null, null, errors);
+        return new ActionResolutionResult(false, null, null, null, null, errors);
     }
 }

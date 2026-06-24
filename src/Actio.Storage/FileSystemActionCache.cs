@@ -8,6 +8,7 @@ namespace Actio.Storage;
 public sealed class FileSystemActionCache : IActionCache
 {
     private const string LocalKind = "local";
+    private const string DockerKind = "docker";
     private const string EntryFileName = "action.json";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -34,48 +35,41 @@ public sealed class FileSystemActionCache : IActionCache
         CancellationToken cancellationToken = default)
     {
         var key = CreateLocalKey(request.SourcePath, request.ContentHash);
-        var cachePath = Path.Combine(ActionCachePath, LocalKind, key);
-        var entryPath = Path.Combine(cachePath, EntryFileName);
-        var now = DateTimeOffset.UtcNow;
-        var createdAt = now;
-
-        Directory.CreateDirectory(cachePath);
-
-        if (File.Exists(entryPath))
-        {
-            try
-            {
-                await using var readStream = File.OpenRead(entryPath);
-                var existing = await JsonSerializer.DeserializeAsync<ActionCacheEntry>(
-                    readStream,
-                    JsonOptions,
-                    cancellationToken);
-                createdAt = existing?.CreatedAt ?? now;
-            }
-            catch (JsonException)
-            {
-            }
-            catch (IOException)
-            {
-            }
-            catch (UnauthorizedAccessException)
-            {
-            }
-        }
-
-        var entry = new ActionCacheEntry(
-            key,
+        return await GetOrAddActionAsync(
             LocalKind,
-            request.Uses,
-            request.SourcePath,
-            request.ContentHash,
-            cachePath,
-            createdAt,
-            now);
+            key,
+            (cachePath, createdAt, now) => new ActionCacheEntry(
+                key,
+                LocalKind,
+                request.Uses,
+                request.SourcePath,
+                request.ContentHash,
+                cachePath,
+                createdAt,
+                now),
+            cancellationToken);
+    }
 
-        await using var writeStream = File.Create(entryPath);
-        await JsonSerializer.SerializeAsync(writeStream, entry, JsonOptions, cancellationToken);
-        return entry;
+    public async Task<ActionCacheEntry> GetOrAddDockerImageActionAsync(
+        DockerImageActionCacheRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var key = CreateDockerKey(request.Image);
+        return await GetOrAddActionAsync(
+            DockerKind,
+            key,
+            (cachePath, createdAt, now) => new ActionCacheEntry(
+                key,
+                DockerKind,
+                request.Uses,
+                request.Image,
+                request.Image,
+                cachePath,
+                createdAt,
+                now,
+                request.IsPinned ? request.Image : null,
+                request.IsPinned ? null : request.MutablePart),
+            cancellationToken);
     }
 
     public async Task<IReadOnlyList<ActionCacheEntry>> ListAsync(
@@ -158,5 +152,63 @@ public sealed class FileSystemActionCache : IActionCache
         var identity = string.Join('\0', LocalKind, normalizedPath, contentHash);
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(identity));
         return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private static string CreateDockerKey(string image)
+    {
+        var identity = string.Join('\0', DockerKind, image);
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(identity));
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private async Task<ActionCacheEntry> GetOrAddActionAsync(
+        string kind,
+        string key,
+        Func<string, DateTimeOffset, DateTimeOffset, ActionCacheEntry> createEntry,
+        CancellationToken cancellationToken)
+    {
+        var cachePath = Path.Combine(ActionCachePath, kind, key);
+        var entryPath = Path.Combine(cachePath, EntryFileName);
+        var now = DateTimeOffset.UtcNow;
+        var createdAt = now;
+
+        Directory.CreateDirectory(cachePath);
+
+        if (File.Exists(entryPath))
+        {
+            createdAt = await ReadCreatedAtAsync(entryPath, now, cancellationToken);
+        }
+
+        var entry = createEntry(cachePath, createdAt, now);
+        await using var writeStream = File.Create(entryPath);
+        await JsonSerializer.SerializeAsync(writeStream, entry, JsonOptions, cancellationToken);
+        return entry;
+    }
+
+    private static async Task<DateTimeOffset> ReadCreatedAtAsync(
+        string entryPath,
+        DateTimeOffset fallback,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var readStream = File.OpenRead(entryPath);
+            var existing = await JsonSerializer.DeserializeAsync<ActionCacheEntry>(
+                readStream,
+                JsonOptions,
+                cancellationToken);
+            return existing?.CreatedAt ?? fallback;
+        }
+        catch (JsonException)
+        {
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+
+        return fallback;
     }
 }

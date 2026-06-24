@@ -219,6 +219,16 @@ public sealed class CliApplication
             output.WriteLine($" - {entry.Kind}:{entry.Uses}");
             output.WriteLine($"   key: {entry.Key}");
             output.WriteLine($"   source: {entry.SourcePath}");
+            if (entry.PinnedIdentity is not null)
+            {
+                output.WriteLine($"   pinned: {entry.PinnedIdentity}");
+            }
+
+            if (entry.MutablePart is not null)
+            {
+                output.WriteLine($"   mutable: {entry.MutablePart}");
+            }
+
             output.WriteLine($"   path: {entry.CachePath}");
             output.WriteLine($"   last used: {entry.LastUsedAt:O}");
         }

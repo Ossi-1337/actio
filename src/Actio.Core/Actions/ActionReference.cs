@@ -3,6 +3,7 @@ namespace Actio.Core.Actions;
 public sealed record ActionReference(
     string Value,
     ActionReferenceKind Kind,
+    string Target,
     bool IsPinned,
     string? MutablePart)
 {
@@ -30,7 +31,7 @@ public sealed record ActionReference(
 
         if (IsSupportedLocalReference(value))
         {
-            reference = new ActionReference(value, ActionReferenceKind.Local, IsPinned: true, MutablePart: null);
+            reference = new ActionReference(value, ActionReferenceKind.Local, value, IsPinned: true, MutablePart: null);
             return true;
         }
 
@@ -60,6 +61,7 @@ public sealed record ActionReference(
         reference = new ActionReference(
             value,
             ActionReferenceKind.DockerImage,
+            image,
             pinned,
             pinned ? null : GetDockerMutablePart(image));
         return true;
@@ -88,6 +90,7 @@ public sealed record ActionReference(
         reference = new ActionReference(
             value,
             ActionReferenceKind.GitHubRepository,
+            path,
             pinned,
             pinned ? null : requestedRef);
         return true;

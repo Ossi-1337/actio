@@ -8,4 +8,6 @@ public sealed record ActionCacheEntry(
     string ContentHash,
     string CachePath,
     DateTimeOffset CreatedAt,
-    DateTimeOffset LastUsedAt);
+    DateTimeOffset LastUsedAt,
+    string? PinnedIdentity = null,
+    string? MutablePart = null);

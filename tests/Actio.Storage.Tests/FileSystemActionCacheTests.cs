@@ -36,6 +36,38 @@ public sealed class FileSystemActionCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task GetOrAddDockerImageActionAsync_WritesMutableDockerEntry()
+    {
+        var cache = new FileSystemActionCache(_root);
+        var request = new DockerImageActionCacheRequest("docker://alpine:3.20", "alpine:3.20", IsPinned: false, MutablePart: "3.20");
+
+        var entry = await cache.GetOrAddDockerImageActionAsync(request);
+
+        Assert.Equal("docker", entry.Kind);
+        Assert.Equal("docker://alpine:3.20", entry.Uses);
+        Assert.Equal("alpine:3.20", entry.SourcePath);
+        Assert.Equal("3.20", entry.MutablePart);
+        Assert.Null(entry.PinnedIdentity);
+        Assert.Contains(Path.Combine("cache", "actions", "docker"), entry.CachePath);
+        Assert.True(File.Exists(Path.Combine(entry.CachePath, "action.json")));
+    }
+
+    [Fact]
+    public async Task GetOrAddDockerImageActionAsync_RecordsPinnedDigest()
+    {
+        var cache = new FileSystemActionCache(_root);
+        var digest = new string('a', 64);
+        var image = $"alpine@sha256:{digest}";
+        var request = new DockerImageActionCacheRequest($"docker://{image}", image, IsPinned: true, MutablePart: null);
+
+        var entry = await cache.GetOrAddDockerImageActionAsync(request);
+
+        Assert.Equal("docker", entry.Kind);
+        Assert.Equal(image, entry.PinnedIdentity);
+        Assert.Null(entry.MutablePart);
+    }
+
+    [Fact]
     public async Task GetOrAddLocalActionAsync_RecreatesCorruptedEntry()
     {
         var cache = new FileSystemActionCache(_root);

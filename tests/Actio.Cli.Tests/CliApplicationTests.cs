@@ -856,6 +856,13 @@ public sealed class CliApplicationTests : IDisposable
             throw new NotSupportedException();
         }
 
+        public Task<ActionCacheEntry> GetOrAddDockerImageActionAsync(
+            DockerImageActionCacheRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            throw new NotSupportedException();
+        }
+
         public Task<IReadOnlyList<ActionCacheEntry>> ListAsync(CancellationToken cancellationToken = default)
         {
             if (_listException is not null)

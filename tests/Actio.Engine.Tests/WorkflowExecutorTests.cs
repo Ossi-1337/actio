@@ -391,9 +391,10 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_FailsRemoteActionWithoutExecutingRunner()
+    public async Task ExecuteAsync_RunsDockerImageAction()
     {
         var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+        var cache = new RecordingActionCache();
         var workflow = CreateWorkflow(
             new WorkflowJob(
                 "test",
@@ -401,7 +402,34 @@ public sealed class WorkflowExecutorTests
                 null,
                 "ubuntu-latest",
                 new Dictionary<string, string>(),
-                [new WorkflowStep("Use remote image", null, "docker://node:22")]));
+                [new WorkflowStep("Use image", null, "docker://alpine:3.20")]));
+
+        var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(Environment.CurrentDirectory),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Empty(runner.Requests);
+        var request = Assert.Single(runner.DockerActionRequests);
+        Assert.Equal("alpine:3.20", request.Image);
+        Assert.Equal("true", request.Environment["DOTNET_NOLOGO"]);
+        Assert.Equal("alpine:3.20", Assert.Single(cache.DockerImageRequests).Image);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_FailsWorkflowWhenDockerImageActionFails()
+    {
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(42)]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Use image", null, "docker://alpine:3.20")]));
 
         var result = await new WorkflowExecutor(runner).ExecuteAsync(
             workflow,
@@ -411,7 +439,33 @@ public sealed class WorkflowExecutorTests
 
         Assert.False(result.Success);
         Assert.Empty(runner.Requests);
-        Assert.Contains(result.Errors, error => error.Contains("external action execution is not implemented", StringComparison.OrdinalIgnoreCase));
+        Assert.Single(runner.DockerActionRequests);
+        Assert.Contains(result.Errors, error => error.Contains("exit code 42", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_FailsGitHubActionWithoutExecutingRunner()
+    {
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Use GitHub action", null, "owner/repo/action@v1")]));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(Environment.CurrentDirectory),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Empty(runner.Requests);
+        Assert.Empty(runner.DockerActionRequests);
+        Assert.Contains(result.Errors, error => error.Contains("GitHub action execution is not implemented", StringComparison.OrdinalIgnoreCase));
     }
 
     private static WorkflowDocument CreateWorkflow(params WorkflowJob[] jobs)
@@ -443,6 +497,8 @@ public sealed class WorkflowExecutorTests
 
         public List<StepExecutionRequest> Requests { get; } = [];
 
+        public List<DockerActionExecutionRequest> DockerActionRequests { get; } = [];
+
         public bool SupportsRunner(string runsOn)
         {
             return _supportsRunner;
@@ -454,6 +510,15 @@ public sealed class WorkflowExecutorTests
             CancellationToken cancellationToken = default)
         {
             Requests.Add(request);
+            return ExecuteStepAsync(_steps.Dequeue(), output, cancellationToken);
+        }
+
+        public Task<StepExecutionResult> ExecuteDockerActionAsync(
+            DockerActionExecutionRequest request,
+            IStepOutputSink output,
+            CancellationToken cancellationToken = default)
+        {
+            DockerActionRequests.Add(request);
             return ExecuteStepAsync(_steps.Dequeue(), output, cancellationToken);
         }
 
@@ -578,6 +643,8 @@ public sealed class WorkflowExecutorTests
     {
         public List<LocalActionCacheRequest> Requests { get; } = [];
 
+        public List<DockerImageActionCacheRequest> DockerImageRequests { get; } = [];
+
         public Task<ActionCacheEntry> GetOrAddLocalActionAsync(
             LocalActionCacheRequest request,
             CancellationToken cancellationToken = default)
@@ -592,6 +659,25 @@ public sealed class WorkflowExecutorTests
                 string.Empty,
                 DateTimeOffset.UtcNow,
                 DateTimeOffset.UtcNow));
+        }
+
+        public Task<ActionCacheEntry> GetOrAddDockerImageActionAsync(
+            DockerImageActionCacheRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            DockerImageRequests.Add(request);
+            var now = DateTimeOffset.UtcNow;
+            return Task.FromResult(new ActionCacheEntry(
+                request.Image,
+                "docker",
+                request.Uses,
+                request.Image,
+                request.Image,
+                string.Empty,
+                now,
+                now,
+                request.IsPinned ? request.Image : null,
+                request.IsPinned ? null : request.MutablePart));
         }
 
         public Task<IReadOnlyList<ActionCacheEntry>> ListAsync(CancellationToken cancellationToken = default)

@@ -11,6 +11,7 @@ public sealed class ActionReferenceTests
 
         Assert.True(success);
         Assert.Equal(ActionReferenceKind.Local, reference!.Kind);
+        Assert.Equal("./.actio/actions/test", reference.Target);
         Assert.False(reference.IsRemote);
         Assert.True(reference.IsPinned);
     }
@@ -22,6 +23,7 @@ public sealed class ActionReferenceTests
 
         Assert.True(success);
         Assert.Equal(ActionReferenceKind.DockerImage, reference!.Kind);
+        Assert.Equal("node:22", reference.Target);
         Assert.True(reference.IsRemote);
         Assert.True(reference.IsMutable);
         Assert.Equal("22", reference.MutablePart);
@@ -35,6 +37,7 @@ public sealed class ActionReferenceTests
 
         Assert.True(success);
         Assert.Equal(ActionReferenceKind.DockerImage, reference!.Kind);
+        Assert.Equal($"node@sha256:{digest}", reference.Target);
         Assert.True(reference.IsRemote);
         Assert.True(reference.IsPinned);
         Assert.False(reference.IsMutable);
@@ -47,6 +50,7 @@ public sealed class ActionReferenceTests
 
         Assert.True(success);
         Assert.Equal(ActionReferenceKind.GitHubRepository, reference!.Kind);
+        Assert.Equal("actions/checkout", reference.Target);
         Assert.True(reference.IsRemote);
         Assert.True(reference.IsMutable);
         Assert.Equal("v4", reference.MutablePart);
@@ -60,6 +64,7 @@ public sealed class ActionReferenceTests
 
         Assert.True(success);
         Assert.Equal(ActionReferenceKind.GitHubRepository, reference!.Kind);
+        Assert.Equal("owner/repo/path", reference.Target);
         Assert.True(reference.IsRemote);
         Assert.True(reference.IsPinned);
         Assert.False(reference.IsMutable);

@@ -12,13 +12,13 @@ internal sealed class JobExecutor
     private readonly IRunnerProvider _runnerProvider;
     private readonly IRunStore _runStore;
     private readonly OutputMarkerParser _outputMarkerParser;
-    private readonly LocalActionResolver _actionResolver;
+    private readonly ActionResolver _actionResolver;
 
     public JobExecutor(
         IRunnerProvider runnerProvider,
         IRunStore runStore,
         OutputMarkerParser outputMarkerParser,
-        LocalActionResolver actionResolver)
+        ActionResolver actionResolver)
     {
         _runnerProvider = runnerProvider;
         _runStore = runStore;
@@ -153,34 +153,45 @@ internal sealed class JobExecutor
 
         try
         {
-            var command = await ResolveStepCommandAsync(step, projectRoot, cancellationToken);
-            if (!command.Success)
+            var plan = await ResolveStepExecutionAsync(step, projectRoot, cancellationToken);
+            if (!plan.Success)
             {
-                return StepExecutionOutcome.FailedWithoutExitCode(step.Uses ?? string.Empty, command.Errors, collector.LogPath);
+                return StepExecutionOutcome.FailedWithoutExitCode(step.Uses ?? string.Empty, plan.Errors, collector.LogPath);
             }
 
-            var result = await _runnerProvider.ExecuteStepAsync(
-                new StepExecutionRequest(
-                    job.Name,
-                    step.Name,
-                    job.RunsOn,
-                    command.Command!,
-                    projectRoot,
-                    CreateStepEnvironment(workflowEnv)),
-                collector,
-                cancellationToken);
+            var environment = CreateStepEnvironment(workflowEnv);
+            var result = plan.Kind == StepExecutionKind.DockerImageAction
+                ? await _runnerProvider.ExecuteDockerActionAsync(
+                    new DockerActionExecutionRequest(
+                        job.Name,
+                        step.Name,
+                        plan.DockerImage!,
+                        projectRoot,
+                        environment),
+                    collector,
+                    cancellationToken)
+                : await _runnerProvider.ExecuteStepAsync(
+                    new StepExecutionRequest(
+                        job.Name,
+                        step.Name,
+                        job.RunsOn,
+                        plan.Command!,
+                        projectRoot,
+                        environment),
+                    collector,
+                    cancellationToken);
 
             if (!result.Success)
             {
                 return StepExecutionOutcome.Failed(
-                    command.Command!,
+                    plan.Command!,
                     result.ExitCode,
                     collector.LogPath,
                     collector.CapturedOutputs,
                     $"workflow.jobs.{job.Name}.steps.{step.Name} failed with exit code {result.ExitCode}.");
             }
 
-            return StepExecutionOutcome.Succeeded(command.Command!, result.ExitCode, collector.LogPath, collector.CapturedOutputs);
+            return StepExecutionOutcome.Succeeded(plan.Command!, result.ExitCode, collector.LogPath, collector.CapturedOutputs);
         }
         catch (Exception ex) when (StorageError.IsRecoverable(ex))
         {
@@ -190,20 +201,25 @@ internal sealed class JobExecutor
         }
     }
 
-    private async Task<StepCommandResolution> ResolveStepCommandAsync(
+    private async Task<StepExecutionPlan> ResolveStepExecutionAsync(
         WorkflowStep step,
         string projectRoot,
         CancellationToken cancellationToken)
     {
         if (step.Run is not null)
         {
-            return StepCommandResolution.Resolved(step.Run);
+            return StepExecutionPlan.ShellCommand(step.Run);
         }
 
         var action = await _actionResolver.ResolveAsync(step, projectRoot, cancellationToken);
-        return action.Success
-            ? StepCommandResolution.Resolved(action.Command!)
-            : StepCommandResolution.Failed(action.Errors);
+        if (!action.Success)
+        {
+            return StepExecutionPlan.Failed(action.Errors);
+        }
+
+        return action.IsDockerImageAction
+            ? StepExecutionPlan.DockerImageAction(action.Command!, action.DockerImage!)
+            : StepExecutionPlan.ShellCommand(action.Command!);
     }
 
     private static JobExecutionOutcome CompleteJob(
@@ -296,16 +312,27 @@ internal sealed class JobExecutor
         }
     }
 
-    private sealed record StepCommandResolution(
+    private enum StepExecutionKind
+    {
+        ShellCommand,
+        DockerImageAction
+    }
+
+    private sealed record StepExecutionPlan(
         bool Success,
+        StepExecutionKind Kind,
         string? Command,
+        string? DockerImage,
         IReadOnlyList<string> Errors)
     {
-        public static StepCommandResolution Resolved(string command)
-            => new(true, command, []);
+        public static StepExecutionPlan ShellCommand(string command)
+            => new(true, StepExecutionKind.ShellCommand, command, null, []);
 
-        public static StepCommandResolution Failed(IReadOnlyList<string> errors)
-            => new(false, null, errors);
+        public static StepExecutionPlan DockerImageAction(string command, string dockerImage)
+            => new(true, StepExecutionKind.DockerImageAction, command, dockerImage, []);
+
+        public static StepExecutionPlan Failed(IReadOnlyList<string> errors)
+            => new(false, StepExecutionKind.ShellCommand, null, null, errors);
     }
 }
 

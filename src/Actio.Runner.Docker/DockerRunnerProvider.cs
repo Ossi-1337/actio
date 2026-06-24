@@ -35,13 +35,37 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             return new StepExecutionResult(1);
         }
 
-        var containerName = CreateContainerName(request);
+        var containerName = CreateContainerName(request.JobName, request.StepName);
         using var process = new Process
         {
-            StartInfo = CreateStartInfo(request, image, containerName),
+            StartInfo = CreateShellStepStartInfo(request, image, containerName),
             EnableRaisingEvents = true
         };
 
+        return await ExecuteDockerProcessAsync(process, containerName, output, cancellationToken);
+    }
+
+    public async Task<StepExecutionResult> ExecuteDockerActionAsync(
+        DockerActionExecutionRequest request,
+        IStepOutputSink output,
+        CancellationToken cancellationToken = default)
+    {
+        var containerName = CreateContainerName(request.JobName, request.StepName);
+        using var process = new Process
+        {
+            StartInfo = CreateDockerActionStartInfo(request, containerName),
+            EnableRaisingEvents = true
+        };
+
+        return await ExecuteDockerProcessAsync(process, containerName, output, cancellationToken);
+    }
+
+    private static async Task<StepExecutionResult> ExecuteDockerProcessAsync(
+        Process process,
+        string containerName,
+        IStepOutputSink output,
+        CancellationToken cancellationToken)
+    {
         try
         {
             if (!process.Start())
@@ -76,7 +100,42 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         return new StepExecutionResult(process.ExitCode);
     }
 
-    private static ProcessStartInfo CreateStartInfo(StepExecutionRequest request, string image, string containerName)
+    private static ProcessStartInfo CreateShellStepStartInfo(StepExecutionRequest request, string image, string containerName)
+    {
+        var startInfo = CreateBaseStartInfo(
+            request.JobName,
+            request.StepName,
+            request.ProjectRoot,
+            request.Environment,
+            containerName);
+        startInfo.ArgumentList.Add(image);
+        startInfo.ArgumentList.Add("sh");
+        startInfo.ArgumentList.Add("-lc");
+        startInfo.ArgumentList.Add(BuildShellScript(request.Command));
+
+        return startInfo;
+    }
+
+    internal static ProcessStartInfo CreateDockerActionStartInfo(
+        DockerActionExecutionRequest request,
+        string containerName)
+    {
+        var startInfo = CreateBaseStartInfo(
+            request.JobName,
+            request.StepName,
+            request.ProjectRoot,
+            request.Environment,
+            containerName);
+        startInfo.ArgumentList.Add(request.Image);
+        return startInfo;
+    }
+
+    private static ProcessStartInfo CreateBaseStartInfo(
+        string jobName,
+        string stepName,
+        string projectRoot,
+        IReadOnlyDictionary<string, string> environment,
+        string containerName)
     {
         var startInfo = new ProcessStartInfo("docker")
         {
@@ -94,24 +153,19 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         startInfo.ArgumentList.Add("--label");
         startInfo.ArgumentList.Add("actio=true");
         startInfo.ArgumentList.Add("--label");
-        startInfo.ArgumentList.Add($"actio.job={request.JobName}");
+        startInfo.ArgumentList.Add($"actio.job={jobName}");
         startInfo.ArgumentList.Add("--label");
-        startInfo.ArgumentList.Add($"actio.step={request.StepName}");
+        startInfo.ArgumentList.Add($"actio.step={stepName}");
         startInfo.ArgumentList.Add("-v");
-        startInfo.ArgumentList.Add($"{Path.GetFullPath(request.ProjectRoot)}:/workspace");
+        startInfo.ArgumentList.Add($"{Path.GetFullPath(projectRoot)}:/workspace");
         startInfo.ArgumentList.Add("-w");
         startInfo.ArgumentList.Add("/workspace");
 
-        foreach (var (key, value) in request.Environment.OrderBy(item => item.Key, StringComparer.Ordinal))
+        foreach (var (key, value) in environment.OrderBy(item => item.Key, StringComparer.Ordinal))
         {
             startInfo.ArgumentList.Add("-e");
             startInfo.ArgumentList.Add($"{key}={value}");
         }
-
-        startInfo.ArgumentList.Add(image);
-        startInfo.ArgumentList.Add("sh");
-        startInfo.ArgumentList.Add("-lc");
-        startInfo.ArgumentList.Add(BuildShellScript(request.Command));
 
         return startInfo;
     }
@@ -149,9 +203,9 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         }
     }
 
-    private static string CreateContainerName(StepExecutionRequest request)
+    private static string CreateContainerName(string jobName, string stepName)
     {
-        var name = $"actio-{SanitizeName(request.JobName)}-{SanitizeName(request.StepName)}-{Guid.NewGuid():N}";
+        var name = $"actio-{SanitizeName(jobName)}-{SanitizeName(stepName)}-{Guid.NewGuid():N}";
         return name.Length <= 63 ? name : name[..63].TrimEnd('-');
     }
 
