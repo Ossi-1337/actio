@@ -33,6 +33,33 @@ public sealed class ActioWebDataServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task GetWorkflowsAsync_ReturnsGitHubWorkflowWhenActioWorkflowIsMissing()
+    {
+        var workflowPath = WriteGitHubWorkflow("ci.yml", "GitHub CI");
+        await SaveRunAsync(CreateRun("run-1", "GitHub CI", workflowPath));
+
+        var workflows = await CreateService().GetWorkflowsAsync();
+
+        var workflow = Assert.Single(workflows);
+        Assert.Equal("GitHub CI", workflow.Name);
+        Assert.Equal(workflowPath, workflow.Path);
+        Assert.Equal("run-1", workflow.LatestRunId);
+    }
+
+    [Fact]
+    public async Task GetWorkflowsAsync_PrefersActioWorkflowWhenBothRootsContainSameFilename()
+    {
+        var actioWorkflowPath = WriteWorkflow("ci.yml", "Actio CI");
+        WriteGitHubWorkflow("ci.yml", "GitHub CI");
+
+        var workflows = await CreateService().GetWorkflowsAsync();
+
+        var workflow = Assert.Single(workflows);
+        Assert.Equal("Actio CI", workflow.Name);
+        Assert.Equal(actioWorkflowPath, workflow.Path);
+    }
+
+    [Fact]
     public async Task GetRunsAsync_ReturnsOnlyRunsForProjectRoot()
     {
         var workflowPath = WriteWorkflow("ci.yml", "CI");
@@ -170,6 +197,28 @@ public sealed class ActioWebDataServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task UpdateWorkflowFileAsync_SavesGitHubWorkflow()
+    {
+        var workflowPath = WriteGitHubWorkflow("ci.yml", "CI");
+        await SaveRunAsync(CreateRun("run-1", "CI", workflowPath));
+
+        var result = await CreateService().UpdateWorkflowFileAsync(
+            "run-1",
+            """
+            name: Updated CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Contains("name: Updated CI", await File.ReadAllTextAsync(workflowPath));
+    }
+
+    [Fact]
     public async Task UpdateWorkflowFileAsync_RejectsInvalidWorkflowWithoutOverwriting()
     {
         var workflowPath = WriteWorkflow("ci.yml", "CI");
@@ -204,6 +253,7 @@ public sealed class ActioWebDataServiceTests : IDisposable
 
         Assert.False(result.Success);
         Assert.Contains(result.Errors, error => error.Contains(".workflows", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains(".github/workflows", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -259,6 +309,25 @@ public sealed class ActioWebDataServiceTests : IDisposable
     private string WriteWorkflow(string fileName, string name)
     {
         var path = Path.Combine(_projectRoot, ".workflows", fileName);
+        File.WriteAllText(
+            path,
+            $"""
+            name: {name}
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+        return path;
+    }
+
+    private string WriteGitHubWorkflow(string fileName, string name)
+    {
+        var directory = Path.Combine(_projectRoot, ".github", "workflows");
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, fileName);
         File.WriteAllText(
             path,
             $"""

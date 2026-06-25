@@ -27,11 +27,60 @@ public sealed class WorkflowFileResolverTests : IDisposable
     }
 
     [Fact]
+    public void Resolve_UsesGitHubWorkflowFolderWhenActioWorkflowIsMissing()
+    {
+        var workflowDirectory = Path.Combine(_root, ".github", "workflows");
+        Directory.CreateDirectory(workflowDirectory);
+        var workflowPath = Path.Combine(workflowDirectory, "ci.yml");
+        File.WriteAllText(workflowPath, "name: CI");
+
+        var result = new WorkflowFileResolver().Resolve("ci.yml", _root);
+
+        Assert.True(result.Success);
+        Assert.Equal(_root, result.ProjectRoot);
+        Assert.Equal(workflowPath, result.WorkflowPath);
+    }
+
+    [Fact]
+    public void Resolve_PrefersActioWorkflowFolderWhenBothRootsContainSameFilename()
+    {
+        var actioWorkflowPath = Path.Combine(_root, ".workflows", "ci.yml");
+        File.WriteAllText(actioWorkflowPath, "name: Actio CI");
+        var gitHubWorkflowDirectory = Path.Combine(_root, ".github", "workflows");
+        Directory.CreateDirectory(gitHubWorkflowDirectory);
+        File.WriteAllText(Path.Combine(gitHubWorkflowDirectory, "ci.yml"), "name: GitHub CI");
+
+        var result = new WorkflowFileResolver().Resolve("ci.yml", _root);
+
+        Assert.True(result.Success);
+        Assert.Equal(actioWorkflowPath, result.WorkflowPath);
+    }
+
+    [Fact]
     public void Resolve_WalksUpToProjectRoot()
     {
         var nested = Path.Combine(_root, "src", "App");
         Directory.CreateDirectory(nested);
         var workflowPath = Path.Combine(_root, ".workflows", "ci.yml");
+        File.WriteAllText(workflowPath, "name: CI");
+
+        var result = new WorkflowFileResolver().Resolve("ci.yml", nested);
+
+        Assert.True(result.Success);
+        Assert.Equal(_root, result.ProjectRoot);
+        Assert.Equal(workflowPath, result.WorkflowPath);
+    }
+
+    [Fact]
+    public void Resolve_WalksUpToGitHubWorkflowProjectRoot()
+    {
+        Directory.Delete(Path.Combine(_root, ".git"));
+        Directory.Delete(Path.Combine(_root, ".workflows"));
+        var workflowDirectory = Path.Combine(_root, ".github", "workflows");
+        var nested = Path.Combine(_root, "src", "App");
+        Directory.CreateDirectory(workflowDirectory);
+        Directory.CreateDirectory(nested);
+        var workflowPath = Path.Combine(workflowDirectory, "ci.yml");
         File.WriteAllText(workflowPath, "name: CI");
 
         var result = new WorkflowFileResolver().Resolve("ci.yml", nested);

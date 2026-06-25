@@ -24,6 +24,7 @@ public sealed class CliApplicationTests : IDisposable
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
         Assert.Contains("Actio - local-first workflow runner.", result.Output);
+        Assert.Contains(".github/workflows fallback", result.Output);
         Assert.Contains("Usage:", result.Output);
         Assert.Contains("Commands:", result.Output);
         Assert.Contains("Options:", result.Output);
@@ -51,6 +52,7 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Contains("Actio run - run a workflow.", result.Output);
         Assert.Contains("Arguments:", result.Output);
         Assert.Contains("Description:", result.Output);
+        Assert.Contains(".github/workflows/<workflow>.yml", result.Output);
         Assert.Equal(string.Empty, result.Error);
         Assert.Null(result.Executor.Workflow);
     }

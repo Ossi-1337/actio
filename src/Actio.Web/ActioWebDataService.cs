@@ -48,19 +48,10 @@ public sealed class ActioWebDataService
 
     public async Task<IReadOnlyList<WorkflowSummary>> GetWorkflowsAsync(CancellationToken cancellationToken = default)
     {
-        var workflowDirectory = Path.Combine(ProjectRoot, ".workflows");
-        if (!Directory.Exists(workflowDirectory))
-        {
-            return [];
-        }
-
         var runs = await GetProjectRunsAsync(cancellationToken);
         var workflows = new List<WorkflowSummary>();
 
-        foreach (var workflowPath in Directory
-            .EnumerateFiles(workflowDirectory, "*.*", SearchOption.TopDirectoryOnly)
-            .Where(IsWorkflowFile)
-            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+        foreach (var workflowPath in EnumerateWorkflowFiles())
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -241,7 +232,7 @@ public sealed class ActioWebDataService
         var workflowPath = await ResolveWorkflowPathAsync(runId, cancellationToken);
         if (workflowPath is null)
         {
-            return WorkflowFileUpdateResult.Failed(["Workflow file could not be resolved inside the project's .workflows directory."]);
+            return WorkflowFileUpdateResult.Failed(["Workflow file could not be resolved inside the project's .workflows or .github/workflows directory."]);
         }
 
         var parseResult = _workflowParser.Parse(new StringReader(content));
@@ -289,7 +280,7 @@ public sealed class ActioWebDataService
         if (run?.WorkflowPath is null ||
             !File.Exists(run.WorkflowPath) ||
             !IsWorkflowFile(run.WorkflowPath) ||
-            !IsUnderRoot(run.WorkflowPath, WorkflowDirectory))
+            !IsUnderWorkflowRoot(run.WorkflowPath))
         {
             return null;
         }
@@ -305,7 +296,45 @@ public sealed class ActioWebDataService
             : Path.GetFileNameWithoutExtension(workflowPath);
     }
 
-    private string WorkflowDirectory => Path.Combine(ProjectRoot, ".workflows");
+    private IEnumerable<string> EnumerateWorkflowFiles()
+    {
+        var seenFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var workflowDirectory in WorkflowDirectories)
+        {
+            if (!Directory.Exists(workflowDirectory))
+            {
+                continue;
+            }
+
+            foreach (var workflowPath in Directory
+                .EnumerateFiles(workflowDirectory, "*.*", SearchOption.TopDirectoryOnly)
+                .Where(IsWorkflowFile)
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+            {
+                if (seenFileNames.Add(Path.GetFileName(workflowPath)))
+                {
+                    yield return workflowPath;
+                }
+            }
+        }
+    }
+
+    private bool IsUnderWorkflowRoot(string path)
+        => WorkflowDirectories.Any(directory => IsUnderRoot(path, directory));
+
+    private string ActioWorkflowDirectory => Path.Combine(ProjectRoot, WorkflowFileResolver.ActioWorkflowDirectoryName);
+
+    private string GitHubWorkflowDirectory => Path.Combine(ProjectRoot, WorkflowFileResolver.GitHubWorkflowDirectoryName);
+
+    private IEnumerable<string> WorkflowDirectories
+    {
+        get
+        {
+            yield return ActioWorkflowDirectory;
+            yield return GitHubWorkflowDirectory;
+        }
+    }
 
     private static bool IsWorkflowFile(string path)
     {

@@ -2,6 +2,9 @@ namespace Actio.Core.Workflows;
 
 public sealed class WorkflowFileResolver
 {
+    public const string ActioWorkflowDirectoryName = ".workflows";
+    public static readonly string GitHubWorkflowDirectoryName = Path.Combine(".github", "workflows");
+
     private static readonly char[] DirectorySeparators = ['/', '\\'];
 
     public WorkflowResolutionResult Resolve(string workflowName, string workingDirectory)
@@ -28,15 +31,20 @@ public sealed class WorkflowFileResolver
         }
 
         var projectRoot = FindProjectRoot(workingDirectory);
-        var workflowPath = Path.Combine(projectRoot, ".workflows", workflowName);
-
-        if (!File.Exists(workflowPath))
+        var actioWorkflowPath = Path.Combine(projectRoot, ActioWorkflowDirectoryName, workflowName);
+        if (File.Exists(actioWorkflowPath))
         {
-            errors.Add($"Workflow file was not found at '{workflowPath}'.");
-            return WorkflowResolutionResult.Failed(errors);
+            return WorkflowResolutionResult.Resolved(projectRoot, actioWorkflowPath);
         }
 
-        return WorkflowResolutionResult.Resolved(projectRoot, workflowPath);
+        var gitHubWorkflowPath = Path.Combine(projectRoot, GitHubWorkflowDirectoryName, workflowName);
+        if (File.Exists(gitHubWorkflowPath))
+        {
+            return WorkflowResolutionResult.Resolved(projectRoot, gitHubWorkflowPath);
+        }
+
+        errors.Add($"Workflow file was not found at '{actioWorkflowPath}' or '{gitHubWorkflowPath}'.");
+        return WorkflowResolutionResult.Failed(errors);
     }
 
     public string FindProjectRoot(string workingDirectory)
@@ -46,7 +54,8 @@ public sealed class WorkflowFileResolver
         while (directory is not null)
         {
             if (Directory.Exists(Path.Combine(directory.FullName, ".git")) ||
-                Directory.Exists(Path.Combine(directory.FullName, ".workflows")))
+                Directory.Exists(Path.Combine(directory.FullName, ActioWorkflowDirectoryName)) ||
+                Directory.Exists(Path.Combine(directory.FullName, GitHubWorkflowDirectoryName)))
             {
                 return directory.FullName;
             }

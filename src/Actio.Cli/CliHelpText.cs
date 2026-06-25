@@ -13,12 +13,12 @@ public static class CliHelpText
           actio [options]
 
         Commands:
-          run <workflow>.yml   Run a workflow from the project's .workflows directory.
+          run <workflow>.yml   Run a workflow from .workflows, with .github/workflows fallback.
           web                  Start the local Actio web UI.
           cache                Inspect or clean Actio cache entries.
 
         Arguments:
-          <workflow>.yml       Bare workflow filename inside .workflows, for example ci.yml.
+          <workflow>.yml       Bare workflow filename, for example ci.yml.
 
         Options:
           -h, --help              Show help.
@@ -40,13 +40,14 @@ public static class CliHelpText
           actio <workflow>.yml [options]
 
         Arguments:
-          <workflow>.yml          Bare workflow filename inside .workflows, for example ci.yml.
+          <workflow>.yml          Bare workflow filename, for example ci.yml.
 
         Options:
           -h, --help              Show help for the run command.
 
         Description:
-          Parses .workflows/<workflow>.yml and executes supported run steps in Docker.
+          Resolves .workflows/<workflow>.yml first, then .github/workflows/<workflow>.yml
+          as a GitHub Actions compatibility fallback. Supported steps execute in Docker.
           Local uses references work today. External action references are validated
           and warn when mutable, then execute when their action type is supported.
 
