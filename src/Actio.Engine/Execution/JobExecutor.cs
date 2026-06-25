@@ -159,7 +159,7 @@ internal sealed class JobExecutor
                 return StepExecutionOutcome.FailedWithoutExitCode(step.Uses ?? string.Empty, plan.Errors, collector.LogPath);
             }
 
-            var environment = CreateStepEnvironment(workflowEnv);
+            var environment = CreateStepEnvironment(workflowEnv, plan.Environment);
             var result = plan.Kind == StepExecutionKind.DockerImageAction
                 ? await _runnerProvider.ExecuteDockerActionAsync(
                     new DockerActionExecutionRequest(
@@ -177,7 +177,8 @@ internal sealed class JobExecutor
                         job.RunsOn,
                         plan.Command!,
                         projectRoot,
-                        environment),
+                        environment,
+                        plan.AdditionalMounts),
                     collector,
                     cancellationToken);
 
@@ -219,7 +220,7 @@ internal sealed class JobExecutor
 
         return action.IsDockerImageAction
             ? StepExecutionPlan.DockerImageAction(action.Command!, action.DockerImage!)
-            : StepExecutionPlan.ShellCommand(action.Command!);
+            : StepExecutionPlan.ShellCommand(action.Command!, action.Environment, action.AdditionalMounts);
     }
 
     private static JobExecutionOutcome CompleteJob(
@@ -260,9 +261,12 @@ internal sealed class JobExecutor
     }
 
     private static IReadOnlyDictionary<string, string> CreateStepEnvironment(
-        IReadOnlyDictionary<string, string> workflowEnv)
+        IReadOnlyDictionary<string, string> workflowEnv,
+        IReadOnlyDictionary<string, string> actionEnv)
     {
-        return new Dictionary<string, string>(workflowEnv, StringComparer.Ordinal);
+        var environment = new Dictionary<string, string>(workflowEnv, StringComparer.Ordinal);
+        environment.Merge(actionEnv);
+        return environment;
     }
 
     private static long ToDurationMilliseconds(DateTimeOffset startedAt, DateTimeOffset finishedAt)
@@ -323,16 +327,30 @@ internal sealed class JobExecutor
         StepExecutionKind Kind,
         string? Command,
         string? DockerImage,
+        IReadOnlyDictionary<string, string> Environment,
+        IReadOnlyList<StepExecutionMount> AdditionalMounts,
         IReadOnlyList<string> Errors)
     {
-        public static StepExecutionPlan ShellCommand(string command)
-            => new(true, StepExecutionKind.ShellCommand, command, null, []);
+        public static StepExecutionPlan ShellCommand(
+            string command,
+            IReadOnlyDictionary<string, string>? environment = null,
+            IReadOnlyList<StepExecutionMount>? additionalMounts = null)
+        {
+            return new(
+                true,
+                StepExecutionKind.ShellCommand,
+                command,
+                null,
+                environment ?? new Dictionary<string, string>(),
+                additionalMounts ?? [],
+                []);
+        }
 
         public static StepExecutionPlan DockerImageAction(string command, string dockerImage)
-            => new(true, StepExecutionKind.DockerImageAction, command, dockerImage, []);
+            => new(true, StepExecutionKind.DockerImageAction, command, dockerImage, new Dictionary<string, string>(), [], []);
 
         public static StepExecutionPlan Failed(IReadOnlyList<string> errors)
-            => new(false, StepExecutionKind.ShellCommand, null, null, errors);
+            => new(false, StepExecutionKind.ShellCommand, null, null, new Dictionary<string, string>(), [], errors);
     }
 }
 

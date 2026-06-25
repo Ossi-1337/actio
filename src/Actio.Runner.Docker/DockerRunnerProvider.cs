@@ -100,14 +100,15 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         return new StepExecutionResult(process.ExitCode);
     }
 
-    private static ProcessStartInfo CreateShellStepStartInfo(StepExecutionRequest request, string image, string containerName)
+    internal static ProcessStartInfo CreateShellStepStartInfo(StepExecutionRequest request, string image, string containerName)
     {
         var startInfo = CreateBaseStartInfo(
             request.JobName,
             request.StepName,
             request.ProjectRoot,
             request.Environment,
-            containerName);
+            containerName,
+            request.AdditionalMounts);
         startInfo.ArgumentList.Add(image);
         startInfo.ArgumentList.Add("sh");
         startInfo.ArgumentList.Add("-lc");
@@ -125,7 +126,8 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             request.StepName,
             request.ProjectRoot,
             request.Environment,
-            containerName);
+            containerName,
+            []);
         startInfo.ArgumentList.Add(request.Image);
         return startInfo;
     }
@@ -135,7 +137,8 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         string stepName,
         string projectRoot,
         IReadOnlyDictionary<string, string> environment,
-        string containerName)
+        string containerName,
+        IReadOnlyList<StepExecutionMount>? additionalMounts)
     {
         var startInfo = new ProcessStartInfo("docker")
         {
@@ -160,6 +163,13 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         startInfo.ArgumentList.Add($"{Path.GetFullPath(projectRoot)}:/workspace");
         startInfo.ArgumentList.Add("-w");
         startInfo.ArgumentList.Add("/workspace");
+
+        foreach (var mount in additionalMounts ?? [])
+        {
+            var suffix = mount.ReadOnly ? ":ro" : string.Empty;
+            startInfo.ArgumentList.Add("-v");
+            startInfo.ArgumentList.Add($"{Path.GetFullPath(mount.HostPath)}:{mount.ContainerPath}{suffix}");
+        }
 
         foreach (var (key, value) in environment.OrderBy(item => item.Key, StringComparer.Ordinal))
         {

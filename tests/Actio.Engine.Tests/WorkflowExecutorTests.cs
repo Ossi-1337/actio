@@ -444,7 +444,7 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_FailsGitHubActionWithoutExecutingRunner()
+    public async Task ExecuteAsync_FailsGitHubActionWhenNoSourceProviderIsConfigured()
     {
         var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
         var workflow = CreateWorkflow(
@@ -465,7 +465,166 @@ public sealed class WorkflowExecutorTests
         Assert.False(result.Success);
         Assert.Empty(runner.Requests);
         Assert.Empty(runner.DockerActionRequests);
-        Assert.Contains(result.Errors, error => error.Contains("GitHub action execution is not implemented", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("no GitHub action source provider is configured", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_RunsGitHubCompositeAction()
+    {
+        var actionRoot = Path.Combine(Path.GetTempPath(), $"actio-github-action-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(actionRoot);
+        var actionPath = Path.Combine(actionRoot, "action.yml");
+        await File.WriteAllTextAsync(
+            actionPath,
+            """
+            name: Remote hello
+            runs:
+              using: composite
+              steps:
+                - name: Greet
+                  run: echo remote
+            """);
+
+        try
+        {
+            var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+            var cache = new RecordingActionCache();
+            cache.GitHubSourceResult = GitHubActionSourceResult.Resolved(
+                actionPath,
+                actionRoot,
+                new ActionCacheEntry(
+                    "key",
+                    "github",
+                    "owner/repo/action@v1",
+                    actionPath,
+                    new string('a', 40),
+                    actionRoot,
+                    DateTimeOffset.UtcNow,
+                    DateTimeOffset.UtcNow,
+                    new string('a', 40),
+                    "v1"));
+            var workflow = CreateWorkflow(
+                new WorkflowJob(
+                    "test",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Use GitHub action", null, "owner/repo/action@v1")]));
+
+            var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(Environment.CurrentDirectory),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+            var sourceRequest = Assert.Single(cache.GitHubSourceRequests);
+            Assert.Equal("owner", sourceRequest.Owner);
+            Assert.Equal("repo", sourceRequest.Repository);
+            Assert.Equal("action", sourceRequest.ActionPath);
+            Assert.Equal("v1", sourceRequest.Ref);
+            var request = Assert.Single(runner.Requests);
+            Assert.Equal("echo remote", request.Command);
+            Assert.Equal("/actio/action", request.Environment["GITHUB_ACTION_PATH"]);
+            var mount = Assert.Single(request.AdditionalMounts);
+            Assert.Equal(actionRoot, mount.HostPath);
+            Assert.Equal("/actio/action", mount.ContainerPath);
+            Assert.True(mount.ReadOnly);
+        }
+        finally
+        {
+            Directory.Delete(actionRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_FailsUnsupportedGitHubActionBeforeExecutingRunner()
+    {
+        var actionRoot = Path.Combine(Path.GetTempPath(), $"actio-github-action-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(actionRoot);
+        var actionPath = Path.Combine(actionRoot, "action.yml");
+        await File.WriteAllTextAsync(
+            actionPath,
+            """
+            name: JavaScript action
+            runs:
+              using: node20
+              main: index.js
+            """);
+
+        try
+        {
+            var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+            var cache = new RecordingActionCache
+            {
+                GitHubSourceResult = GitHubActionSourceResult.Resolved(
+                    actionPath,
+                    actionRoot,
+                    new ActionCacheEntry(
+                        "key",
+                        "github",
+                        "actions/checkout@v4",
+                        actionPath,
+                        new string('b', 40),
+                        actionRoot,
+                        DateTimeOffset.UtcNow,
+                        DateTimeOffset.UtcNow,
+                        new string('b', 40),
+                        "v4"))
+            };
+            var workflow = CreateWorkflow(
+                new WorkflowJob(
+                    "test",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Use checkout", null, "actions/checkout@v4")]));
+
+            var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(Environment.CurrentDirectory),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.False(result.Success);
+            Assert.Empty(runner.Requests);
+            Assert.Empty(runner.DockerActionRequests);
+            Assert.Contains(result.Errors, error => error.Contains("supports only 'composite'", StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            Directory.Delete(actionRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_FailsWhenGitHubActionSourceCannotBeResolved()
+    {
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+        var cache = new RecordingActionCache
+        {
+            GitHubSourceResult = GitHubActionSourceResult.Failed(["repository not found"])
+        };
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Use GitHub action", null, "owner/repo/action@v1")]));
+
+        var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(Environment.CurrentDirectory),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Empty(runner.Requests);
+        Assert.Contains(result.Errors, error => error.Contains("repository not found", StringComparison.OrdinalIgnoreCase));
     }
 
     private static WorkflowDocument CreateWorkflow(params WorkflowJob[] jobs)
@@ -639,11 +798,15 @@ public sealed class WorkflowExecutorTests
         }
     }
 
-    private sealed class RecordingActionCache : IActionCache
+    private sealed class RecordingActionCache : IActionCache, IGitHubActionSourceProvider
     {
         public List<LocalActionCacheRequest> Requests { get; } = [];
 
         public List<DockerImageActionCacheRequest> DockerImageRequests { get; } = [];
+
+        public List<GitHubActionSourceRequest> GitHubSourceRequests { get; } = [];
+
+        public GitHubActionSourceResult? GitHubSourceResult { get; set; }
 
         public Task<ActionCacheEntry> GetOrAddLocalActionAsync(
             LocalActionCacheRequest request,
@@ -678,6 +841,16 @@ public sealed class WorkflowExecutorTests
                 now,
                 request.IsPinned ? request.Image : null,
                 request.IsPinned ? null : request.MutablePart));
+        }
+
+        public Task<GitHubActionSourceResult> GetGitHubActionSourceAsync(
+            GitHubActionSourceRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            GitHubSourceRequests.Add(request);
+            return Task.FromResult(
+                GitHubSourceResult ??
+                GitHubActionSourceResult.Failed(["GitHub source result was not configured."]));
         }
 
         public Task<IReadOnlyList<ActionCacheEntry>> ListAsync(CancellationToken cancellationToken = default)

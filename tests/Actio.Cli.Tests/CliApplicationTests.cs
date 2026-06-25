@@ -99,13 +99,15 @@ public sealed class CliApplicationTests : IDisposable
             [
                 new ActionCacheEntry(
                     "key-1",
-                    "local",
-                    "./.actio/actions/hello",
-                    "C:\\repo\\.actio\\actions\\hello\\action.yml",
-                    "hash",
-                    "C:\\actio\\cache\\actions\\local\\key-1",
+                    "github",
+                    "owner/repo/action@v1",
+                    "C:\\actio\\cache\\actions\\github\\key-1\\source\\action\\action.yml",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "C:\\actio\\cache\\actions\\github\\key-1",
                     DateTimeOffset.Parse("2026-06-23T10:00:00Z"),
-                    DateTimeOffset.Parse("2026-06-23T11:00:00Z"))
+                    DateTimeOffset.Parse("2026-06-23T11:00:00Z"),
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "v1")
             ]);
         var executor = new FakeWorkflowExecutor(new WorkflowExecutionResult(WorkflowExecutionStatus.Success, 1, 1, []));
 
@@ -113,8 +115,10 @@ public sealed class CliApplicationTests : IDisposable
 
         Assert.Equal(ExitCodes.Success, exitCode);
         Assert.Contains("cache:", output.ToString());
-        Assert.Contains("local:./.actio/actions/hello", output.ToString());
+        Assert.Contains("github:owner/repo/action@v1", output.ToString());
         Assert.Contains("key: key-1", output.ToString());
+        Assert.Contains("pinned: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", output.ToString());
+        Assert.Contains("mutable: v1", output.ToString());
         Assert.Equal(string.Empty, error.ToString());
     }
 

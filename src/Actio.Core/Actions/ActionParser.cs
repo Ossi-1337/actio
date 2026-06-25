@@ -6,7 +6,12 @@ public sealed class ActionParser
 {
     private static readonly HashSet<string> TopLevelKeys = new(StringComparer.Ordinal)
     {
+        "author",
+        "branding",
+        "description",
+        "inputs",
         "name",
+        "outputs",
         "runs"
     };
 
@@ -19,7 +24,8 @@ public sealed class ActionParser
     private static readonly HashSet<string> StepKeys = new(StringComparer.Ordinal)
     {
         "name",
-        "run"
+        "run",
+        "shell"
     };
 
     public ActionParseResult ParseFile(string actionPath)

@@ -7,13 +7,20 @@ namespace Actio.Engine.Execution;
 
 internal sealed class ActionResolver
 {
+    private const string GitHubActionContainerPath = "/actio/action";
+
     private readonly ActionParser _parser;
     private readonly IActionCache _cache;
+    private readonly IGitHubActionSourceProvider _githubActionSourceProvider;
 
-    public ActionResolver(ActionParser parser, IActionCache cache)
+    public ActionResolver(
+        ActionParser parser,
+        IActionCache cache,
+        IGitHubActionSourceProvider githubActionSourceProvider)
     {
         _parser = parser;
         _cache = cache;
+        _githubActionSourceProvider = githubActionSourceProvider;
     }
 
     public async Task<ActionResolutionResult> ResolveAsync(
@@ -35,7 +42,7 @@ internal sealed class ActionResolver
         {
             ActionReferenceKind.Local => await ResolveLocalActionAsync(step, projectRoot, cancellationToken),
             ActionReferenceKind.DockerImage => await ResolveDockerImageActionAsync(step, reference, cancellationToken),
-            ActionReferenceKind.GitHubRepository => ActionResolutionResult.Failed([$"uses '{step.Uses}' is a recognized external GitHub action reference, but GitHub action execution is not implemented yet."]),
+            ActionReferenceKind.GitHubRepository => await ResolveGitHubActionAsync(step, reference, cancellationToken),
             _ => ActionResolutionResult.Failed([$"uses '{step.Uses}' is not supported."])
         };
     }
@@ -95,6 +102,51 @@ internal sealed class ActionResolver
         {
             return ActionResolutionResult.Failed([StorageError.Format($"caching action '{uses}'", ex)]);
         }
+    }
+
+    private async Task<ActionResolutionResult> ResolveGitHubActionAsync(
+        WorkflowStep step,
+        ActionReference reference,
+        CancellationToken cancellationToken)
+    {
+        var uses = step.Uses!;
+        if (!reference.TryGetGitHubAction(out var githubAction))
+        {
+            return ActionResolutionResult.Failed([$"uses '{uses}' is not a valid GitHub action reference."]);
+        }
+
+        var sourceResult = await _githubActionSourceProvider.GetGitHubActionSourceAsync(
+            new GitHubActionSourceRequest(
+                uses,
+                githubAction!.Owner,
+                githubAction.Repository,
+                githubAction.ActionPath,
+                githubAction.Ref,
+                reference.IsPinned,
+                reference.MutablePart),
+            cancellationToken);
+
+        if (!sourceResult.Success)
+        {
+            return ActionResolutionResult.Failed(sourceResult.Errors);
+        }
+
+        var parseResult = _parser.ParseFile(sourceResult.ActionFilePath!);
+        if (!parseResult.Success)
+        {
+            return ActionResolutionResult.Failed(parseResult.Errors);
+        }
+
+        return ActionResolutionResult.ResolvedGitHubAction(
+            parseResult.Action!,
+            sourceResult.CacheEntry!,
+            BuildCommand(parseResult.Action!),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["ACTIO_ACTION_PATH"] = GitHubActionContainerPath,
+                ["GITHUB_ACTION_PATH"] = GitHubActionContainerPath
+            },
+            [new StepExecutionMount(sourceResult.ActionDirectory!, GitHubActionContainerPath, ReadOnly: true)]);
     }
 
     private static ActionPathResult ResolveLocalActionPath(string uses, string projectRoot)
@@ -183,6 +235,8 @@ internal sealed record ActionResolutionResult(
     ActionCacheEntry? CacheEntry,
     string? Command,
     string? DockerImage,
+    IReadOnlyDictionary<string, string> Environment,
+    IReadOnlyList<StepExecutionMount> AdditionalMounts,
     IReadOnlyList<string> Errors)
 {
     public bool IsDockerImageAction => DockerImage is not null;
@@ -192,7 +246,17 @@ internal sealed record ActionResolutionResult(
         ActionCacheEntry cacheEntry,
         string command)
     {
-        return new ActionResolutionResult(true, action, cacheEntry, command, null, []);
+        return new ActionResolutionResult(true, action, cacheEntry, command, null, new Dictionary<string, string>(), [], []);
+    }
+
+    public static ActionResolutionResult ResolvedGitHubAction(
+        ActionDocument action,
+        ActionCacheEntry cacheEntry,
+        string command,
+        IReadOnlyDictionary<string, string> environment,
+        IReadOnlyList<StepExecutionMount> additionalMounts)
+    {
+        return new ActionResolutionResult(true, action, cacheEntry, command, null, environment, additionalMounts, []);
     }
 
     public static ActionResolutionResult ResolvedDockerImage(
@@ -200,11 +264,11 @@ internal sealed record ActionResolutionResult(
         string dockerImage,
         ActionCacheEntry cacheEntry)
     {
-        return new ActionResolutionResult(true, null, cacheEntry, command, dockerImage, []);
+        return new ActionResolutionResult(true, null, cacheEntry, command, dockerImage, new Dictionary<string, string>(), [], []);
     }
 
     public static ActionResolutionResult Failed(IReadOnlyList<string> errors)
     {
-        return new ActionResolutionResult(false, null, null, null, null, errors);
+        return new ActionResolutionResult(false, null, null, null, null, new Dictionary<string, string>(), [], errors);
     }
 }

@@ -5,7 +5,8 @@ public sealed record ActionReference(
     ActionReferenceKind Kind,
     string Target,
     bool IsPinned,
-    string? MutablePart)
+    string? MutablePart,
+    string? RequestedRef = null)
 {
     private const string DockerPrefix = "docker://";
     private const string Sha256Prefix = "@sha256:";
@@ -92,7 +93,31 @@ public sealed record ActionReference(
             ActionReferenceKind.GitHubRepository,
             path,
             pinned,
-            pinned ? null : requestedRef);
+            pinned ? null : requestedRef,
+            requestedRef);
+        return true;
+    }
+
+    public bool TryGetGitHubAction(out GitHubActionReference? githubAction)
+    {
+        githubAction = null;
+
+        if (Kind is not ActionReferenceKind.GitHubRepository || RequestedRef is null)
+        {
+            return false;
+        }
+
+        var parts = Target.Split('/');
+        if (parts.Length < 2)
+        {
+            return false;
+        }
+
+        githubAction = new GitHubActionReference(
+            parts[0],
+            parts[1],
+            string.Join('/', parts.Skip(2)),
+            RequestedRef);
         return true;
     }
 

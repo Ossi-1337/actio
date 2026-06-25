@@ -1,6 +1,6 @@
 namespace Actio.Engine.Actions;
 
-public sealed class NullActionCache : IActionCache
+public sealed class NullActionCache : IActionCache, IGitHubActionSourceProvider
 {
     public static NullActionCache Instance { get; } = new();
 
@@ -48,6 +48,14 @@ public sealed class NullActionCache : IActionCache
     public Task<IReadOnlyList<ActionCacheEntry>> ListAsync(CancellationToken cancellationToken = default)
     {
         return Task.FromResult<IReadOnlyList<ActionCacheEntry>>([]);
+    }
+
+    public Task<GitHubActionSourceResult> GetGitHubActionSourceAsync(
+        GitHubActionSourceRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(GitHubActionSourceResult.Failed(
+            [$"uses '{request.Uses}' is a recognized GitHub action reference, but no GitHub action source provider is configured."]));
     }
 
     public Task<int> CleanAsync(CancellationToken cancellationToken = default)

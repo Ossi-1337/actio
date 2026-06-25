@@ -54,6 +54,13 @@ public sealed class ActionReferenceTests
         Assert.True(reference.IsRemote);
         Assert.True(reference.IsMutable);
         Assert.Equal("v4", reference.MutablePart);
+        Assert.Equal("v4", reference.RequestedRef);
+
+        Assert.True(reference.TryGetGitHubAction(out var githubAction));
+        Assert.Equal("actions", githubAction!.Owner);
+        Assert.Equal("checkout", githubAction.Repository);
+        Assert.Equal(string.Empty, githubAction.ActionPath);
+        Assert.Equal("v4", githubAction.Ref);
     }
 
     [Fact]
@@ -68,6 +75,13 @@ public sealed class ActionReferenceTests
         Assert.True(reference.IsRemote);
         Assert.True(reference.IsPinned);
         Assert.False(reference.IsMutable);
+        Assert.Equal(sha, reference.RequestedRef);
+
+        Assert.True(reference.TryGetGitHubAction(out var githubAction));
+        Assert.Equal("owner", githubAction!.Owner);
+        Assert.Equal("repo", githubAction.Repository);
+        Assert.Equal("path", githubAction.ActionPath);
+        Assert.Equal(sha, githubAction.Ref);
     }
 
     [Theory]

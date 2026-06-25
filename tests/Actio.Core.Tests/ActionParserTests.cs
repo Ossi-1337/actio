@@ -25,6 +25,36 @@ public sealed class ActionParserTests
     }
 
     [Fact]
+    public void Parse_AcceptsCompositeActionMetadataAndShell()
+    {
+        var result = Parse(
+            """
+            name: Say hello
+            description: Greet from a composite action
+            inputs:
+              name:
+                description: Name to greet
+            outputs:
+              greeting:
+                description: Greeting output
+            branding:
+              icon: terminal
+              color: green
+            runs:
+              using: composite
+              steps:
+                - name: Greet
+                  shell: bash
+                  run: echo hello
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var step = Assert.Single(result.Action!.Steps);
+        Assert.Equal("Greet", step.Name);
+        Assert.Equal("echo hello", step.Run);
+    }
+
+    [Fact]
     public void Parse_RejectsUnsupportedUsingValue()
     {
         var result = Parse(

@@ -41,4 +41,24 @@ public sealed class DockerRunnerProviderTests
         Assert.True(imageIndex >= 0);
         Assert.Equal(args.Length - 1, imageIndex);
     }
+
+    [Fact]
+    public void CreateShellStepStartInfo_AddsAdditionalReadOnlyMounts()
+    {
+        var actionPath = Path.Combine(Directory.GetCurrentDirectory(), "cached-action");
+        var request = new StepExecutionRequest(
+            "test",
+            "Use action",
+            "alpine-latest",
+            "echo remote",
+            Directory.GetCurrentDirectory(),
+            new Dictionary<string, string>(),
+            [new StepExecutionMount(actionPath, "/actio/action", ReadOnly: true)]);
+
+        var startInfo = DockerRunnerProvider.CreateShellStepStartInfo(request, "alpine:3.20", "actio-test");
+        var args = startInfo.ArgumentList.ToArray();
+
+        Assert.Contains("-v", args);
+        Assert.Contains($"{Path.GetFullPath(actionPath)}:/actio/action:ro", args);
+    }
 }

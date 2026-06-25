@@ -22,9 +22,11 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         IActionCache? actionCache = null)
     {
         _runStore = runStore ?? new NullRunStore();
+        var cache = actionCache ?? NullActionCache.Instance;
+        var githubActionSourceProvider = cache as IGitHubActionSourceProvider ?? NullActionCache.Instance;
         var outputMarkerParser = new OutputMarkerParser();
         _conditionEvaluator = new ConditionEvaluator();
-        var actionResolver = new ActionResolver(new ActionParser(), actionCache ?? NullActionCache.Instance);
+        var actionResolver = new ActionResolver(new ActionParser(), cache, githubActionSourceProvider);
         _jobExecutor = new JobExecutor(runnerProvider, _runStore, outputMarkerParser, actionResolver);
     }
 
