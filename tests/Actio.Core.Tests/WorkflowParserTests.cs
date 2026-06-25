@@ -114,6 +114,26 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
+    public void Parse_RejectsCheckoutWithUnsupportedWith()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Checkout
+                    uses: actions/checkout@v4
+                    with:
+                      fetch-depth: "0"
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error.Contains("with is not supported", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void Parse_AcceptsDockerUsesAndWarnsForMutableTag()
     {
         var result = Parse(

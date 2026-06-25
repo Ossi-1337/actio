@@ -539,6 +539,33 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_RunsCheckoutShimWithoutDownloadingGitHubAction()
+    {
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+        var cache = new RecordingActionCache();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Checkout", null, "actions/checkout@v4")]));
+
+        var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(Environment.CurrentDirectory),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Empty(cache.GitHubSourceRequests);
+        var request = Assert.Single(runner.Requests);
+        Assert.Contains("Actio checkout shim", request.Command, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(request.Environment.Keys, key => string.Equals(key, "GITHUB_ACTION_PATH", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task ExecuteAsync_FailsUnsupportedGitHubActionBeforeExecutingRunner()
     {
         var actionRoot = Path.Combine(Path.GetTempPath(), $"actio-github-action-tests-{Guid.NewGuid():N}");
@@ -564,7 +591,7 @@ public sealed class WorkflowExecutorTests
                     new ActionCacheEntry(
                         "key",
                         "github",
-                        "actions/checkout@v4",
+                        "actions/setup-node@v4",
                         actionPath,
                         new string('b', 40),
                         actionRoot,
@@ -580,7 +607,7 @@ public sealed class WorkflowExecutorTests
                     null,
                     "ubuntu-latest",
                     new Dictionary<string, string>(),
-                    [new WorkflowStep("Use checkout", null, "actions/checkout@v4")]));
+                    [new WorkflowStep("Use setup-node", null, "actions/setup-node@v4")]));
 
             var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
                 workflow,

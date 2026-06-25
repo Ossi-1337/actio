@@ -8,6 +8,7 @@ namespace Actio.Engine.Execution;
 internal sealed class ActionResolver
 {
     private const string GitHubActionContainerPath = "/actio/action";
+    private const string CheckoutShimCommand = "printf '%s\\n' 'Actio checkout shim: workspace is already available at /workspace.'";
 
     private readonly ActionParser _parser;
     private readonly IActionCache _cache;
@@ -115,6 +116,11 @@ internal sealed class ActionResolver
             return ActionResolutionResult.Failed([$"uses '{uses}' is not a valid GitHub action reference."]);
         }
 
+        if (IsCheckoutShim(githubAction!))
+        {
+            return ActionResolutionResult.ResolvedBuiltInAction(CheckoutShimCommand);
+        }
+
         var sourceResult = await _githubActionSourceProvider.GetGitHubActionSourceAsync(
             new GitHubActionSourceRequest(
                 uses,
@@ -147,6 +153,14 @@ internal sealed class ActionResolver
                 ["GITHUB_ACTION_PATH"] = GitHubActionContainerPath
             },
             [new StepExecutionMount(sourceResult.ActionDirectory!, GitHubActionContainerPath, ReadOnly: true)]);
+    }
+
+    private static bool IsCheckoutShim(GitHubActionReference action)
+    {
+        return string.Equals(action.Owner, "actions", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(action.Repository, "checkout", StringComparison.OrdinalIgnoreCase) &&
+            string.IsNullOrEmpty(action.ActionPath) &&
+            string.Equals(action.Ref, "v4", StringComparison.Ordinal);
     }
 
     private static ActionPathResult ResolveLocalActionPath(string uses, string projectRoot)
@@ -257,6 +271,11 @@ internal sealed record ActionResolutionResult(
         IReadOnlyList<StepExecutionMount> additionalMounts)
     {
         return new ActionResolutionResult(true, action, cacheEntry, command, null, environment, additionalMounts, []);
+    }
+
+    public static ActionResolutionResult ResolvedBuiltInAction(string command)
+    {
+        return new ActionResolutionResult(true, null, null, command, null, new Dictionary<string, string>(), [], []);
     }
 
     public static ActionResolutionResult ResolvedDockerImage(
