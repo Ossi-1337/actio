@@ -269,6 +269,30 @@ public sealed class CliApplicationTests : IDisposable
     }
 
     [Fact]
+    public void Run_PrintsWarningForTopLevelCompatibilityField()
+    {
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            """
+            name: CI
+            on: push
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        var result = RunWithFakeExecutor(["ci.yml"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Contains("Workflow warnings:", result.Error);
+        Assert.Contains("workflow.on is accepted", result.Error);
+        Assert.NotNull(result.Executor.Workflow);
+    }
+
+    [Fact]
     public void Run_AcceptsExternalUsesFromOfficialRunCommand()
     {
         var sha = new string('b', 40);

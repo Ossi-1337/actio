@@ -63,7 +63,7 @@ public sealed class WorkflowParserTests
         var result = Parse(
             """
             name: CI
-            on: push
+            unknown-key: value
             jobs:
               test:
                 runs-on: ubuntu-latest
@@ -73,7 +73,77 @@ public sealed class WorkflowParserTests
             """);
 
         Assert.False(result.Success);
-        Assert.Contains(result.Errors, error => error == "workflow.on is not supported.");
+        Assert.Contains(result.Errors, error => error == "workflow.unknown-key is not supported.");
+    }
+
+    [Fact]
+    public void Parse_AcceptsTopLevelCompatibilityKeywordsWithWarnings()
+    {
+        var result = Parse(
+            """
+            name: CI
+            run-name: CI on ${{ github.ref }}
+            on:
+              push:
+                branches:
+                  - main
+            permissions:
+              contents: read
+            env:
+              DOTNET_NOLOGO: "true"
+            defaults:
+              run:
+                shell: bash
+            concurrency:
+              group: ci-${{ github.ref }}
+              cancel-in-progress: true
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Contains(result.Warnings, warning => warning.Contains("workflow.run-name", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Warnings, warning => warning.Contains("workflow.on", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Warnings, warning => warning.Contains("workflow.permissions", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Warnings, warning => warning.Contains("workflow.defaults", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Warnings, warning => warning.Contains("workflow.concurrency", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Parse_ValidatesTopLevelCompatibilityKeywordShapes()
+    {
+        var result = Parse(
+            """
+            name: CI
+            run-name:
+              value: CI
+            on:
+              - push
+              - {}
+            permissions:
+              - contents
+            defaults: bash
+            concurrency:
+              - ci
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "workflow.run-name must be a string.");
+        Assert.Contains(result.Errors, error => error == "workflow.on[1] must be a string.");
+        Assert.Contains(result.Errors, error => error == "workflow.permissions must be a string or a mapping.");
+        Assert.Contains(result.Errors, error => error == "workflow.defaults must be a mapping.");
+        Assert.Contains(result.Errors, error => error == "workflow.concurrency must be a string or a mapping.");
+        Assert.Empty(result.Warnings);
     }
 
     [Fact]

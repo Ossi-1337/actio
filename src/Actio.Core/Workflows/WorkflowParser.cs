@@ -8,7 +8,12 @@ public sealed partial class WorkflowParser
     private static readonly HashSet<string> TopLevelKeys = new(StringComparer.Ordinal)
     {
         "name",
+        "run-name",
+        "on",
+        "permissions",
         "env",
+        "defaults",
+        "concurrency",
         "jobs"
     };
 
@@ -69,6 +74,7 @@ public sealed partial class WorkflowParser
         }
 
         AddUnknownKeyErrors(errors, root, TopLevelKeys, "workflow");
+        ValidateTopLevelCompatibilityFields(errors, warnings, root);
 
         var name = ReadRequiredScalar(errors, root, "name", "workflow.name");
         var env = ReadOptionalStringMap(errors, root, "env", "workflow.env");
@@ -323,6 +329,241 @@ public sealed partial class WorkflowParser
             ActionReferenceKind.GitHubRepository => $"{itemPath}.uses uses mutable GitHub ref '{reference.MutablePart}' in '{reference.Value}'. Pin with a commit SHA for safer reuse.",
             _ => $"{itemPath}.uses uses a mutable external action reference '{reference.Value}'."
         };
+    }
+
+    private static void ValidateTopLevelCompatibilityFields(
+        List<string> errors,
+        List<string> warnings,
+        YamlMappingNode root)
+    {
+        ValidateCompatibilityScalar(
+            errors,
+            warnings,
+            root,
+            "run-name",
+            "workflow.run-name",
+            "workflow.run-name is accepted for GitHub Actions compatibility but Actio does not use it as the run display name yet.");
+        ValidateOnCompatibility(errors, warnings, root);
+        ValidatePermissionsCompatibility(errors, warnings, root);
+        ValidateCompatibilityMapping(
+            errors,
+            warnings,
+            root,
+            "defaults",
+            "workflow.defaults",
+            "workflow.defaults is accepted for GitHub Actions compatibility but Actio does not apply top-level defaults yet.");
+        ValidateCompatibilityStringOrMapping(
+            errors,
+            warnings,
+            root,
+            "concurrency",
+            "workflow.concurrency",
+            "workflow.concurrency is accepted for GitHub Actions compatibility but Actio does not enforce concurrency groups yet.");
+    }
+
+    private static void ValidateOnCompatibility(
+        List<string> errors,
+        List<string> warnings,
+        YamlMappingNode root)
+    {
+        if (!TryGet(root, "on", out var node))
+        {
+            return;
+        }
+
+        var path = "workflow.on";
+        if (node is YamlScalarNode scalar)
+        {
+            if (ReadScalarValue(errors, scalar, path) is not null)
+            {
+                warnings.Add("workflow.on is accepted for GitHub Actions compatibility but Actio still runs workflows only when invoked locally.");
+            }
+
+            return;
+        }
+
+        if (node is YamlSequenceNode sequence)
+        {
+            var errorCount = errors.Count;
+            for (var index = 0; index < sequence.Children.Count; index++)
+            {
+                if (sequence.Children[index] is not YamlScalarNode item)
+                {
+                    errors.Add($"{path}[{index}] must be a string.");
+                    continue;
+                }
+
+                ReadScalarValue(errors, item, $"{path}[{index}]");
+            }
+
+            AddWarningIfNoNewErrors(errors, errorCount, warnings, "workflow.on is accepted for GitHub Actions compatibility but Actio still runs workflows only when invoked locally.");
+            return;
+        }
+
+        if (node is YamlMappingNode map)
+        {
+            var errorCount = errors.Count;
+            ValidateScalarKeys(errors, map, path);
+            AddWarningIfNoNewErrors(errors, errorCount, warnings, "workflow.on is accepted for GitHub Actions compatibility but Actio still runs workflows only when invoked locally.");
+            return;
+        }
+
+        errors.Add($"{path} must be a string, a list, or a mapping.");
+    }
+
+    private static void ValidatePermissionsCompatibility(
+        List<string> errors,
+        List<string> warnings,
+        YamlMappingNode root)
+    {
+        if (!TryGet(root, "permissions", out var node))
+        {
+            return;
+        }
+
+        var path = "workflow.permissions";
+        if (node is YamlScalarNode scalar)
+        {
+            if (ReadScalarValue(errors, scalar, path) is not null)
+            {
+                warnings.Add("workflow.permissions is accepted for GitHub Actions compatibility but Actio does not create or enforce GITHUB_TOKEN permissions.");
+            }
+
+            return;
+        }
+
+        if (node is YamlMappingNode map)
+        {
+            var errorCount = errors.Count;
+            ValidateScalarMap(errors, map, path);
+            AddWarningIfNoNewErrors(errors, errorCount, warnings, "workflow.permissions is accepted for GitHub Actions compatibility but Actio does not create or enforce GITHUB_TOKEN permissions.");
+            return;
+        }
+
+        errors.Add($"{path} must be a string or a mapping.");
+    }
+
+    private static void ValidateCompatibilityScalar(
+        List<string> errors,
+        List<string> warnings,
+        YamlMappingNode root,
+        string key,
+        string path,
+        string warning)
+    {
+        if (!TryGet(root, key, out var node))
+        {
+            return;
+        }
+
+        if (node is not YamlScalarNode scalar)
+        {
+            errors.Add($"{path} must be a string.");
+            return;
+        }
+
+        if (ReadScalarValue(errors, scalar, path) is not null)
+        {
+            warnings.Add(warning);
+        }
+    }
+
+    private static void ValidateCompatibilityMapping(
+        List<string> errors,
+        List<string> warnings,
+        YamlMappingNode root,
+        string key,
+        string path,
+        string warning)
+    {
+        if (!TryGet(root, key, out var node))
+        {
+            return;
+        }
+
+        if (node is not YamlMappingNode map)
+        {
+            errors.Add($"{path} must be a mapping.");
+            return;
+        }
+
+        var errorCount = errors.Count;
+        ValidateScalarKeys(errors, map, path);
+        AddWarningIfNoNewErrors(errors, errorCount, warnings, warning);
+    }
+
+    private static void ValidateCompatibilityStringOrMapping(
+        List<string> errors,
+        List<string> warnings,
+        YamlMappingNode root,
+        string key,
+        string path,
+        string warning)
+    {
+        if (!TryGet(root, key, out var node))
+        {
+            return;
+        }
+
+        if (node is YamlScalarNode scalar)
+        {
+            if (ReadScalarValue(errors, scalar, path) is not null)
+            {
+                warnings.Add(warning);
+            }
+
+            return;
+        }
+
+        if (node is YamlMappingNode map)
+        {
+            var errorCount = errors.Count;
+            ValidateScalarKeys(errors, map, path);
+            AddWarningIfNoNewErrors(errors, errorCount, warnings, warning);
+            return;
+        }
+
+        errors.Add($"{path} must be a string or a mapping.");
+    }
+
+    private static void ValidateScalarKeys(List<string> errors, YamlMappingNode map, string path)
+    {
+        foreach (var keyNode in map.Children.Keys)
+        {
+            ReadMapKey(errors, keyNode, path);
+        }
+    }
+
+    private static void ValidateScalarMap(List<string> errors, YamlMappingNode map, string path)
+    {
+        foreach (var (keyNode, valueNode) in map.Children)
+        {
+            var name = ReadMapKey(errors, keyNode, path);
+            if (name is null)
+            {
+                continue;
+            }
+
+            if (valueNode is not YamlScalarNode scalar)
+            {
+                errors.Add($"{path}.{name} must be a scalar value.");
+                continue;
+            }
+
+            ReadScalarValue(errors, scalar, $"{path}.{name}");
+        }
+    }
+
+    private static void AddWarningIfNoNewErrors(
+        IReadOnlyCollection<string> errors,
+        int originalErrorCount,
+        List<string> warnings,
+        string warning)
+    {
+        if (errors.Count == originalErrorCount)
+        {
+            warnings.Add(warning);
+        }
     }
 
     private static IReadOnlyDictionary<string, string> ReadOptionalStringMap(
