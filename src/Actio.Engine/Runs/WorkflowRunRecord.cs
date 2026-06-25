@@ -1,3 +1,5 @@
+using Actio.Core.Workflows;
+
 namespace Actio.Engine.Runs;
 
 public sealed record WorkflowRunRecord(
@@ -12,4 +14,8 @@ public sealed record WorkflowRunRecord(
     IReadOnlyList<JobRunRecord> Jobs,
     IReadOnlyList<WorkflowRunOutput> Outputs,
     IReadOnlyList<WorkflowRunArtifact> Artifacts,
-    IReadOnlyList<string> Errors);
+    IReadOnlyList<string> Errors,
+    IReadOnlyList<WorkflowTrigger>? Triggers = null)
+{
+    public IReadOnlyList<WorkflowTrigger> Triggers { get; init; } = Triggers ?? [];
+}

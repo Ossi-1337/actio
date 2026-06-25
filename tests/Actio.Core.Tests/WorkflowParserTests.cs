@@ -111,6 +111,10 @@ public sealed class WorkflowParserTests
         Assert.Contains(result.Warnings, warning => warning.Contains("workflow.permissions", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Warnings, warning => warning.Contains("workflow.defaults", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Warnings, warning => warning.Contains("workflow.concurrency", StringComparison.OrdinalIgnoreCase));
+        var trigger = Assert.Single(result.Workflow!.Triggers);
+        Assert.Equal("push", trigger.EventName);
+        Assert.NotNull(trigger.Configuration);
+        Assert.True(trigger.Configuration.Properties.ContainsKey("branches"));
     }
 
     [Fact]
@@ -143,6 +147,83 @@ public sealed class WorkflowParserTests
         Assert.Contains(result.Errors, error => error == "workflow.permissions must be a string or a mapping.");
         Assert.Contains(result.Errors, error => error == "workflow.defaults must be a mapping.");
         Assert.Contains(result.Errors, error => error == "workflow.concurrency must be a string or a mapping.");
+        Assert.Empty(result.Warnings);
+    }
+
+    [Fact]
+    public void Parse_AcceptsOnEventSequenceAsTriggerMetadata()
+    {
+        var result = Parse(
+            """
+            name: CI
+            on:
+              - push
+              - pull_request
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal(["push", "pull_request"], result.Workflow!.Triggers.Select(trigger => trigger.EventName));
+        Assert.Contains(result.Warnings, warning => warning.Contains("trigger metadata", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Parse_AcceptsOnEventMapConfigurationAsTriggerMetadata()
+    {
+        var result = Parse(
+            """
+            name: CI
+            on:
+              pull_request:
+                types:
+                  - opened
+                  - synchronize
+                branches:
+                  - main
+                paths:
+                  - src/**
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var trigger = Assert.Single(result.Workflow!.Triggers);
+        Assert.Equal("pull_request", trigger.EventName);
+        Assert.Equal("mapping", trigger.Configuration!.Kind);
+        Assert.Equal(["opened", "synchronize"], trigger.Configuration.Properties["types"].Items.Select(item => item.Value));
+        Assert.Equal("main", Assert.Single(trigger.Configuration.Properties["branches"].Items).Value);
+        Assert.Equal("src/**", Assert.Single(trigger.Configuration.Properties["paths"].Items).Value);
+    }
+
+    [Fact]
+    public void Parse_RejectsUnsupportedTriggerConfigurationKey()
+    {
+        var result = Parse(
+            """
+            name: CI
+            on:
+              push:
+                unsupported-filter:
+                  - main
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "workflow.on.push.unsupported-filter is not supported in workflow trigger configuration.");
         Assert.Empty(result.Warnings);
     }
 

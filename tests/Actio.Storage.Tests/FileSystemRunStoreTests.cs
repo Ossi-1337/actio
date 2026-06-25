@@ -27,13 +27,15 @@ public sealed class FileSystemRunStoreTests : IDisposable
             [],
             [],
             [],
-            []);
+            [],
+            [new WorkflowTrigger("push", null)]);
 
         await store.SaveRunRecordAsync(record);
         var loaded = await store.ReadRunRecordAsync(runId);
 
         Assert.NotNull(loaded);
         Assert.Equal("CI", loaded.WorkflowName);
+        Assert.Equal("push", Assert.Single(loaded.Triggers).EventName);
         Assert.True(File.Exists(Path.Combine(_root, "runs", runId, "run.json")));
     }
 
@@ -60,6 +62,37 @@ public sealed class FileSystemRunStoreTests : IDisposable
 
         var record = Assert.Single(records);
         Assert.Equal("run-1", record.RunId);
+    }
+
+    [Fact]
+    public async Task ReadRunRecordAsync_ReturnsEmptyTriggersForOlderRunRecords()
+    {
+        var store = new FileSystemRunStore(_root);
+        var runId = "run-old";
+        await store.InitializeRunAsync(runId);
+        await File.WriteAllTextAsync(
+            Path.Combine(_root, "runs", runId, "run.json"),
+            """
+            {
+              "RunId": "run-old",
+              "WorkflowName": "CI",
+              "WorkflowPath": "C:\\repo\\.workflows\\ci.yml",
+              "ProjectRoot": "C:\\repo",
+              "Status": "Success",
+              "StartedAt": "2026-06-25T10:00:00+00:00",
+              "FinishedAt": "2026-06-25T10:00:01+00:00",
+              "DurationMilliseconds": 1000,
+              "Jobs": [],
+              "Outputs": [],
+              "Artifacts": [],
+              "Errors": []
+            }
+            """);
+
+        var loaded = await store.ReadRunRecordAsync(runId);
+
+        Assert.NotNull(loaded);
+        Assert.Empty(loaded.Triggers);
     }
 
     [Fact]

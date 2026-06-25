@@ -68,6 +68,36 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_SavesTriggerMetadataInRunRecords()
+    {
+        var runner = new FakeRunnerProvider([0]);
+        var store = new RecordingRunStore();
+        var workflow = new WorkflowDocument(
+            "CI",
+            new Dictionary<string, string>(),
+            new[]
+            {
+                new WorkflowJob(
+                    "test",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Test", "dotnet test", null)])
+            }.ToDictionary(job => job.Name, StringComparer.Ordinal),
+            [new WorkflowTrigger("push", null)]);
+
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success);
+        Assert.All(store.SavedRecords, record => Assert.Equal("push", Assert.Single(record.Triggers).EventName));
+    }
+
+    [Fact]
     public async Task ExecuteAsync_StopsAfterFailedStep()
     {
         var runner = new FakeRunnerProvider([0, 42]);

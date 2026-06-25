@@ -40,6 +40,22 @@ public sealed partial class WorkflowParser
         "uses"
     };
 
+    private static readonly HashSet<string> TriggerConfigurationKeys = new(StringComparer.Ordinal)
+    {
+        "types",
+        "branches",
+        "branches-ignore",
+        "tags",
+        "tags-ignore",
+        "paths",
+        "paths-ignore",
+        "workflows",
+        "cron",
+        "inputs",
+        "secrets",
+        "outputs"
+    };
+
     public WorkflowParseResult ParseFile(string workflowPath)
     {
         try
@@ -74,6 +90,7 @@ public sealed partial class WorkflowParser
         }
 
         AddUnknownKeyErrors(errors, root, TopLevelKeys, "workflow");
+        var triggers = ReadTriggers(errors, warnings, root);
         ValidateTopLevelCompatibilityFields(errors, warnings, root);
 
         var name = ReadRequiredScalar(errors, root, "name", "workflow.name");
@@ -85,7 +102,7 @@ public sealed partial class WorkflowParser
             return WorkflowParseResult.Failed(errors, warnings);
         }
 
-        return WorkflowParseResult.Parsed(new WorkflowDocument(name!, env, jobs), warnings);
+        return WorkflowParseResult.Parsed(new WorkflowDocument(name!, env, jobs, triggers), warnings);
     }
 
     private static IReadOnlyDictionary<string, WorkflowJob> ReadJobs(
@@ -343,7 +360,6 @@ public sealed partial class WorkflowParser
             "run-name",
             "workflow.run-name",
             "workflow.run-name is accepted for GitHub Actions compatibility but Actio does not use it as the run display name yet.");
-        ValidateOnCompatibility(errors, warnings, root);
         ValidatePermissionsCompatibility(errors, warnings, root);
         ValidateCompatibilityMapping(
             errors,
@@ -361,30 +377,34 @@ public sealed partial class WorkflowParser
             "workflow.concurrency is accepted for GitHub Actions compatibility but Actio does not enforce concurrency groups yet.");
     }
 
-    private static void ValidateOnCompatibility(
+    private static IReadOnlyList<WorkflowTrigger> ReadTriggers(
         List<string> errors,
         List<string> warnings,
         YamlMappingNode root)
     {
         if (!TryGet(root, "on", out var node))
         {
-            return;
+            return [];
         }
 
         var path = "workflow.on";
+        var errorCount = errors.Count;
+        var triggers = new List<WorkflowTrigger>();
+
         if (node is YamlScalarNode scalar)
         {
-            if (ReadScalarValue(errors, scalar, path) is not null)
+            var eventName = ReadScalarValue(errors, scalar, path);
+            if (eventName is not null)
             {
-                warnings.Add("workflow.on is accepted for GitHub Actions compatibility but Actio still runs workflows only when invoked locally.");
+                triggers.Add(new WorkflowTrigger(eventName, null));
             }
 
-            return;
+            AddTriggerWarningIfValid(errors, errorCount, warnings);
+            return triggers;
         }
 
         if (node is YamlSequenceNode sequence)
         {
-            var errorCount = errors.Count;
             for (var index = 0; index < sequence.Children.Count; index++)
             {
                 if (sequence.Children[index] is not YamlScalarNode item)
@@ -393,22 +413,148 @@ public sealed partial class WorkflowParser
                     continue;
                 }
 
-                ReadScalarValue(errors, item, $"{path}[{index}]");
+                var eventName = ReadScalarValue(errors, item, $"{path}[{index}]");
+                if (eventName is not null)
+                {
+                    triggers.Add(new WorkflowTrigger(eventName, null));
+                }
             }
 
-            AddWarningIfNoNewErrors(errors, errorCount, warnings, "workflow.on is accepted for GitHub Actions compatibility but Actio still runs workflows only when invoked locally.");
-            return;
+            AddTriggerWarningIfValid(errors, errorCount, warnings);
+            return triggers;
         }
 
         if (node is YamlMappingNode map)
         {
-            var errorCount = errors.Count;
-            ValidateScalarKeys(errors, map, path);
-            AddWarningIfNoNewErrors(errors, errorCount, warnings, "workflow.on is accepted for GitHub Actions compatibility but Actio still runs workflows only when invoked locally.");
-            return;
+            foreach (var (keyNode, valueNode) in map.Children)
+            {
+                var eventName = ReadMapKey(errors, keyNode, path);
+                if (eventName is null)
+                {
+                    continue;
+                }
+
+                var configurationPath = $"{path}.{eventName}";
+                var configuration = ReadTriggerConfiguration(errors, valueNode, configurationPath);
+                triggers.Add(new WorkflowTrigger(eventName, configuration));
+            }
+
+            AddTriggerWarningIfValid(errors, errorCount, warnings);
+            return triggers;
         }
 
         errors.Add($"{path} must be a string, a list, or a mapping.");
+        return triggers;
+    }
+
+    private static WorkflowTriggerValue? ReadTriggerConfiguration(
+        List<string> errors,
+        YamlNode node,
+        string path)
+    {
+        if (IsEmptyScalar(node))
+        {
+            return null;
+        }
+
+        if (node is YamlScalarNode)
+        {
+            errors.Add($"{path} must be a mapping or a list.");
+            return null;
+        }
+
+        if (node is YamlMappingNode map)
+        {
+            AddUnsupportedTriggerConfigurationKeyErrors(errors, map, path);
+            return ReadTriggerValue(errors, map, path);
+        }
+
+        if (node is YamlSequenceNode sequence)
+        {
+            return ReadTriggerValue(errors, sequence, path);
+        }
+
+        errors.Add($"{path} must be a mapping or a list.");
+        return null;
+    }
+
+    private static WorkflowTriggerValue? ReadTriggerValue(List<string> errors, YamlNode node, string path)
+    {
+        if (node is YamlScalarNode scalar)
+        {
+            var value = ReadScalarValue(errors, scalar, path);
+            return value is null ? null : WorkflowTriggerValue.Scalar(value);
+        }
+
+        if (node is YamlSequenceNode sequence)
+        {
+            var items = new List<WorkflowTriggerValue>();
+            for (var index = 0; index < sequence.Children.Count; index++)
+            {
+                var item = ReadTriggerValue(errors, sequence.Children[index], $"{path}[{index}]");
+                if (item is not null)
+                {
+                    items.Add(item);
+                }
+            }
+
+            return WorkflowTriggerValue.Sequence(items);
+        }
+
+        if (node is YamlMappingNode map)
+        {
+            var properties = new Dictionary<string, WorkflowTriggerValue>(StringComparer.Ordinal);
+            foreach (var (keyNode, valueNode) in map.Children)
+            {
+                var name = ReadMapKey(errors, keyNode, path);
+                if (name is null)
+                {
+                    continue;
+                }
+
+                var value = ReadTriggerValue(errors, valueNode, $"{path}.{name}");
+                if (value is not null)
+                {
+                    properties[name] = value;
+                }
+            }
+
+            return WorkflowTriggerValue.Mapping(properties);
+        }
+
+        errors.Add($"{path} must be a string, a list, or a mapping.");
+        return null;
+    }
+
+    private static void AddUnsupportedTriggerConfigurationKeyErrors(
+        List<string> errors,
+        YamlMappingNode map,
+        string path)
+    {
+        foreach (var keyNode in map.Children.Keys)
+        {
+            if (keyNode is not YamlScalarNode scalar || scalar.Value is null)
+            {
+                continue;
+            }
+
+            if (!TriggerConfigurationKeys.Contains(scalar.Value))
+            {
+                errors.Add($"{path}.{scalar.Value} is not supported in workflow trigger configuration.");
+            }
+        }
+    }
+
+    private static void AddTriggerWarningIfValid(
+        IReadOnlyCollection<string> errors,
+        int originalErrorCount,
+        List<string> warnings)
+    {
+        AddWarningIfNoNewErrors(
+            errors,
+            originalErrorCount,
+            warnings,
+            "workflow.on is parsed as trigger metadata, but Actio still runs workflows only when invoked locally.");
     }
 
     private static void ValidatePermissionsCompatibility(
@@ -652,6 +798,9 @@ public sealed partial class WorkflowParser
 
         return scalar.Value;
     }
+
+    private static bool IsEmptyScalar(YamlNode node)
+        => node is YamlScalarNode scalar && string.IsNullOrWhiteSpace(scalar.Value);
 
     private static string? ReadMapKey(List<string> errors, YamlNode keyNode, string path)
     {

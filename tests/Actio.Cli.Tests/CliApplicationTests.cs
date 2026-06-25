@@ -288,7 +288,7 @@ public sealed class CliApplicationTests : IDisposable
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
         Assert.Contains("Workflow warnings:", result.Error);
-        Assert.Contains("workflow.on is accepted", result.Error);
+        Assert.Contains("workflow.on is parsed as trigger metadata", result.Error);
         Assert.NotNull(result.Executor.Workflow);
     }
 

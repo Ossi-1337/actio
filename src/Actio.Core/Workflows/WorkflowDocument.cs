@@ -3,9 +3,38 @@ namespace Actio.Core.Workflows;
 public sealed record WorkflowDocument(
     string Name,
     IReadOnlyDictionary<string, string> Env,
-    IReadOnlyDictionary<string, WorkflowJob> Jobs)
+    IReadOnlyDictionary<string, WorkflowJob> Jobs,
+    IReadOnlyList<WorkflowTrigger> Triggers)
 {
+    public WorkflowDocument(
+        string name,
+        IReadOnlyDictionary<string, string> env,
+        IReadOnlyDictionary<string, WorkflowJob> jobs)
+        : this(name, env, jobs, [])
+    {
+    }
+
     public int StepCount => Jobs.Values.Sum(job => job.Steps.Count);
+}
+
+public sealed record WorkflowTrigger(
+    string EventName,
+    WorkflowTriggerValue? Configuration);
+
+public sealed record WorkflowTriggerValue(
+    string Kind,
+    string? Value,
+    IReadOnlyList<WorkflowTriggerValue> Items,
+    IReadOnlyDictionary<string, WorkflowTriggerValue> Properties)
+{
+    public static WorkflowTriggerValue Scalar(string value)
+        => new("scalar", value, [], new Dictionary<string, WorkflowTriggerValue>());
+
+    public static WorkflowTriggerValue Sequence(IReadOnlyList<WorkflowTriggerValue> items)
+        => new("sequence", null, items, new Dictionary<string, WorkflowTriggerValue>());
+
+    public static WorkflowTriggerValue Mapping(IReadOnlyDictionary<string, WorkflowTriggerValue> properties)
+        => new("mapping", null, [], properties);
 }
 
 public sealed record WorkflowJob

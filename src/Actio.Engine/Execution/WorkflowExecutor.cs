@@ -238,7 +238,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             jobRecords.ToArray(),
             runOutputs.ToArray(),
             runArtifacts.ToArray(),
-            errors.ToArray());
+            errors.ToArray(),
+            workflow.Triggers);
     }
 
     private async Task<string?> TrySaveRunRecordAsync(

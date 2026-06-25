@@ -272,6 +272,7 @@ function renderSummary(run) {
         ${summaryCell("Started", formatDate(run.startedAt))}
         ${summaryCell("Duration", formatDuration(run.durationMilliseconds))}
         ${summaryCell("Trigger", "CLI")}
+        ${run.triggers?.length ? summaryCell("Configured triggers", formatTriggers(run.triggers)) : ""}
         ${summaryCell("Workflow file", run.workflowPath ?? "Unknown")}
       </div>
     </section>
@@ -763,6 +764,13 @@ function formatDuration(milliseconds) {
   const minutes = Math.floor(seconds / 60);
   const rest = seconds % 60;
   return minutes > 0 ? `${minutes}m ${rest}s` : `${seconds}s`;
+}
+
+function formatTriggers(triggers) {
+  return triggers.map(trigger => {
+    const keys = Object.keys(trigger.configuration?.properties ?? {});
+    return keys.length ? `${trigger.eventName} (${keys.join(", ")})` : trigger.eventName;
+  }).join(", ");
 }
 
 function shortRunId(runId) {
