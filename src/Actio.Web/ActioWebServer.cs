@@ -4,6 +4,8 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using System.Text;
+using Actio.Web.Models;
 
 namespace Actio.Web;
 
@@ -40,14 +42,17 @@ public sealed class ActioWebServer
     {
         app.MapGet("/", () => Results.Content(EmbeddedWebAssetLoader.ReadText("index.html"), "text/html"));
         app.MapGet("/runs/{runId}", () => Results.Content(EmbeddedWebAssetLoader.ReadText("index.html"), "text/html"));
+        app.MapGet("/settings", () => Results.Content(EmbeddedWebAssetLoader.ReadText("index.html"), "text/html"));
         app.MapGet("/assets/styles.css", () => Results.Content(EmbeddedWebAssetLoader.ReadText("styles.css"), "text/css"));
         app.MapGet("/assets/app.js", () => Results.Content(EmbeddedWebAssetLoader.ReadText("app.js"), "application/javascript"));
 
-        app.MapGet("/api/health", (ActioWebOptions options) => Results.Ok(new
+        app.MapGet("/api/health", (ActioWebDataService data) => Results.Ok(new
         {
             status = "ok",
-            projectRoot = options.ProjectRoot,
-            actioHome = options.ActioHome
+            projectRoot = data.ProjectRoot,
+            actioHome = data.ActioHome,
+            serverUrl = data.ServerUrl,
+            cacheRoot = data.CacheRoot
         }));
 
         app.MapGet("/api/workflows", async (ActioWebDataService data, CancellationToken cancellationToken) =>
@@ -67,6 +72,34 @@ public sealed class ActioWebServer
             var content = await data.GetWorkflowFileAsync(runId, cancellationToken);
             return content is null ? Results.NotFound() : Results.Text(content, "text/yaml");
         });
+
+        app.MapGet("/api/runs/{runId}/workflow-file/download", async (string runId, ActioWebDataService data, CancellationToken cancellationToken) =>
+        {
+            var workflowFile = await data.GetWorkflowFileResultAsync(runId, cancellationToken);
+            return workflowFile is null
+                ? Results.NotFound()
+                : Results.File(
+                    Encoding.UTF8.GetBytes(workflowFile.Content),
+                    "text/yaml",
+                    workflowFile.FileName,
+                    enableRangeProcessing: false);
+        });
+
+        app.MapPut("/api/runs/{runId}/workflow-file", async (
+            string runId,
+            WorkflowFileUpdateRequest request,
+            ActioWebDataService data,
+            CancellationToken cancellationToken) =>
+        {
+            var result = await data.UpdateWorkflowFileAsync(runId, request.Content, cancellationToken);
+            return result.Success ? Results.Ok(result) : Results.BadRequest(result);
+        });
+
+        app.MapGet("/api/cache", async (ActioWebDataService data, CancellationToken cancellationToken) =>
+            Results.Ok(await data.GetCacheAsync(cancellationToken)));
+
+        app.MapDelete("/api/cache", async (ActioWebDataService data, CancellationToken cancellationToken) =>
+            Results.Ok(await data.CleanCacheAsync(cancellationToken)));
 
         app.MapGet("/api/runs/{runId}/logs", async (
             string runId,

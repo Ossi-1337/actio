@@ -10,27 +10,41 @@ public sealed class ActioWebDataService
 {
     private readonly ActioWebOptions _options;
     private readonly FileSystemRunStore _runStore;
+    private readonly FileSystemActionCache _actionCache;
     private readonly WorkflowParser _workflowParser;
     private readonly TimeProvider _timeProvider;
 
     public ActioWebDataService(ActioWebOptions options)
-        : this(options, new FileSystemRunStore(options.ActioHome), new WorkflowParser(), TimeProvider.System)
+        : this(
+            options,
+            new FileSystemRunStore(options.ActioHome),
+            new FileSystemActionCache(options.ActioHome),
+            new WorkflowParser(),
+            TimeProvider.System)
     {
     }
 
     public ActioWebDataService(
         ActioWebOptions options,
         FileSystemRunStore runStore,
+        FileSystemActionCache actionCache,
         WorkflowParser workflowParser,
         TimeProvider? timeProvider = null)
     {
         _options = options;
         _runStore = runStore;
+        _actionCache = actionCache;
         _workflowParser = workflowParser;
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public string ProjectRoot => Path.GetFullPath(_options.ProjectRoot);
+
+    public string ActioHome => Path.GetFullPath(_options.ActioHome);
+
+    public string ServerUrl => _options.Url;
+
+    public string CacheRoot => _actionCache.ActionCachePath;
 
     public async Task<IReadOnlyList<WorkflowSummary>> GetWorkflowsAsync(CancellationToken cancellationToken = default)
     {
@@ -175,23 +189,84 @@ public sealed class ActioWebDataService
         return new ArtifactResult(artifact.StoredPath, false, null, entries);
     }
 
+    public async Task<CacheResult> GetCacheAsync(CancellationToken cancellationToken = default)
+    {
+        var entries = await _actionCache.ListAsync(cancellationToken);
+        return new CacheResult(CacheRoot, entries);
+    }
+
+    public async Task<CacheCleanResult> CleanCacheAsync(CancellationToken cancellationToken = default)
+    {
+        var removed = await _actionCache.CleanAsync(cancellationToken);
+        return new CacheCleanResult(removed);
+    }
+
     public async Task<string?> GetWorkflowFileAsync(string runId, CancellationToken cancellationToken = default)
     {
-        var run = await GetRunAsync(runId, cancellationToken);
-        if (run?.WorkflowPath is null ||
-            !File.Exists(run.WorkflowPath) ||
-            !IsUnderRoot(run.WorkflowPath, ProjectRoot))
+        var workflowFile = await GetWorkflowFileResultAsync(runId, cancellationToken);
+        return workflowFile?.Content;
+    }
+
+    public async Task<WorkflowFileResult?> GetWorkflowFileResultAsync(
+        string runId,
+        CancellationToken cancellationToken = default)
+    {
+        var workflowPath = await ResolveWorkflowPathAsync(runId, cancellationToken);
+        if (workflowPath is null)
         {
             return null;
         }
 
         try
         {
-            return await File.ReadAllTextAsync(run.WorkflowPath, cancellationToken);
+            var content = await File.ReadAllTextAsync(workflowPath, cancellationToken);
+            return new WorkflowFileResult(Path.GetFileName(workflowPath), workflowPath, content);
         }
         catch (Exception ex) when (IsRecoverableFileReadError(ex))
         {
             return null;
+        }
+    }
+
+    public async Task<WorkflowFileUpdateResult> UpdateWorkflowFileAsync(
+        string runId,
+        string? content,
+        CancellationToken cancellationToken = default)
+    {
+        if (content is null)
+        {
+            return WorkflowFileUpdateResult.Failed(["Workflow file content is required."]);
+        }
+
+        var workflowPath = await ResolveWorkflowPathAsync(runId, cancellationToken);
+        if (workflowPath is null)
+        {
+            return WorkflowFileUpdateResult.Failed(["Workflow file could not be resolved inside the project's .workflows directory."]);
+        }
+
+        var parseResult = _workflowParser.Parse(new StringReader(content));
+        if (!parseResult.Success)
+        {
+            return WorkflowFileUpdateResult.Failed(parseResult.Errors);
+        }
+
+        var temporaryPath = Path.Combine(
+            Path.GetDirectoryName(workflowPath)!,
+            $".{Path.GetFileName(workflowPath)}.{Guid.NewGuid():N}.tmp");
+
+        try
+        {
+            await File.WriteAllTextAsync(temporaryPath, content, cancellationToken);
+            File.Move(temporaryPath, workflowPath, overwrite: true);
+            return WorkflowFileUpdateResult.Saved();
+        }
+        catch (Exception ex) when (IsRecoverableFileReadError(ex))
+        {
+            return WorkflowFileUpdateResult.Failed([$"Workflow file could not be saved: {ex.Message}"]);
+        }
+        finally
+        {
+            TryDeleteFile(temporaryPath);
         }
     }
 
@@ -206,6 +281,22 @@ public sealed class ActioWebDataService
         return IsSamePath(run.ProjectRoot, ProjectRoot);
     }
 
+    private async Task<string?> ResolveWorkflowPathAsync(
+        string runId,
+        CancellationToken cancellationToken)
+    {
+        var run = await GetRunAsync(runId, cancellationToken);
+        if (run?.WorkflowPath is null ||
+            !File.Exists(run.WorkflowPath) ||
+            !IsWorkflowFile(run.WorkflowPath) ||
+            !IsUnderRoot(run.WorkflowPath, WorkflowDirectory))
+        {
+            return null;
+        }
+
+        return Path.GetFullPath(run.WorkflowPath);
+    }
+
     private string ReadWorkflowDisplayName(string workflowPath)
     {
         var parseResult = _workflowParser.ParseFile(workflowPath);
@@ -213,6 +304,8 @@ public sealed class ActioWebDataService
             ? parseResult.Workflow!.Name
             : Path.GetFileNameWithoutExtension(workflowPath);
     }
+
+    private string WorkflowDirectory => Path.Combine(ProjectRoot, ".workflows");
 
     private static bool IsWorkflowFile(string path)
     {
@@ -282,5 +375,22 @@ public sealed class ActioWebDataService
             or JsonException
             or NotSupportedException
             or ArgumentException;
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
     }
 }

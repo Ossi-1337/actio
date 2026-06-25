@@ -1,3 +1,4 @@
+using Actio.Engine.Actions;
 using Actio.Engine.Runs;
 using Actio.Storage;
 
@@ -134,6 +135,106 @@ public sealed class ActioWebDataServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task GetWorkflowFileResultAsync_ReturnsFileNameAndContent()
+    {
+        var workflowPath = WriteWorkflow("ci.yml", "CI");
+        await SaveRunAsync(CreateRun("run-1", "CI", workflowPath));
+
+        var result = await CreateService().GetWorkflowFileResultAsync("run-1");
+
+        Assert.NotNull(result);
+        Assert.Equal("ci.yml", result.FileName);
+        Assert.Contains("name: CI", result.Content);
+    }
+
+    [Fact]
+    public async Task UpdateWorkflowFileAsync_SavesValidWorkflow()
+    {
+        var workflowPath = WriteWorkflow("ci.yml", "CI");
+        await SaveRunAsync(CreateRun("run-1", "CI", workflowPath));
+
+        var result = await CreateService().UpdateWorkflowFileAsync(
+            "run-1",
+            """
+            name: Updated CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Contains("name: Updated CI", await File.ReadAllTextAsync(workflowPath));
+    }
+
+    [Fact]
+    public async Task UpdateWorkflowFileAsync_RejectsInvalidWorkflowWithoutOverwriting()
+    {
+        var workflowPath = WriteWorkflow("ci.yml", "CI");
+        var original = await File.ReadAllTextAsync(workflowPath);
+        await SaveRunAsync(CreateRun("run-1", "CI", workflowPath));
+
+        var result = await CreateService().UpdateWorkflowFileAsync("run-1", "name: Broken");
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error.Contains("workflow.jobs is required", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(original, await File.ReadAllTextAsync(workflowPath));
+    }
+
+    [Fact]
+    public async Task UpdateWorkflowFileAsync_RejectsWorkflowOutsideWorkflowsDirectory()
+    {
+        var workflowPath = Path.Combine(_projectRoot, "ci.yml");
+        await File.WriteAllTextAsync(workflowPath, "name: CI");
+        await SaveRunAsync(CreateRun("run-1", "CI", workflowPath));
+
+        var result = await CreateService().UpdateWorkflowFileAsync(
+            "run-1",
+            """
+            name: Updated CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error.Contains(".workflows", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task GetCacheAsync_ReturnsActionCacheEntries()
+    {
+        var cache = new FileSystemActionCache(_actioHome);
+        await cache.GetOrAddDockerImageActionAsync(
+            new DockerImageActionCacheRequest("docker://hello-world:latest", "hello-world:latest", false, "latest"));
+
+        var result = await CreateService().GetCacheAsync();
+
+        var entry = Assert.Single(result.Entries);
+        Assert.Equal("docker", entry.Kind);
+        Assert.Equal("docker://hello-world:latest", entry.Uses);
+        Assert.Contains(Path.Combine("cache", "actions"), result.CacheRoot);
+    }
+
+    [Fact]
+    public async Task CleanCacheAsync_RemovesActionCacheEntries()
+    {
+        var cache = new FileSystemActionCache(_actioHome);
+        await cache.GetOrAddDockerImageActionAsync(
+            new DockerImageActionCacheRequest("docker://hello-world:latest", "hello-world:latest", false, "latest"));
+
+        var result = await CreateService().CleanCacheAsync();
+
+        Assert.Equal(1, result.Removed);
+        Assert.Empty((await cache.ListAsync()));
+    }
+
+    [Fact]
     public async Task GetRunAsync_ReturnsNullForCorruptedRunRecord()
     {
         var runDirectory = Path.Combine(_actioHome, "runs", "run-bad");
@@ -150,6 +251,7 @@ public sealed class ActioWebDataServiceTests : IDisposable
         return new ActioWebDataService(
             new ActioWebOptions(_projectRoot, _actioHome),
             new FileSystemRunStore(_actioHome),
+            new FileSystemActionCache(_actioHome),
             new Actio.Core.Workflows.WorkflowParser(),
             timeProvider);
     }

@@ -1,17 +1,25 @@
 const pollActiveMilliseconds = 2000;
 const pollIdleMilliseconds = 5000;
 const pollHiddenMilliseconds = 15000;
+const previewLineCount = 10;
 const themeStorageKey = "actio-theme";
 
 const state = {
   workflows: [],
   runs: [],
+  selectedRun: null,
   selectedRunId: location.pathname.startsWith("/runs/") ? decodeURIComponent(location.pathname.split("/").pop()) : null,
+  currentView: location.pathname.startsWith("/settings") ? "settings" : "runs",
   filter: "",
   projectRoot: "",
+  health: null,
+  cache: { cacheRoot: "", entries: [] },
+  cacheMessage: "",
   openLogs: new Set(),
   logContents: new Map(),
   workflowFiles: new Map(),
+  workflowMessages: new Map(),
+  expandedWorkflowFiles: new Set(),
   refreshTimer: null,
   detailRequestId: 0,
   theme: loadTheme()
@@ -25,7 +33,11 @@ const el = {
   projectRoot: document.querySelector("#project-root"),
   runCount: document.querySelector("#run-count"),
   filter: document.querySelector("#run-filter"),
-  themeToggle: document.querySelector("#theme-toggle")
+  filters: document.querySelector(".filters"),
+  themeToggle: document.querySelector("#theme-toggle"),
+  navLinks: document.querySelectorAll("[data-view-link]"),
+  runsView: document.querySelector("#runs-view"),
+  settingsView: document.querySelector("#settings-view")
 };
 
 applyTheme(state.theme);
@@ -37,14 +49,50 @@ el.filter.addEventListener("input", () => {
 
 el.themeToggle.addEventListener("click", event => {
   const button = event.target.closest("[data-theme-choice]");
+  if (button) {
+    setTheme(button.dataset.themeChoice);
+  }
+});
+
+el.navLinks.forEach(link => {
+  link.addEventListener("click", async event => {
+    event.preventDefault();
+    const view = link.dataset.viewLink === "settings" ? "settings" : "runs";
+    state.currentView = view;
+    history.pushState(null, "", view === "settings" ? "/settings" : selectedRunPath());
+    await render();
+  });
+});
+
+document.addEventListener("click", async event => {
+  const button = event.target.closest("[data-workflow-action]");
   if (!button) {
     return;
   }
 
-  setTheme(button.dataset.themeChoice);
+  const runId = button.dataset.runId;
+  if (!runId) {
+    return;
+  }
+
+  const action = button.dataset.workflowAction;
+  if (action === "expand") {
+    state.expandedWorkflowFiles.add(runId);
+    updateWorkflowFileShell(runId);
+  } else if (action === "collapse") {
+    state.expandedWorkflowFiles.delete(runId);
+    updateWorkflowFileShell(runId);
+  } else if (action === "copy") {
+    await copyWorkflowFile(runId);
+  } else if (action === "download") {
+    downloadWorkflowFile(runId);
+  } else if (action === "edit") {
+    await openWorkflowEditor(runId);
+  }
 });
 
 window.addEventListener("popstate", () => {
+  state.currentView = location.pathname.startsWith("/settings") ? "settings" : "runs";
   state.selectedRunId = location.pathname.startsWith("/runs/") ? decodeURIComponent(location.pathname.split("/").pop()) : null;
   render();
 });
@@ -66,18 +114,21 @@ async function load() {
 }
 
 async function refreshData(options = {}) {
-  const [health, workflows, runs] = await Promise.all([
+  const [health, workflows, runs, cache] = await Promise.all([
     fetchJson("/api/health"),
     fetchJson("/api/workflows"),
-    fetchJson("/api/runs")
+    fetchJson("/api/runs"),
+    fetchJson("/api/cache")
   ]);
 
+  state.health = health;
   state.projectRoot = health.projectRoot;
   state.workflows = workflows;
   state.runs = runs;
+  state.cache = cache;
   el.projectRoot.textContent = state.projectRoot;
 
-  if (options.selectLatestRun && !state.selectedRunId && runs.length > 0) {
+  if (options.selectLatestRun && state.currentView === "runs" && !state.selectedRunId && runs.length > 0) {
     selectRun(runs[0].runId, { replaceHistory: true, renderNow: false });
   }
 
@@ -85,9 +136,33 @@ async function refreshData(options = {}) {
 }
 
 async function render() {
+  renderNavigation();
+
+  if (state.currentView === "settings") {
+    renderSettings();
+    return;
+  }
+
+  renderRunsView();
+  await renderDetail();
+}
+
+function renderNavigation() {
+  el.navLinks.forEach(link => {
+    const active = link.dataset.viewLink === state.currentView;
+    link.classList.toggle("active", active);
+    link.setAttribute("aria-current", active ? "page" : "false");
+  });
+
+  el.runsView.hidden = state.currentView !== "runs";
+  el.settingsView.hidden = state.currentView !== "settings";
+  el.filters.hidden = state.currentView !== "runs";
+  el.title.textContent = state.currentView === "settings" ? "Settings" : "Workflow runs";
+}
+
+function renderRunsView() {
   renderWorkflows();
   renderRuns();
-  await renderDetail();
 }
 
 function renderWorkflows() {
@@ -106,9 +181,11 @@ function renderWorkflows() {
   el.workflows.querySelectorAll("[data-workflow]").forEach(item => {
     item.addEventListener("click", event => {
       event.preventDefault();
+      state.currentView = "runs";
       state.filter = item.dataset.workflow.toLowerCase();
       el.filter.value = item.dataset.workflow;
-      renderRuns();
+      history.pushState(null, "", selectedRunPath());
+      render();
     });
   });
 }
@@ -145,6 +222,7 @@ async function renderDetail() {
   const requestId = ++state.detailRequestId;
 
   if (!state.selectedRunId) {
+    state.selectedRun = null;
     el.detail.innerHTML = `<section class="summary"><div class="empty">No run selected.</div></section>`;
     return;
   }
@@ -157,6 +235,7 @@ async function renderDetail() {
       return;
     }
 
+    state.selectedRun = null;
     el.title.textContent = "Workflow runs";
     el.detail.innerHTML = `<section class="summary"><div class="empty">Run is not available yet.</div></section>`;
     return;
@@ -166,6 +245,7 @@ async function renderDetail() {
     return;
   }
 
+  state.selectedRun = run;
   el.title.textContent = run.workflowName;
   el.detail.innerHTML = [
     renderSummary(run),
@@ -290,14 +370,121 @@ function renderStep(run, job, step) {
 }
 
 function renderWorkflowFileShell(run) {
-  const content = state.workflowFiles.get(run.runId) ?? "Loading...";
-
   return `
-    <section class="workflow-file">
-      <div class="summary-head"><h2>Workflow file</h2></div>
-      <pre id="workflow-file-${escapeHtml(run.runId)}">${escapeHtml(content)}</pre>
+    <section class="workflow-file" data-workflow-file-run="${escapeHtml(run.runId)}">
+      <div class="summary-head">
+        <h2>Workflow file</h2>
+        <div class="toolbar">
+          <button class="icon-button" type="button" title="Copy workflow file" aria-label="Copy workflow file" data-workflow-action="copy" data-run-id="${escapeHtml(run.runId)}">${copyIcon()}</button>
+          <button class="icon-button" type="button" title="Download workflow file" aria-label="Download workflow file" data-workflow-action="download" data-run-id="${escapeHtml(run.runId)}">${downloadIcon()}</button>
+          <button class="text-button" type="button" data-workflow-action="edit" data-run-id="${escapeHtml(run.runId)}">Edit</button>
+        </div>
+      </div>
+      <div class="workflow-file-body">${renderWorkflowFileBody(run.runId)}</div>
     </section>
   `;
+}
+
+function renderWorkflowFileBody(runId) {
+  const content = state.workflowFiles.get(runId);
+  const message = state.workflowMessages.get(runId);
+
+  if (content === undefined) {
+    return `<pre>Loading...</pre>`;
+  }
+
+  if (content === null) {
+    return `<div class="empty">Workflow file is not available.</div>`;
+  }
+
+  const expanded = state.expandedWorkflowFiles.has(runId);
+  const lines = splitLines(content);
+  const hasMore = lines.length > previewLineCount;
+  const shown = expanded || !hasMore ? content : lines.slice(0, previewLineCount).join("\n");
+  const action = expanded ? "collapse" : "expand";
+  const label = expanded ? "Show less" : `Show full file (${lines.length} lines)`;
+
+  return `
+    <pre>${escapeHtml(shown)}</pre>
+    ${hasMore ? `<div class="workflow-file-actions"><button class="text-button" type="button" data-workflow-action="${action}" data-run-id="${escapeHtml(runId)}">${label}</button></div>` : ""}
+    ${message ? `<div class="inline-message">${escapeHtml(message)}</div>` : ""}
+  `;
+}
+
+function updateWorkflowFileShell(runId) {
+  const section = document.querySelector(`[data-workflow-file-run="${cssEscape(runId)}"]`);
+  const body = section?.querySelector(".workflow-file-body");
+  if (body) {
+    body.innerHTML = renderWorkflowFileBody(runId);
+  }
+}
+
+function renderSettings() {
+  const cacheEntries = state.cache.entries ?? [];
+  el.settingsView.innerHTML = `
+    <section class="summary">
+      <div class="summary-head"><h2>Runtime</h2></div>
+      <div class="settings-grid">
+        ${summaryCell("Project root", state.health?.projectRoot ?? "")}
+        ${summaryCell("ACTIO_HOME", state.health?.actioHome ?? "")}
+        ${summaryCell("Server URL", state.health?.serverUrl ?? "")}
+        ${summaryCell("Cache root", state.health?.cacheRoot ?? state.cache.cacheRoot ?? "")}
+      </div>
+    </section>
+
+    <section class="summary">
+      <div class="summary-head">
+        <h2>Action cache</h2>
+        <button id="clear-cache" class="danger-button" type="button">Clear cache</button>
+      </div>
+      ${state.cacheMessage ? `<div class="inline-message">${escapeHtml(state.cacheMessage)}</div>` : ""}
+      ${renderCacheEntries(cacheEntries)}
+    </section>
+  `;
+
+  const clearButton = document.querySelector("#clear-cache");
+  clearButton?.addEventListener("click", clearCache);
+}
+
+function renderCacheEntries(entries) {
+  if (entries.length === 0) {
+    return `<div class="empty">No cache entries.</div>`;
+  }
+
+  return `
+    <div class="cache-list">
+      ${entries.map(entry => `
+        <article class="cache-row">
+          <div>
+            <div class="cache-title">${escapeHtml(entry.kind)}:${escapeHtml(entry.uses)}</div>
+            <div class="muted">${escapeHtml(entry.sourcePath)}</div>
+          </div>
+          <div class="cache-meta">
+            ${entry.pinnedIdentity ? `<span class="pill">pinned: ${escapeHtml(entry.pinnedIdentity)}</span>` : ""}
+            ${entry.mutablePart ? `<span class="pill">mutable: ${escapeHtml(entry.mutablePart)}</span>` : ""}
+            <span class="pill">last used: ${formatDate(entry.lastUsedAt)}</span>
+          </div>
+          <div class="muted">${escapeHtml(entry.cachePath)}</div>
+        </article>
+      `).join("")}
+    </div>
+  `;
+}
+
+async function clearCache() {
+  if (!confirm("Clear all Actio action cache entries?")) {
+    return;
+  }
+
+  try {
+    const result = await fetchJson("/api/cache", { method: "DELETE" });
+    state.cacheMessage = `Removed ${result.removed} cache ${result.removed === 1 ? "entry" : "entries"}.`;
+    state.cache = await fetchJson("/api/cache");
+  } catch (error) {
+    state.cacheMessage = `Cache could not be cleared: ${error.message}`;
+  }
+
+  renderSettings();
 }
 
 function wireLogButtons(run) {
@@ -342,26 +529,129 @@ async function refreshLog(runId, job, step, target, key) {
 }
 
 async function loadWorkflowFile(runId) {
-  const target = document.querySelector(`#workflow-file-${cssEscape(runId)}`);
-  if (!target) {
-    return;
-  }
-
   if (state.workflowFiles.has(runId)) {
-    target.textContent = state.workflowFiles.get(runId);
+    updateWorkflowFileShell(runId);
     return;
   }
 
   try {
     const content = await fetchText(`/api/runs/${encodeURIComponent(runId)}/workflow-file`);
     state.workflowFiles.set(runId, content);
-    target.textContent = content;
   } catch {
-    target.textContent = "Workflow file is not available.";
+    state.workflowFiles.set(runId, null);
+  }
+
+  updateWorkflowFileShell(runId);
+}
+
+async function ensureWorkflowFileContent(runId) {
+  if (!state.workflowFiles.has(runId)) {
+    await loadWorkflowFile(runId);
+  }
+
+  const content = state.workflowFiles.get(runId);
+  if (content === null || content === undefined) {
+    throw new Error("Workflow file is not available.");
+  }
+
+  return content;
+}
+
+async function copyWorkflowFile(runId) {
+  try {
+    await copyText(await ensureWorkflowFileContent(runId));
+    setWorkflowMessage(runId, "Copied workflow file.");
+  } catch (error) {
+    setWorkflowMessage(runId, `Copy failed: ${error.message}`);
   }
 }
 
+function downloadWorkflowFile(runId) {
+  const link = document.createElement("a");
+  link.href = `/api/runs/${encodeURIComponent(runId)}/workflow-file/download`;
+  link.download = "";
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
+
+async function openWorkflowEditor(runId) {
+  let content;
+  try {
+    content = await ensureWorkflowFileContent(runId);
+  } catch (error) {
+    setWorkflowMessage(runId, error.message);
+    return;
+  }
+
+  const overlay = document.createElement("div");
+  overlay.className = "modal-backdrop";
+  overlay.innerHTML = `
+    <div class="modal" role="dialog" aria-modal="true" aria-label="Edit workflow file">
+      <div class="modal-head">
+        <h2>Edit workflow file</h2>
+        <button class="icon-button" type="button" title="Close" aria-label="Close" data-editor-cancel>${closeIcon()}</button>
+      </div>
+      <textarea class="workflow-editor" spellcheck="false">${escapeHtml(content)}</textarea>
+      <div class="modal-message muted" data-editor-message></div>
+      <div class="modal-actions">
+        <button class="text-button" type="button" data-editor-cancel>Cancel</button>
+        <button class="primary-button" type="button" data-editor-save>Save</button>
+      </div>
+    </div>
+  `;
+
+  document.body.append(overlay);
+  const textarea = overlay.querySelector("textarea");
+  textarea.focus();
+
+  overlay.querySelectorAll("[data-editor-cancel]").forEach(button => {
+    button.addEventListener("click", () => overlay.remove());
+  });
+
+  overlay.addEventListener("click", event => {
+    if (event.target === overlay) {
+      overlay.remove();
+    }
+  });
+
+  overlay.querySelector("[data-editor-save]").addEventListener("click", async () => {
+    const message = overlay.querySelector("[data-editor-message]");
+    const saveButton = overlay.querySelector("[data-editor-save]");
+    saveButton.disabled = true;
+    message.textContent = "Saving...";
+
+    try {
+      const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/workflow-file`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: textarea.value })
+      });
+      const result = await response.json();
+      if (!response.ok || !result.success) {
+        message.textContent = (result.errors ?? ["Workflow file could not be saved."]).join("\n");
+        return;
+      }
+
+      state.workflowFiles.set(runId, textarea.value);
+      setWorkflowMessage(runId, "Saved workflow file.");
+      overlay.remove();
+      await refreshData();
+    } catch (error) {
+      message.textContent = `Workflow file could not be saved: ${error.message}`;
+    } finally {
+      saveButton.disabled = false;
+    }
+  });
+}
+
+function setWorkflowMessage(runId, message) {
+  state.workflowMessages.set(runId, message);
+  updateWorkflowFileShell(runId);
+}
+
 async function selectRun(runId, options = {}) {
+  state.currentView = "runs";
   state.selectedRunId = runId;
 
   if (options.replaceHistory) {
@@ -424,8 +714,8 @@ function filteredRuns() {
   ].some(value => (value ?? "").toLowerCase().includes(state.filter)));
 }
 
-async function fetchJson(url) {
-  const response = await fetch(url);
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, options);
   if (!response.ok) {
     throw new Error(`${url} returned ${response.status}`);
   }
@@ -483,6 +773,10 @@ function logKey(runId, job, step) {
   return `${runId}|${job}|${step}`;
 }
 
+function selectedRunPath() {
+  return state.selectedRunId ? `/runs/${encodeURIComponent(state.selectedRunId)}` : "/";
+}
+
 function setTheme(theme) {
   state.theme = theme === "light" ? "light" : "dark";
   applyTheme(state.theme);
@@ -508,6 +802,42 @@ function applyTheme(theme) {
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", active ? "true" : "false");
   });
+}
+
+function splitLines(content) {
+  return String(content ?? "").split(/\r?\n/);
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.append(textarea);
+  textarea.select();
+  const copied = document.execCommand("copy");
+  textarea.remove();
+
+  if (!copied) {
+    throw new Error("Clipboard is not available.");
+  }
+}
+
+function copyIcon() {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"></rect><path d="M5 15V5a2 2 0 0 1 2-2h10"></path></svg>`;
+}
+
+function downloadIcon() {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"></path><path d="m7 10 5 5 5-5"></path><path d="M5 21h14"></path></svg>`;
+}
+
+function closeIcon() {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>`;
 }
 
 function escapeHtml(value) {

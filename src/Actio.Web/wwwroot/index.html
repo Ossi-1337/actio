@@ -13,6 +13,10 @@
         <span class="brand-mark">A</span>
         <span>Actio</span>
       </div>
+      <nav class="app-nav" aria-label="Primary">
+        <a href="/" class="nav-item active" data-view-link="runs">Runs</a>
+        <a href="/settings" class="nav-item" data-view-link="settings">Settings</a>
+      </nav>
       <div class="sidebar-section">
         <div class="sidebar-title">Workflows</div>
         <nav id="workflow-list" class="workflow-list"></nav>
@@ -25,7 +29,7 @@
           <h1 id="page-title">Workflow runs</h1>
           <div id="project-root" class="muted"></div>
         </div>
-        <div class="topbar-actions">
+        <div id="topbar-actions" class="topbar-actions">
           <div id="theme-toggle" class="theme-toggle" role="group" aria-label="Theme">
             <button type="button" data-theme-choice="dark" aria-pressed="true">Dark</button>
             <button type="button" data-theme-choice="light" aria-pressed="false">Light</button>
@@ -36,7 +40,7 @@
         </div>
       </header>
 
-      <section class="content-grid">
+      <section id="runs-view" class="content-grid">
         <section class="panel run-panel">
           <div class="panel-head">
             <h2>Runs</h2>
@@ -47,6 +51,8 @@
 
         <section id="detail" class="detail"></section>
       </section>
+
+      <section id="settings-view" class="settings-view" hidden></section>
     </main>
   </div>
 
