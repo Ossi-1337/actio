@@ -6,7 +6,8 @@ internal sealed partial class ConditionEvaluator
 {
     public ConditionEvaluationResult Evaluate(
         string? expression,
-        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs)
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
+        IReadOnlyDictionary<string, string> inputs)
     {
         if (expression is null)
         {
@@ -18,12 +19,20 @@ internal sealed partial class ConditionEvaluator
             return ConditionEvaluationResult.Failed("Unsupported if expression.");
         }
 
-        if (!jobOutputs.TryGetValue(condition!.ReferencedJob, out var outputs))
+        if (condition!.Kind == WorkflowConditionExpressionKind.Input)
+        {
+            inputs.TryGetValue(condition.Name, out var actualInputValue);
+            return string.Equals(actualInputValue, condition.ExpectedValue, StringComparison.Ordinal)
+                ? ConditionEvaluationResult.Run()
+                : ConditionEvaluationResult.Skip();
+        }
+
+        if (!jobOutputs.TryGetValue(condition.ReferencedJob!, out var outputs))
         {
             return ConditionEvaluationResult.Skip();
         }
 
-        outputs.TryGetValue(condition.OutputName, out var actualValue);
+        outputs.TryGetValue(condition.Name, out var actualValue);
         return string.Equals(actualValue, condition.ExpectedValue, StringComparison.Ordinal)
             ? ConditionEvaluationResult.Run()
             : ConditionEvaluationResult.Skip();

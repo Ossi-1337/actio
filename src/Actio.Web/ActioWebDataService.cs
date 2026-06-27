@@ -85,7 +85,7 @@ public sealed class ActioWebDataService
                 run.Status,
                 run.StartedAt,
                 run.DurationMilliseconds,
-                "CLI",
+                FormatRunTrigger(run.RunTrigger),
                 run.Jobs.Count,
                 run.Artifacts.Count))
             .ToArray();
@@ -356,6 +356,11 @@ public sealed class ActioWebDataService
             DurationMilliseconds = Math.Max(0, (long)(now - run.StartedAt).TotalMilliseconds)
         };
     }
+
+    private static string FormatRunTrigger(WorkflowRunTrigger trigger)
+        => string.IsNullOrWhiteSpace(trigger.Source)
+            ? trigger.EventName
+            : $"{trigger.EventName} ({trigger.Source})";
 
     private static bool IsSamePath(string? left, string? right)
     {

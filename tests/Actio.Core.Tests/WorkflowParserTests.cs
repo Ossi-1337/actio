@@ -309,6 +309,161 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
+    public void Parse_AcceptsWorkflowDispatchInputsAsTriggerMetadata()
+    {
+        var result = Parse(
+            """
+            name: CI
+            on:
+              workflow_dispatch:
+                inputs:
+                  environment:
+                    description: Target environment
+                    required: true
+                    type: choice
+                    options:
+                      - staging
+                      - production
+                  dry-run:
+                    type: boolean
+                    default: "false"
+            jobs:
+              test:
+                if: "${{ inputs.environment == 'staging' }}"
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var dispatch = Assert.Single(result.Workflow!.Triggers).Dispatch;
+        Assert.Equal(["environment", "dry-run"], dispatch.Inputs.Keys);
+        Assert.True(dispatch.Inputs["environment"].Required);
+        Assert.Equal("choice", dispatch.Inputs["environment"].Type);
+        Assert.Equal(["staging", "production"], dispatch.Inputs["environment"].Options);
+        Assert.Equal("boolean", dispatch.Inputs["dry-run"].Type);
+        Assert.Equal("false", dispatch.Inputs["dry-run"].Default);
+    }
+
+    [Fact]
+    public void Parse_RejectsInvalidWorkflowDispatchInput()
+    {
+        var result = Parse(
+            """
+            name: CI
+            on:
+              workflow_dispatch:
+                inputs:
+                  environment:
+                    required: sometimes
+                    type: choice
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "workflow.on.workflow_dispatch.inputs.environment.required must be true or false.");
+        Assert.Contains(result.Errors, error => error == "workflow.on.workflow_dispatch.inputs.environment.options is required when type is choice.");
+    }
+
+    [Fact]
+    public void Parse_RejectsUndeclaredWorkflowDispatchInputCondition()
+    {
+        var result = Parse(
+            """
+            name: CI
+            on:
+              workflow_dispatch:
+                inputs:
+                  environment:
+                    type: string
+            jobs:
+              test:
+                if: "${{ inputs.missing == 'true' }}"
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error.Contains("inputs.missing", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("is not declared", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Parse_AcceptsScheduleCronMetadata()
+    {
+        var result = Parse(
+            """
+            name: CI
+            on:
+              schedule:
+                - cron: "0 8 * * 1"
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var trigger = Assert.Single(result.Workflow!.Triggers);
+        Assert.Equal("schedule", trigger.EventName);
+        Assert.Equal("0 8 * * 1", Assert.Single(trigger.Schedules).Cron);
+        Assert.Contains(result.Warnings, warning => warning.Contains("operating system scheduler", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Parse_RejectsInvalidScheduleCronMetadata()
+    {
+        var result = Parse(
+            """
+            name: CI
+            on:
+              schedule:
+                - cron: "0 8 *"
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "workflow.on.schedule[0].cron must contain five cron fields.");
+    }
+
+    [Fact]
+    public void Parse_WarnsForRepositoryDispatchMetadata()
+    {
+        var result = Parse(
+            """
+            name: CI
+            on:
+              repository_dispatch:
+                types:
+                  - deploy
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Contains(result.Warnings, warning => warning.Contains("repository dispatch webhooks", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void Parse_RejectsUnsupportedTriggerConfigurationKey()
     {
         var result = Parse(

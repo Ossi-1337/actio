@@ -15,7 +15,23 @@ public sealed record WorkflowRunRecord(
     IReadOnlyList<WorkflowRunOutput> Outputs,
     IReadOnlyList<WorkflowRunArtifact> Artifacts,
     IReadOnlyList<string> Errors,
-    IReadOnlyList<WorkflowTrigger>? Triggers = null)
+    IReadOnlyList<WorkflowTrigger>? Triggers = null,
+    WorkflowRunTrigger? RunTrigger = null)
 {
     public IReadOnlyList<WorkflowTrigger> Triggers { get; init; } = Triggers ?? [];
+
+    public WorkflowRunTrigger RunTrigger { get; init; } = RunTrigger ?? WorkflowRunTrigger.CliWorkflowDispatch;
+}
+
+public sealed record WorkflowRunTrigger(
+    string EventName,
+    string Source,
+    IReadOnlyDictionary<string, string>? Inputs = null)
+{
+    public static WorkflowRunTrigger CliWorkflowDispatch { get; } = new(
+        "workflow_dispatch",
+        "CLI",
+        new Dictionary<string, string>());
+
+    public IReadOnlyDictionary<string, string> Inputs { get; init; } = Inputs ?? new Dictionary<string, string>();
 }

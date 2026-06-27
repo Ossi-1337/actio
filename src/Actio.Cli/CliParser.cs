@@ -74,13 +74,6 @@ public sealed class CliParser
             return CliCommand.UsageError("Missing workflow argument for 'run'.");
         }
 
-        if (args.Count > 2)
-        {
-            return args[2].StartsWith("-", StringComparison.Ordinal)
-                ? CliCommand.UsageError($"Unknown option '{args[2]}' for 'run'.")
-                : CliCommand.UsageError($"Unexpected argument '{args[2]}' for 'run'.");
-        }
-
         if (args[1].StartsWith("-", StringComparison.Ordinal))
         {
             return CliCommand.UsageError($"Unknown option '{args[1]}' for 'run'.");
@@ -91,7 +84,10 @@ public sealed class CliParser
             return CliCommand.UsageError("Workflow argument for 'run' must end with .yml or .yaml.");
         }
 
-        return CliCommand.RunWorkflow(args[1]);
+        var inputs = ParseRunOptions(args, 2, "run");
+        return inputs.Success
+            ? CliCommand.RunWorkflow(args[1], inputs.Inputs)
+            : CliCommand.UsageError(inputs.ErrorMessage!);
     }
 
     private static CliCommand ParseShorthandRunCommand(IReadOnlyList<string> args)
@@ -103,9 +99,62 @@ public sealed class CliParser
             return CliCommand.RunWorkflow(workflowName);
         }
 
-        return args[1].StartsWith("-", StringComparison.Ordinal)
-            ? CliCommand.UsageError($"Unknown option '{args[1]}'.")
-            : CliCommand.UsageError($"Unexpected argument '{args[1]}'.");
+        var inputs = ParseRunOptions(args, 1, null);
+        return inputs.Success
+            ? CliCommand.RunWorkflow(workflowName, inputs.Inputs)
+            : CliCommand.UsageError(inputs.ErrorMessage!);
+    }
+
+    private static RunOptionsParseResult ParseRunOptions(
+        IReadOnlyList<string> args,
+        int startIndex,
+        string? commandName)
+    {
+        var inputs = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        for (var index = startIndex; index < args.Count; index++)
+        {
+            var option = args[index];
+            if (!option.StartsWith("-", StringComparison.Ordinal))
+            {
+                return RunOptionsParseResult.Failed(commandName is null
+                    ? $"Unexpected argument '{option}'."
+                    : $"Unexpected argument '{option}' for '{commandName}'.");
+            }
+
+            if (!string.Equals(option, "--input", StringComparison.Ordinal))
+            {
+                return RunOptionsParseResult.Failed(commandName is null
+                    ? $"Unknown option '{option}'."
+                    : $"Unknown option '{option}' for '{commandName}'.");
+            }
+
+            if (index + 1 >= args.Count)
+            {
+                return RunOptionsParseResult.Failed("Missing value for '--input'.");
+            }
+
+            var input = args[++index];
+            var separatorIndex = input.IndexOf('=', StringComparison.Ordinal);
+            if (separatorIndex <= 0)
+            {
+                return RunOptionsParseResult.Failed("Value for '--input' must use name=value.");
+            }
+
+            var name = input[..separatorIndex];
+            var value = input[(separatorIndex + 1)..];
+            if (!IsInputName(name))
+            {
+                return RunOptionsParseResult.Failed($"Input name '{name}' is invalid.");
+            }
+
+            if (!inputs.TryAdd(name, value))
+            {
+                return RunOptionsParseResult.Failed($"Input '{name}' was provided more than once.");
+            }
+        }
+
+        return RunOptionsParseResult.Parsed(inputs);
     }
 
     private static CliCommand ParseWebCommand(IReadOnlyList<string> args)
@@ -199,5 +248,30 @@ public sealed class CliParser
     {
         return arg.EndsWith(".yml", StringComparison.OrdinalIgnoreCase) ||
             arg.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsInputName(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        return value.All(character =>
+            char.IsAsciiLetterOrDigit(character) ||
+            character == '_' ||
+            character == '-');
+    }
+
+    private sealed record RunOptionsParseResult(
+        bool Success,
+        IReadOnlyDictionary<string, string> Inputs,
+        string? ErrorMessage)
+    {
+        public static RunOptionsParseResult Parsed(IReadOnlyDictionary<string, string> inputs)
+            => new(true, inputs, null);
+
+        public static RunOptionsParseResult Failed(string errorMessage)
+            => new(false, new Dictionary<string, string>(), errorMessage);
     }
 }

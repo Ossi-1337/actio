@@ -105,6 +105,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                     job,
                     workflow.Env,
                     options.ProjectRoot,
+                    options.RunTrigger.Inputs,
                     runId,
                     jobStatuses,
                     jobOutputs,
@@ -185,6 +186,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         WorkflowJob job,
         IReadOnlyDictionary<string, string> workflowEnv,
         string projectRoot,
+        IReadOnlyDictionary<string, string> inputs,
         string runId,
         IReadOnlyDictionary<string, string> jobStatuses,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
@@ -195,7 +197,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         var skipReason = GetDependencySkipReason(job, jobStatuses);
         if (skipReason is null)
         {
-            var condition = _conditionEvaluator.Evaluate(job.If, jobOutputs);
+            var condition = _conditionEvaluator.Evaluate(job.If, jobOutputs, inputs);
 
             if (!condition.Success)
             {
@@ -239,7 +241,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             runOutputs.ToArray(),
             runArtifacts.ToArray(),
             errors.ToArray(),
-            workflow.Triggers);
+            workflow.Triggers,
+            options.RunTrigger);
     }
 
     private async Task<string?> TrySaveRunRecordAsync(

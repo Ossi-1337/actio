@@ -1,6 +1,7 @@
 using Actio.Core.Workflows;
 using Actio.Engine.Actions;
 using Actio.Engine.Execution;
+using Actio.Engine.Runs;
 using Actio.Runner.Docker;
 using Actio.Storage;
 using Actio.Web;
@@ -128,6 +129,13 @@ public sealed class CliApplication
         WriteWarnings(error, parseResult.Warnings);
 
         var workflow = parseResult.Workflow!;
+        var inputResolution = WorkflowDispatchInputResolver.Resolve(workflow, command.Inputs);
+        if (!inputResolution.Success)
+        {
+            WriteErrors(error, inputResolution.Errors);
+            return ExitCodes.ValidationError;
+        }
+
         var runId = _createRunId();
         var wrotePipelineLink = await WriteViewPipelineLinkAsync(
             resolution.ProjectRoot!,
@@ -144,7 +152,11 @@ public sealed class CliApplication
 
         var executionResult = await _executor.ExecuteAsync(
             workflow,
-            new WorkflowExecutionOptions(resolution.ProjectRoot!, resolution.WorkflowPath, runId),
+            new WorkflowExecutionOptions(
+                resolution.ProjectRoot!,
+                resolution.WorkflowPath,
+                runId,
+                new WorkflowRunTrigger("workflow_dispatch", "CLI", inputResolution.Inputs)),
             output,
             error,
             cancellationToken);

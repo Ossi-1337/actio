@@ -271,7 +271,8 @@ function renderSummary(run) {
       <div class="summary-grid">
         ${summaryCell("Started", formatDate(run.startedAt))}
         ${summaryCell("Duration", formatDuration(run.durationMilliseconds))}
-        ${summaryCell("Trigger", "CLI")}
+        ${summaryCell("Trigger", formatRunTrigger(run.runTrigger))}
+        ${Object.keys(run.runTrigger?.inputs ?? {}).length ? summaryCell("Trigger inputs", formatRunInputs(run.runTrigger.inputs)) : ""}
         ${run.triggers?.length ? summaryCell("Configured triggers", formatTriggers(run.triggers)) : ""}
         ${summaryCell("Workflow file", run.workflowPath ?? "Unknown")}
       </div>
@@ -771,6 +772,20 @@ function formatTriggers(triggers) {
     const keys = Object.keys(trigger.configuration?.properties ?? {});
     return keys.length ? `${trigger.eventName} (${keys.join(", ")})` : trigger.eventName;
   }).join(", ");
+}
+
+function formatRunTrigger(trigger) {
+  if (!trigger) {
+    return "CLI";
+  }
+
+  return trigger.source ? `${trigger.eventName} (${trigger.source})` : trigger.eventName;
+}
+
+function formatRunInputs(inputs) {
+  return Object.entries(inputs)
+    .map(([name, value]) => `${name}=${value}`)
+    .join(", ");
 }
 
 function shortRunId(runId) {

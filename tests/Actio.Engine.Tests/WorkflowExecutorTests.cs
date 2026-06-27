@@ -266,6 +266,49 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_EvaluatesIfConditionFromWorkflowDispatchInputs()
+    {
+        var runner = new FakeRunnerProvider([0]);
+        var workflow = new WorkflowDocument(
+            "CI",
+            new Dictionary<string, string>(),
+            new Dictionary<string, WorkflowJob>
+            {
+                ["test"] = new(
+                    "test",
+                    [],
+                    "${{ inputs.environment == 'staging' }}",
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Test", "dotnet test", null)])
+            },
+            [
+                new WorkflowTrigger(
+                    "workflow_dispatch",
+                    null,
+                    Dispatch: new WorkflowDispatch(new Dictionary<string, WorkflowDispatchInput>
+                    {
+                        ["environment"] = new("environment", null, true, null, "string", [])
+                    }))
+            ]);
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(
+                "C:\\repo",
+                RunTrigger: new WorkflowRunTrigger(
+                    "workflow_dispatch",
+                    "CLI",
+                    new Dictionary<string, string> { ["environment"] = "staging" })),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var request = Assert.Single(runner.Requests);
+        Assert.Equal("test", request.JobName);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_ReturnsCleanFailureWhenRunStorageInitializationFails()
     {
         var runner = new FakeRunnerProvider([0]);

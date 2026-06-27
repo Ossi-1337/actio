@@ -56,6 +56,29 @@ public sealed partial class WorkflowParser
         "outputs"
     };
 
+    private static readonly HashSet<string> WorkflowDispatchInputKeys = new(StringComparer.Ordinal)
+    {
+        "description",
+        "required",
+        "default",
+        "type",
+        "options"
+    };
+
+    private static readonly HashSet<string> WorkflowDispatchInputTypes = new(StringComparer.Ordinal)
+    {
+        "boolean",
+        "choice",
+        "number",
+        "environment",
+        "string"
+    };
+
+    private static readonly HashSet<string> ScheduleKeys = new(StringComparer.Ordinal)
+    {
+        "cron"
+    };
+
     public WorkflowParseResult ParseFile(string workflowPath)
     {
         try
@@ -96,6 +119,7 @@ public sealed partial class WorkflowParser
         var name = ReadRequiredScalar(errors, root, "name", "workflow.name");
         var env = ReadOptionalStringMap(errors, root, "env", "workflow.env");
         var jobs = ReadJobs(errors, warnings, root);
+        ValidateConditions(errors, jobs, triggers);
 
         if (errors.Count > 0)
         {
@@ -160,8 +184,6 @@ public sealed partial class WorkflowParser
         }
 
         ValidateNeeds(errors, jobs);
-        ValidateConditions(errors, jobs);
-
         return jobs;
     }
 
@@ -397,7 +419,7 @@ public sealed partial class WorkflowParser
             if (eventName is not null)
             {
                 triggers.Add(new WorkflowTrigger(eventName, null));
-                AddTriggerSecurityWarnings(warnings, eventName);
+                AddTriggerWarnings(warnings, eventName);
             }
 
             AddTriggerWarningIfValid(errors, errorCount, warnings);
@@ -418,7 +440,7 @@ public sealed partial class WorkflowParser
                 if (eventName is not null)
                 {
                     triggers.Add(new WorkflowTrigger(eventName, null));
-                    AddTriggerSecurityWarnings(warnings, eventName);
+                    AddTriggerWarnings(warnings, eventName);
                 }
             }
 
@@ -439,8 +461,10 @@ public sealed partial class WorkflowParser
                 var configurationPath = $"{path}.{eventName}";
                 var configuration = ReadTriggerConfiguration(errors, valueNode, configurationPath);
                 var filters = ReadTriggerFilters(errors, valueNode, configurationPath);
-                triggers.Add(new WorkflowTrigger(eventName, configuration, filters));
-                AddTriggerSecurityWarnings(warnings, eventName);
+                var dispatch = ReadWorkflowDispatch(errors, eventName, valueNode, configurationPath);
+                var schedules = ReadWorkflowSchedules(errors, eventName, valueNode, configurationPath);
+                triggers.Add(new WorkflowTrigger(eventName, configuration, filters, dispatch, schedules));
+                AddTriggerWarnings(warnings, eventName);
             }
 
             AddTriggerWarningIfValid(errors, errorCount, warnings);
@@ -449,6 +473,131 @@ public sealed partial class WorkflowParser
 
         errors.Add($"{path} must be a string, a list, or a mapping.");
         return triggers;
+    }
+
+    private static WorkflowDispatch ReadWorkflowDispatch(
+        List<string> errors,
+        string eventName,
+        YamlNode node,
+        string path)
+    {
+        if (!string.Equals(eventName, "workflow_dispatch", StringComparison.Ordinal))
+        {
+            return WorkflowDispatch.Empty;
+        }
+
+        if (IsEmptyScalar(node))
+        {
+            return WorkflowDispatch.Empty;
+        }
+
+        if (node is not YamlMappingNode map)
+        {
+            errors.Add($"{path} must be a mapping when workflow_dispatch inputs are configured.");
+            return WorkflowDispatch.Empty;
+        }
+
+        if (!TryGet(map, "inputs", out var inputsNode))
+        {
+            return WorkflowDispatch.Empty;
+        }
+
+        var inputsPath = $"{path}.inputs";
+        if (inputsNode is not YamlMappingNode inputsMap)
+        {
+            errors.Add($"{inputsPath} must be a mapping.");
+            return WorkflowDispatch.Empty;
+        }
+
+        var inputs = new Dictionary<string, WorkflowDispatchInput>(StringComparer.Ordinal);
+        foreach (var (keyNode, valueNode) in inputsMap.Children)
+        {
+            var inputName = ReadMapKey(errors, keyNode, inputsPath);
+            if (inputName is null)
+            {
+                continue;
+            }
+
+            var inputPath = $"{inputsPath}.{inputName}";
+            if (valueNode is not YamlMappingNode inputMap)
+            {
+                errors.Add($"{inputPath} must be a mapping.");
+                continue;
+            }
+
+            AddUnknownKeyErrors(errors, inputMap, WorkflowDispatchInputKeys, inputPath);
+
+            var description = ReadOptionalScalar(errors, inputMap, "description", $"{inputPath}.description");
+            var required = ReadOptionalBoolean(errors, inputMap, "required", $"{inputPath}.required") ?? false;
+            var defaultValue = ReadOptionalScalar(errors, inputMap, "default", $"{inputPath}.default");
+            var type = ReadOptionalScalar(errors, inputMap, "type", $"{inputPath}.type") ?? "string";
+            var options = ReadOptionalStringList(errors, inputMap, "options", $"{inputPath}.options");
+
+            if (!WorkflowDispatchInputTypes.Contains(type))
+            {
+                errors.Add($"{inputPath}.type must be one of boolean, choice, number, environment, or string.");
+            }
+
+            if (options.Count > 0 && !string.Equals(type, "choice", StringComparison.Ordinal))
+            {
+                errors.Add($"{inputPath}.options can only be used when type is choice.");
+            }
+
+            if (string.Equals(type, "choice", StringComparison.Ordinal) && options.Count == 0)
+            {
+                errors.Add($"{inputPath}.options is required when type is choice.");
+            }
+
+            inputs[inputName] = new WorkflowDispatchInput(inputName, description, required, defaultValue, type, options);
+        }
+
+        return new WorkflowDispatch(inputs);
+    }
+
+    private static IReadOnlyList<WorkflowSchedule> ReadWorkflowSchedules(
+        List<string> errors,
+        string eventName,
+        YamlNode node,
+        string path)
+    {
+        if (!string.Equals(eventName, "schedule", StringComparison.Ordinal))
+        {
+            return [];
+        }
+
+        if (node is not YamlSequenceNode sequence)
+        {
+            errors.Add($"{path} must be a list of cron entries.");
+            return [];
+        }
+
+        var schedules = new List<WorkflowSchedule>();
+        for (var index = 0; index < sequence.Children.Count; index++)
+        {
+            var itemPath = $"{path}[{index}]";
+            if (sequence.Children[index] is not YamlMappingNode map)
+            {
+                errors.Add($"{itemPath} must be a mapping.");
+                continue;
+            }
+
+            AddUnknownKeyErrors(errors, map, ScheduleKeys, itemPath);
+            var cron = ReadRequiredScalar(errors, map, "cron", $"{itemPath}.cron");
+            if (cron is null)
+            {
+                continue;
+            }
+
+            if (!HasFiveCronFields(cron))
+            {
+                errors.Add($"{itemPath}.cron must contain five cron fields.");
+                continue;
+            }
+
+            schedules.Add(new WorkflowSchedule(cron));
+        }
+
+        return schedules;
     }
 
     private static WorkflowTriggerValue? ReadTriggerConfiguration(
@@ -635,6 +784,21 @@ public sealed partial class WorkflowParser
         if (string.Equals(eventName, "pull_request_target", StringComparison.Ordinal))
         {
             warnings.Add("workflow.on.pull_request_target is security-sensitive in GitHub Actions. Actio stores it as local trigger metadata only and does not model fork trust, hosted tokens, or permission elevation.");
+        }
+    }
+
+    private static void AddTriggerWarnings(List<string> warnings, string eventName)
+    {
+        AddTriggerSecurityWarnings(warnings, eventName);
+
+        if (string.Equals(eventName, "schedule", StringComparison.Ordinal))
+        {
+            warnings.Add("workflow.on.schedule is parsed as trigger metadata. Actio does not run schedules itself; use the operating system scheduler to invoke actio locally.");
+        }
+
+        if (string.Equals(eventName, "repository_dispatch", StringComparison.Ordinal))
+        {
+            warnings.Add("workflow.on.repository_dispatch is parsed as trigger metadata. Actio does not receive GitHub repository dispatch webhooks.");
         }
     }
 
@@ -881,6 +1045,65 @@ public sealed partial class WorkflowParser
         return ReadScalarValue(errors, scalar, path);
     }
 
+    private static bool? ReadOptionalBoolean(List<string> errors, YamlMappingNode map, string key, string path)
+    {
+        var value = ReadOptionalScalar(errors, map, key, path);
+        if (value is null)
+        {
+            return null;
+        }
+
+        if (bool.TryParse(value, out var result))
+        {
+            return result;
+        }
+
+        errors.Add($"{path} must be true or false.");
+        return null;
+    }
+
+    private static IReadOnlyList<string> ReadOptionalStringList(
+        List<string> errors,
+        YamlMappingNode map,
+        string key,
+        string path)
+    {
+        if (!TryGet(map, key, out var node))
+        {
+            return [];
+        }
+
+        if (node is YamlScalarNode scalar)
+        {
+            var value = ReadScalarValue(errors, scalar, path);
+            return value is null ? [] : [value];
+        }
+
+        if (node is not YamlSequenceNode sequence)
+        {
+            errors.Add($"{path} must be a string or a list of strings.");
+            return [];
+        }
+
+        var values = new List<string>();
+        for (var index = 0; index < sequence.Children.Count; index++)
+        {
+            if (sequence.Children[index] is not YamlScalarNode item)
+            {
+                errors.Add($"{path}[{index}] must be a string.");
+                continue;
+            }
+
+            var value = ReadScalarValue(errors, item, $"{path}[{index}]");
+            if (value is not null)
+            {
+                values.Add(value);
+            }
+        }
+
+        return values;
+    }
+
     private static string? ReadScalarValue(List<string> errors, YamlScalarNode scalar, string path)
     {
         if (string.IsNullOrWhiteSpace(scalar.Value))
@@ -920,8 +1143,18 @@ public sealed partial class WorkflowParser
         }
     }
 
-    private static void ValidateConditions(List<string> errors, IReadOnlyDictionary<string, WorkflowJob> jobs)
+    private static void ValidateConditions(
+        List<string> errors,
+        IReadOnlyDictionary<string, WorkflowJob> jobs,
+        IReadOnlyList<WorkflowTrigger> triggers)
     {
+        var dispatchInputNames = triggers
+            .FirstOrDefault(trigger => string.Equals(trigger.EventName, "workflow_dispatch", StringComparison.Ordinal))?
+            .Dispatch
+            .Inputs
+            .Keys
+            .ToHashSet(StringComparer.Ordinal) ?? [];
+
         foreach (var job in jobs.Values)
         {
             if (job.If is null)
@@ -935,7 +1168,17 @@ public sealed partial class WorkflowParser
                 continue;
             }
 
-            var referencedJob = condition!.ReferencedJob;
+            if (condition!.Kind == WorkflowConditionExpressionKind.Input)
+            {
+                if (!dispatchInputNames.Contains(condition.Name))
+                {
+                    errors.Add($"workflow.jobs.{job.Name}.if references inputs.{condition.Name}, but workflow.on.workflow_dispatch.inputs.{condition.Name} is not declared.");
+                }
+
+                continue;
+            }
+
+            var referencedJob = condition.ReferencedJob!;
             if (!jobs.ContainsKey(referencedJob))
             {
                 errors.Add($"workflow.jobs.{job.Name}.if references unknown job '{referencedJob}'.");
@@ -948,6 +1191,9 @@ public sealed partial class WorkflowParser
             }
         }
     }
+
+    private static bool HasFiveCronFields(string cron)
+        => cron.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Length == 5;
 
     private static void AddUnknownKeyErrors(
         List<string> errors,

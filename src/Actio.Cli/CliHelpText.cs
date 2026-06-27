@@ -44,15 +44,19 @@ public static class CliHelpText
 
         Options:
           -h, --help              Show help for the run command.
+          --input NAME=VALUE      Provide a workflow_dispatch input. Can be repeated.
 
         Description:
           Resolves .workflows/<workflow>.yml first, then .github/workflows/<workflow>.yml
           as a GitHub Actions compatibility fallback. Supported steps execute in Docker.
+          CLI runs are recorded as workflow_dispatch runs. Inputs are validated against
+          workflow_dispatch.inputs when the workflow defines them.
           Local uses references work today. External action references are validated
           and warn when mutable, then execute when their action type is supported.
 
         Examples:
           actio run ci.yml
+          actio run ci.yml --input environment=staging
           actio ci.yml
         """;
 

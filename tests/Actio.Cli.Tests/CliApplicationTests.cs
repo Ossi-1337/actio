@@ -52,6 +52,7 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Contains("Actio run - run a workflow.", result.Output);
         Assert.Contains("Arguments:", result.Output);
         Assert.Contains("Description:", result.Output);
+        Assert.Contains("--input NAME=VALUE", result.Output);
         Assert.Contains(".github/workflows/<workflow>.yml", result.Output);
         Assert.Equal(string.Empty, result.Error);
         Assert.Null(result.Executor.Workflow);
@@ -192,7 +193,80 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Contains("Success (1 / 1)", output.ToString());
         Assert.Equal("CI", executor.Workflow!.Name);
         Assert.Equal("run-1", executor.Options!.RunId);
+        Assert.Equal("workflow_dispatch", executor.Options.RunTrigger.EventName);
+        Assert.Equal("CLI", executor.Options.RunTrigger.Source);
         Assert.Equal(string.Empty, error.ToString());
+    }
+
+    [Fact]
+    public void Run_PassesWorkflowDispatchInputsToExecution()
+    {
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            """
+            name: CI
+            on:
+              workflow_dispatch:
+                inputs:
+                  environment:
+                    required: true
+                    type: choice
+                    options:
+                      - staging
+                      - production
+                  dry-run:
+                    type: boolean
+                    default: "false"
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        var result = RunWithFakeExecutor(["run", "ci.yml", "--input", "environment=staging"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Equal("staging", result.Executor.Options!.RunTrigger.Inputs["environment"]);
+        Assert.Equal("false", result.Executor.Options.RunTrigger.Inputs["dry-run"]);
+    }
+
+    [Fact]
+    public void Run_ReturnsValidationErrorForMissingRequiredWorkflowDispatchInput()
+    {
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            """
+            name: CI
+            on:
+              workflow_dispatch:
+                inputs:
+                  environment:
+                    required: true
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        var result = RunWithFakeExecutor(["ci.yml"]);
+
+        Assert.Equal(ExitCodes.ValidationError, result.ExitCode);
+        Assert.Contains("workflow_dispatch input 'environment' is required.", result.Error);
+        Assert.Null(result.Executor.Options);
+    }
+
+    [Fact]
+    public void Run_ReturnsUsageErrorForInvalidWorkflowDispatchInputOption()
+    {
+        var result = RunWithFakeExecutor(["ci.yml", "--input", "environment"]);
+
+        Assert.Equal(ExitCodes.UsageError, result.ExitCode);
+        Assert.Contains("Value for '--input' must use name=value.", result.Error);
+        Assert.Null(result.Executor.Workflow);
     }
 
     [Fact]

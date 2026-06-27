@@ -70,7 +70,25 @@ public sealed class ActioWebDataServiceTests : IDisposable
 
         var run = Assert.Single(runs);
         Assert.Equal("run-1", run.RunId);
-        Assert.Equal("CLI", run.Trigger);
+        Assert.Equal("workflow_dispatch (CLI)", run.Trigger);
+    }
+
+    [Fact]
+    public async Task GetRunsAsync_ReturnsRunTriggerSource()
+    {
+        var workflowPath = WriteWorkflow("ci.yml", "CI");
+        await SaveRunAsync(CreateRun(
+            "run-1",
+            "CI",
+            workflowPath,
+            runTrigger: new WorkflowRunTrigger(
+                "repository_dispatch",
+                "Local API",
+                new Dictionary<string, string> { ["event_type"] = "deploy" })));
+
+        var run = Assert.Single(await CreateService().GetRunsAsync());
+
+        Assert.Equal("repository_dispatch (Local API)", run.Trigger);
     }
 
     [Fact]
@@ -359,7 +377,8 @@ public sealed class ActioWebDataServiceTests : IDisposable
         string status = "Success",
         DateTimeOffset? startedAt = null,
         DateTimeOffset? finishedAt = null,
-        long durationMilliseconds = 10)
+        long durationMilliseconds = 10,
+        WorkflowRunTrigger? runTrigger = null)
     {
         var start = startedAt ?? DateTimeOffset.UtcNow;
         var finish = finishedAt ?? start;
@@ -393,7 +412,8 @@ public sealed class ActioWebDataServiceTests : IDisposable
             ],
             [],
             artifact,
-            []);
+            [],
+            RunTrigger: runTrigger);
     }
 
     private sealed class FixedTimeProvider : TimeProvider

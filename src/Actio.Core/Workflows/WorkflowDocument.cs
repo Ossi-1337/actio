@@ -20,10 +20,32 @@ public sealed record WorkflowDocument(
 public sealed record WorkflowTrigger(
     string EventName,
     WorkflowTriggerValue? Configuration,
-    WorkflowTriggerFilters? Filters = null)
+    WorkflowTriggerFilters? Filters = null,
+    WorkflowDispatch? Dispatch = null,
+    IReadOnlyList<WorkflowSchedule>? Schedules = null)
 {
     public WorkflowTriggerFilters Filters { get; init; } = Filters ?? WorkflowTriggerFilters.Empty;
+
+    public WorkflowDispatch Dispatch { get; init; } = Dispatch ?? WorkflowDispatch.Empty;
+
+    public IReadOnlyList<WorkflowSchedule> Schedules { get; init; } = Schedules ?? [];
 }
+
+public sealed record WorkflowDispatch(
+    IReadOnlyDictionary<string, WorkflowDispatchInput> Inputs)
+{
+    public static WorkflowDispatch Empty { get; } = new(new Dictionary<string, WorkflowDispatchInput>());
+}
+
+public sealed record WorkflowDispatchInput(
+    string Name,
+    string? Description,
+    bool Required,
+    string? Default,
+    string Type,
+    IReadOnlyList<string> Options);
+
+public sealed record WorkflowSchedule(string Cron);
 
 public sealed record WorkflowTriggerValue(
     string Kind,

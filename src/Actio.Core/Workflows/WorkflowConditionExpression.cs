@@ -2,27 +2,49 @@ using System.Text.RegularExpressions;
 
 namespace Actio.Core.Workflows;
 
+public enum WorkflowConditionExpressionKind
+{
+    NeedsOutput,
+    Input
+}
+
 public sealed partial record WorkflowConditionExpression(
-    string ReferencedJob,
-    string OutputName,
+    WorkflowConditionExpressionKind Kind,
+    string? ReferencedJob,
+    string Name,
     string ExpectedValue)
 {
     public static bool TryParse(string expression, out WorkflowConditionExpression? condition)
     {
-        var match = SupportedConditionRegex().Match(expression);
-        if (!match.Success)
+        var needsMatch = NeedsOutputConditionRegex().Match(expression);
+        if (needsMatch.Success)
         {
-            condition = null;
-            return false;
+            condition = new WorkflowConditionExpression(
+                WorkflowConditionExpressionKind.NeedsOutput,
+                needsMatch.Groups["job"].Value,
+                needsMatch.Groups["output"].Value,
+                needsMatch.Groups["value"].Value);
+            return true;
         }
 
-        condition = new WorkflowConditionExpression(
-            match.Groups["job"].Value,
-            match.Groups["output"].Value,
-            match.Groups["value"].Value);
-        return true;
+        var inputMatch = InputConditionRegex().Match(expression);
+        if (inputMatch.Success)
+        {
+            condition = new WorkflowConditionExpression(
+                WorkflowConditionExpressionKind.Input,
+                null,
+                inputMatch.Groups["input"].Value,
+                inputMatch.Groups["value"].Value);
+            return true;
+        }
+
+        condition = null;
+        return false;
     }
 
     [GeneratedRegex("^\\$\\{\\{\\s*needs\\.(?<job>[A-Za-z0-9_-]+)\\.outputs\\.(?<output>[A-Za-z0-9_-]+)\\s*==\\s*'(?<value>[^']*)'\\s*\\}\\}$")]
-    private static partial Regex SupportedConditionRegex();
+    private static partial Regex NeedsOutputConditionRegex();
+
+    [GeneratedRegex("^\\$\\{\\{\\s*inputs\\.(?<input>[A-Za-z0-9_-]+)\\s*==\\s*'(?<value>[^']*)'\\s*\\}\\}$")]
+    private static partial Regex InputConditionRegex();
 }
