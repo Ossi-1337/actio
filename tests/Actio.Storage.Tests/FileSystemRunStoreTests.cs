@@ -28,14 +28,22 @@ public sealed class FileSystemRunStoreTests : IDisposable
             [],
             [],
             [],
-            [new WorkflowTrigger("push", null)]);
+            [
+                new WorkflowTrigger(
+                    "push",
+                    null,
+                    new WorkflowTriggerFilters(["main"], [], [], [], ["src/**"], []))
+            ]);
 
         await store.SaveRunRecordAsync(record);
         var loaded = await store.ReadRunRecordAsync(runId);
 
         Assert.NotNull(loaded);
         Assert.Equal("CI", loaded.WorkflowName);
-        Assert.Equal("push", Assert.Single(loaded.Triggers).EventName);
+        var trigger = Assert.Single(loaded.Triggers);
+        Assert.Equal("push", trigger.EventName);
+        Assert.Equal(["main"], trigger.Filters.Branches);
+        Assert.Equal(["src/**"], trigger.Filters.Paths);
         Assert.True(File.Exists(Path.Combine(_root, "runs", runId, "run.json")));
     }
 
@@ -93,6 +101,46 @@ public sealed class FileSystemRunStoreTests : IDisposable
 
         Assert.NotNull(loaded);
         Assert.Empty(loaded.Triggers);
+    }
+
+    [Fact]
+    public async Task ReadRunRecordAsync_ReturnsEmptyTriggerFiltersForOlderTriggerRecords()
+    {
+        var store = new FileSystemRunStore(_root);
+        var runId = "run-old-trigger";
+        await store.InitializeRunAsync(runId);
+        await File.WriteAllTextAsync(
+            Path.Combine(_root, "runs", runId, "run.json"),
+            """
+            {
+              "RunId": "run-old-trigger",
+              "WorkflowName": "CI",
+              "WorkflowPath": "C:\\repo\\.workflows\\ci.yml",
+              "ProjectRoot": "C:\\repo",
+              "Status": "Success",
+              "StartedAt": "2026-06-25T10:00:00+00:00",
+              "FinishedAt": "2026-06-25T10:00:01+00:00",
+              "DurationMilliseconds": 1000,
+              "Jobs": [],
+              "Outputs": [],
+              "Artifacts": [],
+              "Errors": [],
+              "Triggers": [
+                {
+                  "EventName": "push",
+                  "Configuration": null
+                }
+              ]
+            }
+            """);
+
+        var loaded = await store.ReadRunRecordAsync(runId);
+
+        Assert.NotNull(loaded);
+        var trigger = Assert.Single(loaded.Triggers);
+        Assert.Equal("push", trigger.EventName);
+        Assert.Empty(trigger.Filters.Branches);
+        Assert.Empty(trigger.Filters.Paths);
     }
 
     [Fact]

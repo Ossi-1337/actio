@@ -19,7 +19,11 @@ public sealed record WorkflowDocument(
 
 public sealed record WorkflowTrigger(
     string EventName,
-    WorkflowTriggerValue? Configuration);
+    WorkflowTriggerValue? Configuration,
+    WorkflowTriggerFilters? Filters = null)
+{
+    public WorkflowTriggerFilters Filters { get; init; } = Filters ?? WorkflowTriggerFilters.Empty;
+}
 
 public sealed record WorkflowTriggerValue(
     string Kind,

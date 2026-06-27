@@ -205,6 +205,110 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
+    public void Parse_StoresBranchTagAndPathTriggerFilters()
+    {
+        var result = Parse(
+            """
+            name: CI
+            on:
+              push:
+                branches:
+                  - main
+                  - releases/**
+                  - "!releases/**-alpha"
+                tags: v*
+                paths:
+                  - src/**
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var filters = Assert.Single(result.Workflow!.Triggers).Filters;
+        Assert.Equal(["main", "releases/**", "!releases/**-alpha"], filters.Branches);
+        Assert.Equal(["v*"], filters.Tags);
+        Assert.Equal(["src/**"], filters.Paths);
+    }
+
+    [Fact]
+    public void Parse_RejectsMutuallyExclusiveTriggerFilters()
+    {
+        var result = Parse(
+            """
+            name: CI
+            on:
+              push:
+                branches:
+                  - main
+                branches-ignore:
+                  - legacy/**
+                paths:
+                  - src/**
+                paths-ignore:
+                  - docs/**
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error.Contains("cannot define both branches and branches-ignore", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("cannot define both paths and paths-ignore", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Parse_RejectsNonStringTriggerFilterPattern()
+    {
+        var result = Parse(
+            """
+            name: CI
+            on:
+              push:
+                branches:
+                  - main
+                  - include: dev
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "workflow.on.push.branches[1] must be a string.");
+    }
+
+    [Fact]
+    public void Parse_WarnsForPullRequestTargetSecurityBoundary()
+    {
+        var result = Parse(
+            """
+            name: CI
+            on:
+              pull_request_target:
+                branches:
+                  - main
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Contains(result.Warnings, warning => warning.Contains("pull_request_target is security-sensitive", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void Parse_RejectsUnsupportedTriggerConfigurationKey()
     {
         var result = Parse(

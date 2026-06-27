@@ -397,6 +397,7 @@ public sealed partial class WorkflowParser
             if (eventName is not null)
             {
                 triggers.Add(new WorkflowTrigger(eventName, null));
+                AddTriggerSecurityWarnings(warnings, eventName);
             }
 
             AddTriggerWarningIfValid(errors, errorCount, warnings);
@@ -417,6 +418,7 @@ public sealed partial class WorkflowParser
                 if (eventName is not null)
                 {
                     triggers.Add(new WorkflowTrigger(eventName, null));
+                    AddTriggerSecurityWarnings(warnings, eventName);
                 }
             }
 
@@ -436,7 +438,9 @@ public sealed partial class WorkflowParser
 
                 var configurationPath = $"{path}.{eventName}";
                 var configuration = ReadTriggerConfiguration(errors, valueNode, configurationPath);
-                triggers.Add(new WorkflowTrigger(eventName, configuration));
+                var filters = ReadTriggerFilters(errors, valueNode, configurationPath);
+                triggers.Add(new WorkflowTrigger(eventName, configuration, filters));
+                AddTriggerSecurityWarnings(warnings, eventName);
             }
 
             AddTriggerWarningIfValid(errors, errorCount, warnings);
@@ -476,6 +480,87 @@ public sealed partial class WorkflowParser
 
         errors.Add($"{path} must be a mapping or a list.");
         return null;
+    }
+
+    private static WorkflowTriggerFilters ReadTriggerFilters(
+        List<string> errors,
+        YamlNode node,
+        string path)
+    {
+        if (node is not YamlMappingNode map)
+        {
+            return WorkflowTriggerFilters.Empty;
+        }
+
+        AddMutuallyExclusiveTriggerFilterErrors(errors, map, path, "branches", "branches-ignore");
+        AddMutuallyExclusiveTriggerFilterErrors(errors, map, path, "tags", "tags-ignore");
+        AddMutuallyExclusiveTriggerFilterErrors(errors, map, path, "paths", "paths-ignore");
+
+        return new WorkflowTriggerFilters(
+            ReadTriggerFilterPatterns(errors, map, "branches", path),
+            ReadTriggerFilterPatterns(errors, map, "branches-ignore", path),
+            ReadTriggerFilterPatterns(errors, map, "tags", path),
+            ReadTriggerFilterPatterns(errors, map, "tags-ignore", path),
+            ReadTriggerFilterPatterns(errors, map, "paths", path),
+            ReadTriggerFilterPatterns(errors, map, "paths-ignore", path));
+    }
+
+    private static IReadOnlyList<string> ReadTriggerFilterPatterns(
+        List<string> errors,
+        YamlMappingNode map,
+        string key,
+        string path)
+    {
+        if (!TryGet(map, key, out var node))
+        {
+            return [];
+        }
+
+        var filterPath = $"{path}.{key}";
+
+        if (node is YamlScalarNode scalar)
+        {
+            var value = ReadScalarValue(errors, scalar, filterPath);
+            return value is null ? [] : [value];
+        }
+
+        if (node is not YamlSequenceNode sequence)
+        {
+            errors.Add($"{filterPath} must be a string or a list of strings.");
+            return [];
+        }
+
+        var patterns = new List<string>();
+
+        for (var index = 0; index < sequence.Children.Count; index++)
+        {
+            if (sequence.Children[index] is not YamlScalarNode item)
+            {
+                errors.Add($"{filterPath}[{index}] must be a string.");
+                continue;
+            }
+
+            var value = ReadScalarValue(errors, item, $"{filterPath}[{index}]");
+            if (value is not null)
+            {
+                patterns.Add(value);
+            }
+        }
+
+        return patterns;
+    }
+
+    private static void AddMutuallyExclusiveTriggerFilterErrors(
+        List<string> errors,
+        YamlMappingNode map,
+        string path,
+        string includeKey,
+        string ignoreKey)
+    {
+        if (TryGet(map, includeKey, out _) && TryGet(map, ignoreKey, out _))
+        {
+            errors.Add($"{path} cannot define both {includeKey} and {ignoreKey}. Use ordered ! patterns in {includeKey} when both include and exclude behavior is needed.");
+        }
     }
 
     private static WorkflowTriggerValue? ReadTriggerValue(List<string> errors, YamlNode node, string path)
@@ -542,6 +627,14 @@ public sealed partial class WorkflowParser
             {
                 errors.Add($"{path}.{scalar.Value} is not supported in workflow trigger configuration.");
             }
+        }
+    }
+
+    private static void AddTriggerSecurityWarnings(List<string> warnings, string eventName)
+    {
+        if (string.Equals(eventName, "pull_request_target", StringComparison.Ordinal))
+        {
+            warnings.Add("workflow.on.pull_request_target is security-sensitive in GitHub Actions. Actio stores it as local trigger metadata only and does not model fork trust, hosted tokens, or permission elevation.");
         }
     }
 
