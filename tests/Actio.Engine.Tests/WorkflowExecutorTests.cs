@@ -136,9 +136,10 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_MergesJobEnvAndPassesRunDefaultsToRunner()
+    public async Task ExecuteAsync_MergesStepEnvAndPassesEffectiveRunDefaultsToRunner()
     {
         var runner = new FakeRunnerProvider([0]);
+        var store = new RecordingRunStore();
         var workflow = new WorkflowDocument(
             "CI",
             new Dictionary<string, string>
@@ -162,12 +163,25 @@ public sealed class WorkflowExecutorTests
                     new WorkflowRunDefaults("bash", "src/Actio.Core"),
                     new Dictionary<string, string>(),
                     [],
-                    [new WorkflowStep("Test", "dotnet test", null)])
+                    [
+                        new WorkflowStep(
+                            "Test",
+                            "dotnet test",
+                            null,
+                            Id: "test_step",
+                            Env: new Dictionary<string, string>
+                            {
+                                ["DOTNET_NOLOGO"] = "step",
+                                ["STEP_ONLY"] = "step"
+                            },
+                            Shell: "sh",
+                            WorkingDirectory: "tests/Actio.Core.Tests")
+                    ])
             },
             [],
             new WorkflowRunDefaults("sh", "src"));
 
-        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
             workflow,
             new WorkflowExecutionOptions("C:\\repo"),
             TextWriter.Null,
@@ -175,11 +189,46 @@ public sealed class WorkflowExecutorTests
 
         Assert.True(result.Success);
         var request = Assert.Single(runner.Requests);
-        Assert.Equal("true", request.Environment["DOTNET_NOLOGO"]);
+        Assert.Equal("step", request.Environment["DOTNET_NOLOGO"]);
         Assert.Equal("workflow", request.Environment["WORKFLOW_ONLY"]);
         Assert.Equal("job", request.Environment["JOB_ONLY"]);
-        Assert.Equal("bash", request.Shell);
-        Assert.Equal("src/Actio.Core", request.WorkingDirectory);
+        Assert.Equal("step", request.Environment["STEP_ONLY"]);
+        Assert.Equal("sh", request.Shell);
+        Assert.Equal("tests/Actio.Core.Tests", request.WorkingDirectory);
+        var stepRecord = Assert.Single(Assert.Single(store.SavedRecords.Last().Jobs).Steps);
+        Assert.Equal("test_step", stepRecord.Id);
+        Assert.Equal("sh", stepRecord.Shell);
+        Assert.Equal("tests/Actio.Core.Tests", stepRecord.WorkingDirectory);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ExposesStepOutputsToLaterStepEnvironment()
+    {
+        var runner = new FakeRunnerProvider(
+            [
+                new FakeRunnerStep(0, ["actio.output changed-files=src/Actio.Core"]),
+                new FakeRunnerStep(0)
+            ]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep("Detect changes", "echo actio.output changed-files=src/Actio.Core", null, Id: "detect-changes"),
+                    new WorkflowStep("Use changes", "echo later", null)
+                ]));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal("src/Actio.Core", runner.Requests[1].Environment["ACTIO_STEP_DETECT_CHANGES_OUTPUT_CHANGED_FILES"]);
     }
 
     [Fact]

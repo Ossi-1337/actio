@@ -41,9 +41,13 @@ public sealed partial class WorkflowParser
 
     private static readonly HashSet<string> StepKeys = new(StringComparer.Ordinal)
     {
+        "id",
         "name",
         "run",
-        "uses"
+        "uses",
+        "env",
+        "shell",
+        "working-directory"
     };
 
     private static readonly HashSet<string> TriggerConfigurationKeys = new(StringComparer.Ordinal)
@@ -375,6 +379,7 @@ public sealed partial class WorkflowParser
         }
 
         var steps = new List<WorkflowStep>();
+        var stepIds = new HashSet<string>(StringComparer.Ordinal);
 
         for (var index = 0; index < sequence.Children.Count; index++)
         {
@@ -388,9 +393,25 @@ public sealed partial class WorkflowParser
 
             AddUnknownKeyErrors(errors, stepMap, StepKeys, itemPath);
 
+            var id = ReadOptionalScalar(errors, stepMap, "id", $"{itemPath}.id");
             var name = ReadRequiredScalar(errors, stepMap, "name", $"{itemPath}.name");
             var run = ReadOptionalScalar(errors, stepMap, "run", $"{itemPath}.run");
             var uses = ReadOptionalScalar(errors, stepMap, "uses", $"{itemPath}.uses");
+            var env = ReadOptionalStringMap(errors, stepMap, "env", $"{itemPath}.env");
+            var shell = ReadOptionalScalar(errors, stepMap, "shell", $"{itemPath}.shell");
+            var workingDirectory = ReadOptionalScalar(errors, stepMap, "working-directory", $"{itemPath}.working-directory");
+
+            ValidateStepId(errors, stepIds, id, $"{itemPath}.id");
+
+            if (shell is not null && !SupportedDefaultShells.Contains(shell))
+            {
+                errors.Add($"{itemPath}.shell must be bash or sh.");
+            }
+
+            if (workingDirectory is not null && !IsSafeRelativePath(workingDirectory))
+            {
+                errors.Add($"{itemPath}.working-directory must be a relative path inside the workspace.");
+            }
 
             if (run is null && uses is null)
             {
@@ -402,15 +423,55 @@ public sealed partial class WorkflowParser
                 errors.Add($"{itemPath} cannot define both run and uses.");
             }
 
+            if (uses is not null && shell is not null)
+            {
+                errors.Add($"{itemPath}.shell is supported only for run steps.");
+            }
+
+            if (uses is not null && workingDirectory is not null)
+            {
+                errors.Add($"{itemPath}.working-directory is supported only for run steps.");
+            }
+
             ValidateUsesReference(errors, warnings, itemPath, uses);
 
             if (name is not null)
             {
-                steps.Add(new WorkflowStep(name, run, uses));
+                steps.Add(new WorkflowStep(name, run, uses, id, env, shell, workingDirectory));
             }
         }
 
         return steps;
+    }
+
+    private static void ValidateStepId(
+        List<string> errors,
+        HashSet<string> stepIds,
+        string? id,
+        string path)
+    {
+        if (id is null)
+        {
+            return;
+        }
+
+        if (!IsValidStepId(id))
+        {
+            errors.Add($"{path} must contain only letters, numbers, '_', and '-', and must start with a letter or '_'.");
+            return;
+        }
+
+        if (!stepIds.Add(id))
+        {
+            errors.Add($"{path} '{id}' is already used in this job.");
+        }
+    }
+
+    private static bool IsValidStepId(string id)
+    {
+        return id.Length > 0 &&
+            (char.IsAsciiLetter(id[0]) || id[0] == '_') &&
+            id.All(character => char.IsAsciiLetterOrDigit(character) || character is '_' or '-');
     }
 
     private static void ValidateUsesReference(

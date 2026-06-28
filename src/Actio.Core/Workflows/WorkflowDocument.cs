@@ -217,4 +217,11 @@ public sealed record WorkflowArtifact(
 public sealed record WorkflowStep(
     string Name,
     string? Run,
-    string? Uses);
+    string? Uses,
+    string? Id = null,
+    IReadOnlyDictionary<string, string>? Env = null,
+    string? Shell = null,
+    string? WorkingDirectory = null)
+{
+    public IReadOnlyDictionary<string, string> Env { get; init; } = Env ?? new Dictionary<string, string>();
+}

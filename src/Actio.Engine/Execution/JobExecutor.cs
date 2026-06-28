@@ -47,6 +47,7 @@ internal sealed class JobExecutor
         var errors = new List<string>();
         var stepRecords = new List<StepRunRecord>();
         var outputs = new Dictionary<string, string>(job.Outputs, StringComparer.Ordinal);
+        var stepOutputs = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal);
         var artifacts = new List<WorkflowRunArtifact>();
         var runDefaults = workflowDefaults.Merge(job.Defaults);
         using var timeoutTokenSource = CreateTimeoutTokenSource(job, cancellationToken);
@@ -80,6 +81,7 @@ internal sealed class JobExecutor
                     index,
                     workflowEnv,
                     runDefaults,
+                    stepOutputs,
                     projectRoot,
                     runId,
                     output,
@@ -88,6 +90,11 @@ internal sealed class JobExecutor
                 var stepFinishedAt = DateTimeOffset.UtcNow;
 
                 outputs.Merge(stepResult.Outputs);
+                if (step.Id is not null && stepResult.Outputs.Count > 0)
+                {
+                    stepOutputs[step.Id] = new Dictionary<string, string>(stepResult.Outputs, StringComparer.Ordinal);
+                }
+
                 errors.AddRange(stepResult.Errors);
                 stepRecords.Add(new StepRunRecord(
                     step.Name,
@@ -97,7 +104,10 @@ internal sealed class JobExecutor
                     stepResult.LogPath,
                     stepStartedAt,
                     stepFinishedAt,
-                    ToDurationMilliseconds(stepStartedAt, stepFinishedAt)));
+                    ToDurationMilliseconds(stepStartedAt, stepFinishedAt),
+                    step.Id,
+                    stepResult.Shell,
+                    stepResult.WorkingDirectory));
 
                 if (stepResult.Status == FailedStatus)
                 {
@@ -138,6 +148,9 @@ internal sealed class JobExecutor
 
             if (currentStep is not null && stepRecords.Count == currentStepIndex)
             {
+                var timedOutShell = currentStep.Run is null ? null : currentStep.Shell ?? runDefaults.Shell;
+                var timedOutWorkingDirectory = currentStep.Run is null ? null : currentStep.WorkingDirectory ?? runDefaults.WorkingDirectory;
+
                 stepRecords.Add(new StepRunRecord(
                     currentStep.Name,
                     TimedOutStatus,
@@ -146,7 +159,10 @@ internal sealed class JobExecutor
                     null,
                     currentStepStartedAt,
                     timedOutAt,
-                    ToDurationMilliseconds(currentStepStartedAt ?? timedOutAt, timedOutAt)));
+                    ToDurationMilliseconds(currentStepStartedAt ?? timedOutAt, timedOutAt),
+                    currentStep.Id,
+                    timedOutShell,
+                    timedOutWorkingDirectory));
                 failedSteps++;
             }
 
@@ -210,6 +226,7 @@ internal sealed class JobExecutor
         int stepIndex,
         IReadOnlyDictionary<string, string> workflowEnv,
         WorkflowRunDefaults runDefaults,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> stepOutputs,
         string projectRoot,
         string runId,
         TextWriter output,
@@ -237,7 +254,8 @@ internal sealed class JobExecutor
                 return StepExecutionOutcome.FailedWithoutExitCode(step.Uses ?? string.Empty, plan.Errors, collector.LogPath);
             }
 
-            var environment = CreateStepEnvironment(workflowEnv, job.Env, plan.Environment);
+            var effectiveRunDefaults = runDefaults.Merge(new WorkflowRunDefaults(step.Shell, step.WorkingDirectory));
+            var environment = CreateStepEnvironment(workflowEnv, job.Env, stepOutputs, step.Env, plan.Environment);
             var result = plan.Kind == StepExecutionKind.DockerImageAction
                 ? await _runnerProvider.ExecuteDockerActionAsync(
                     new DockerActionExecutionRequest(
@@ -256,11 +274,13 @@ internal sealed class JobExecutor
                         plan.Command!,
                         projectRoot,
                         environment,
-                        runDefaults.Shell,
-                        runDefaults.WorkingDirectory,
+                        effectiveRunDefaults.Shell,
+                        effectiveRunDefaults.WorkingDirectory,
                         plan.AdditionalMounts),
                     collector,
                     cancellationToken);
+            var resultShell = plan.Kind == StepExecutionKind.DockerImageAction ? null : effectiveRunDefaults.Shell;
+            var resultWorkingDirectory = plan.Kind == StepExecutionKind.DockerImageAction ? null : effectiveRunDefaults.WorkingDirectory;
 
             if (!result.Success)
             {
@@ -269,10 +289,18 @@ internal sealed class JobExecutor
                     result.ExitCode,
                     collector.LogPath,
                     collector.CapturedOutputs,
+                    resultShell,
+                    resultWorkingDirectory,
                     $"workflow.jobs.{job.Name}.steps.{step.Name} failed with exit code {result.ExitCode}.");
             }
 
-            return StepExecutionOutcome.Succeeded(plan.Command!, result.ExitCode, collector.LogPath, collector.CapturedOutputs);
+            return StepExecutionOutcome.Succeeded(
+                plan.Command!,
+                result.ExitCode,
+                collector.LogPath,
+                collector.CapturedOutputs,
+                resultShell,
+                resultWorkingDirectory);
         }
         catch (Exception ex) when (StorageError.IsRecoverable(ex))
         {
@@ -341,19 +369,64 @@ internal sealed class JobExecutor
     public static IReadOnlyList<StepRunRecord> CreateSkippedStepRecords(IEnumerable<WorkflowStep> steps)
     {
         return steps
-            .Select(step => new StepRunRecord(step.Name, SkippedStatus, step.Run ?? step.Uses ?? string.Empty, null, null, null, null, 0))
+            .Select(step => new StepRunRecord(
+                step.Name,
+                SkippedStatus,
+                step.Run ?? step.Uses ?? string.Empty,
+                null,
+                null,
+                null,
+                null,
+                0,
+                step.Id,
+                step.Shell,
+                step.WorkingDirectory))
             .ToArray();
     }
 
     private static IReadOnlyDictionary<string, string> CreateStepEnvironment(
         IReadOnlyDictionary<string, string> workflowEnv,
         IReadOnlyDictionary<string, string> jobEnv,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> stepOutputs,
+        IReadOnlyDictionary<string, string> stepEnv,
         IReadOnlyDictionary<string, string> actionEnv)
     {
         var environment = new Dictionary<string, string>(workflowEnv, StringComparer.Ordinal);
         environment.Merge(jobEnv);
+        environment.Merge(CreateStepOutputEnvironment(stepOutputs));
+        environment.Merge(stepEnv);
         environment.Merge(actionEnv);
         return environment;
+    }
+
+    private static IReadOnlyDictionary<string, string> CreateStepOutputEnvironment(
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> stepOutputs)
+    {
+        var environment = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var stepOutput in stepOutputs)
+        {
+            foreach (var output in stepOutput.Value)
+            {
+                environment[ToStepOutputEnvironmentName(stepOutput.Key, output.Key)] = output.Value;
+            }
+        }
+
+        return environment;
+    }
+
+    private static string ToStepOutputEnvironmentName(string stepId, string outputName)
+    {
+        return $"ACTIO_STEP_{ToEnvironmentSegment(stepId)}_OUTPUT_{ToEnvironmentSegment(outputName)}";
+    }
+
+    private static string ToEnvironmentSegment(string value)
+    {
+        var characters = value
+            .Select(character => char.IsAsciiLetterOrDigit(character) ? char.ToUpperInvariant(character) : '_')
+            .ToArray();
+        var segment = new string(characters);
+        return string.IsNullOrEmpty(segment) ? "VALUE" : segment;
     }
 
     private static long ToDurationMilliseconds(DateTimeOffset startedAt, DateTimeOffset finishedAt)
@@ -366,6 +439,8 @@ internal sealed class JobExecutor
         string Command,
         int? ExitCode,
         string? LogPath,
+        string? Shell,
+        string? WorkingDirectory,
         IReadOnlyDictionary<string, string> Outputs,
         IReadOnlyList<string> Errors,
         bool CountsAsFailedStep)
@@ -374,9 +449,11 @@ internal sealed class JobExecutor
             string command,
             int exitCode,
             string? logPath,
-            IReadOnlyDictionary<string, string> outputs)
+            IReadOnlyDictionary<string, string> outputs,
+            string? shell,
+            string? workingDirectory)
         {
-            return new StepExecutionOutcome(SuccessStatus, command, exitCode, logPath, outputs, [], false);
+            return new StepExecutionOutcome(SuccessStatus, command, exitCode, logPath, shell, workingDirectory, outputs, [], false);
         }
 
         public static StepExecutionOutcome Failed(
@@ -384,14 +461,16 @@ internal sealed class JobExecutor
             int exitCode,
             string? logPath,
             IReadOnlyDictionary<string, string> outputs,
+            string? shell,
+            string? workingDirectory,
             string error)
         {
-            return new StepExecutionOutcome(FailedStatus, command, exitCode, logPath, outputs, [error], true);
+            return new StepExecutionOutcome(FailedStatus, command, exitCode, logPath, shell, workingDirectory, outputs, [error], true);
         }
 
         public static StepExecutionOutcome StorageFailed(string error, string? logPath = null)
         {
-            return new StepExecutionOutcome(FailedStatus, string.Empty, null, logPath, new Dictionary<string, string>(), [error], false);
+            return new StepExecutionOutcome(FailedStatus, string.Empty, null, logPath, null, null, new Dictionary<string, string>(), [error], false);
         }
 
         public static StepExecutionOutcome FailedWithoutExitCode(
@@ -399,7 +478,7 @@ internal sealed class JobExecutor
             IReadOnlyList<string> errors,
             string? logPath)
         {
-            return new StepExecutionOutcome(FailedStatus, command, null, logPath, new Dictionary<string, string>(), errors, true);
+            return new StepExecutionOutcome(FailedStatus, command, null, logPath, null, null, new Dictionary<string, string>(), errors, true);
         }
     }
 

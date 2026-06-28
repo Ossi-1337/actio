@@ -8,4 +8,7 @@ public sealed record StepRunRecord(
     string? LogPath,
     DateTimeOffset? StartedAt,
     DateTimeOffset? FinishedAt,
-    long DurationMilliseconds);
+    long DurationMilliseconds,
+    string? Id = null,
+    string? Shell = null,
+    string? WorkingDirectory = null);

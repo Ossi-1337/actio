@@ -179,6 +179,21 @@ public sealed class ActioWebDataServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task GetStepLogAsync_CanResolveStepById()
+    {
+        var workflowPath = WriteWorkflow("ci.yml", "CI");
+        var logPath = Path.Combine(_actioHome, "logs", "run-1", "test", "001-Test.log");
+        Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
+        await File.WriteAllTextAsync(logPath, "hello step id log");
+        await SaveRunAsync(CreateRun("run-1", "CI", workflowPath, logPath: logPath, stepId: "run_tests"));
+
+        var log = await CreateService().GetStepLogAsync("run-1", "test", "run_tests");
+
+        Assert.NotNull(log);
+        Assert.Equal("hello step id log", log.Content);
+    }
+
+    [Fact]
     public async Task GetArtifactAsync_ReturnsFileArtifact()
     {
         var workflowPath = WriteWorkflow("ci.yml", "CI");
@@ -407,7 +422,8 @@ public sealed class ActioWebDataServiceTests : IDisposable
         long durationMilliseconds = 10,
         WorkflowRunTrigger? runTrigger = null,
         string jobName = "test",
-        string? jobId = null)
+        string? jobId = null,
+        string? stepId = null)
     {
         var start = startedAt ?? DateTimeOffset.UtcNow;
         var finish = finishedAt ?? start;
@@ -435,7 +451,7 @@ public sealed class ActioWebDataServiceTests : IDisposable
                     finish,
                     durationMilliseconds,
                     new Dictionary<string, string>(),
-                    [new StepRunRecord("Test", status, "dotnet test", 0, logPath, start, finish, durationMilliseconds)],
+                    [new StepRunRecord("Test", status, "dotnet test", 0, logPath, start, finish, durationMilliseconds, stepId)],
                     artifact,
                     [],
                     jobId)

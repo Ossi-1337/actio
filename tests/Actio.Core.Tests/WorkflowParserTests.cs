@@ -291,6 +291,67 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
+    public void Parse_AcceptsStepIdentityEnvShellAndWorkingDirectory()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - id: run_tests
+                    name: Run tests
+                    run: dotnet test
+                    env:
+                      DOTNET_NOLOGO: "true"
+                    shell: bash
+                    working-directory: src/Actio.Core
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var step = Assert.Single(result.Workflow!.Jobs["test"].Steps);
+        Assert.Equal("run_tests", step.Id);
+        Assert.Equal("true", step.Env["DOTNET_NOLOGO"]);
+        Assert.Equal("bash", step.Shell);
+        Assert.Equal("src/Actio.Core", step.WorkingDirectory);
+    }
+
+    [Fact]
+    public void Parse_RejectsInvalidStepIdentityAndExecutionSettings()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - id: 1bad
+                    name: First
+                    run: echo first
+                    shell: pwsh
+                    working-directory: ../outside
+                  - id: build
+                    name: Build
+                    run: dotnet build
+                  - id: build
+                    name: Duplicate
+                    uses: actions/checkout@v4
+                    shell: bash
+                    working-directory: src
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error.Contains("workflow.jobs.test.steps[0].id", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[0].shell must be bash or sh.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[0].working-directory must be a relative path inside the workspace.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[2].id 'build' is already used in this job.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[2].shell is supported only for run steps.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[2].working-directory is supported only for run steps.");
+    }
+
+    [Fact]
     public void Parse_AcceptsOnEventSequenceAsTriggerMetadata()
     {
         var result = Parse(

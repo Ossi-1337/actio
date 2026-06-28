@@ -116,7 +116,9 @@ public sealed class ActioWebDataService
                 string.Equals(job.Id, jobName, StringComparison.Ordinal) ||
                 string.Equals(job.Name, jobName, StringComparison.Ordinal))?
             .Steps
-            .FirstOrDefault(item => string.Equals(item.Name, stepName, StringComparison.Ordinal));
+            .FirstOrDefault(item =>
+                string.Equals(item.Id, stepName, StringComparison.Ordinal) ||
+                string.Equals(item.Name, stepName, StringComparison.Ordinal));
 
         if (step?.LogPath is null || !File.Exists(step.LogPath) || !IsUnderRoot(step.LogPath, _runStore.LogsPath))
         {
