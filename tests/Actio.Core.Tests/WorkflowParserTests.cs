@@ -302,19 +302,25 @@ public sealed class WorkflowParserTests
                 steps:
                   - id: run_tests
                     name: Run tests
+                    if: "${{ success() }}"
                     run: dotnet test
                     env:
                       DOTNET_NOLOGO: "true"
                     shell: bash
                     working-directory: src/Actio.Core
+                    timeout-minutes: 10
+                    continue-on-error: true
             """);
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
         var step = Assert.Single(result.Workflow!.Jobs["test"].Steps);
         Assert.Equal("run_tests", step.Id);
+        Assert.Equal("${{ success() }}", step.If);
         Assert.Equal("true", step.Env["DOTNET_NOLOGO"]);
         Assert.Equal("bash", step.Shell);
         Assert.Equal("src/Actio.Core", step.WorkingDirectory);
+        Assert.Equal(10, step.TimeoutMinutes);
+        Assert.True(step.ContinueOnError);
     }
 
     [Fact]
@@ -332,6 +338,8 @@ public sealed class WorkflowParserTests
                     run: echo first
                     shell: pwsh
                     working-directory: ../outside
+                    timeout-minutes: 0
+                    continue-on-error: maybe
                   - id: build
                     name: Build
                     run: dotnet build
@@ -346,6 +354,8 @@ public sealed class WorkflowParserTests
         Assert.Contains(result.Errors, error => error.Contains("workflow.jobs.test.steps[0].id", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[0].shell must be bash or sh.");
         Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[0].working-directory must be a relative path inside the workspace.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[0].timeout-minutes must be a positive integer.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[0].continue-on-error must be true or false.");
         Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[2].id 'build' is already used in this job.");
         Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[2].shell is supported only for run steps.");
         Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[2].working-directory is supported only for run steps.");
@@ -884,6 +894,43 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
+    public void Parse_AcceptsStepConditionExpressions()
+    {
+        var result = Parse(
+            """
+            name: CI
+            on:
+              workflow_dispatch:
+                inputs:
+                  environment:
+                    type: string
+            jobs:
+              prepare:
+                runs-on: ubuntu-latest
+                outputs:
+                  changed: "true"
+                steps:
+                  - name: Prepare
+                    run: dotnet restore
+              test:
+                needs: prepare
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Input condition
+                    if: "${{ inputs.environment == 'staging' }}"
+                    run: dotnet test
+                  - name: Needs condition
+                    if: "${{ needs.prepare.outputs.changed == 'true' }}"
+                    run: dotnet test
+                  - name: Failure condition
+                    if: "${{ failure() }}"
+                    run: echo failed
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+    }
+
+    [Fact]
     public void Parse_AcceptsGitHubEventPayloadConditionExpression()
     {
         var result = Parse(
@@ -924,6 +971,33 @@ public sealed class WorkflowParserTests
             """);
 
         Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error.Contains("not declared", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Parse_RejectsStepConditionReferenceNotDeclaredInNeeds()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              prepare:
+                runs-on: ubuntu-latest
+                outputs:
+                  changed: "true"
+                steps:
+                  - name: Prepare
+                    run: dotnet restore
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    if: "${{ needs.prepare.outputs.changed == 'true' }}"
+                    run: dotnet test
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error.Contains("workflow.jobs.test.steps[0].if", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, error => error.Contains("not declared", StringComparison.OrdinalIgnoreCase));
     }
 

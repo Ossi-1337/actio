@@ -399,6 +399,11 @@ public sealed class CliApplication
             details.Add($"{result.SkippedSteps} skipped");
         }
 
+        if (result.ContinuedSteps > 0)
+        {
+            details.Add($"{result.ContinuedSteps} continued");
+        }
+
         if (!result.Success && result.FailedSteps == 0)
         {
             details.Add("workflow error");

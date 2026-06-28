@@ -391,6 +391,18 @@ function stepMetadata(step) {
     items.push(step.workingDirectory);
   }
 
+  if (step.timeoutMinutes) {
+    items.push(`timeout ${step.timeoutMinutes} min`);
+  }
+
+  if (step.continueOnError) {
+    items.push("continue on error");
+  }
+
+  if (step.if) {
+    items.push(`if ${step.if}`);
+  }
+
   return items.join(" · ");
 }
 

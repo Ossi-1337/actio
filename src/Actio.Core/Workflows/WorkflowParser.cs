@@ -43,11 +43,14 @@ public sealed partial class WorkflowParser
     {
         "id",
         "name",
+        "if",
         "run",
         "uses",
         "env",
         "shell",
-        "working-directory"
+        "working-directory",
+        "timeout-minutes",
+        "continue-on-error"
     };
 
     private static readonly HashSet<string> TriggerConfigurationKeys = new(StringComparer.Ordinal)
@@ -395,11 +398,14 @@ public sealed partial class WorkflowParser
 
             var id = ReadOptionalScalar(errors, stepMap, "id", $"{itemPath}.id");
             var name = ReadRequiredScalar(errors, stepMap, "name", $"{itemPath}.name");
+            var condition = ReadOptionalScalar(errors, stepMap, "if", $"{itemPath}.if");
             var run = ReadOptionalScalar(errors, stepMap, "run", $"{itemPath}.run");
             var uses = ReadOptionalScalar(errors, stepMap, "uses", $"{itemPath}.uses");
             var env = ReadOptionalStringMap(errors, stepMap, "env", $"{itemPath}.env");
             var shell = ReadOptionalScalar(errors, stepMap, "shell", $"{itemPath}.shell");
             var workingDirectory = ReadOptionalScalar(errors, stepMap, "working-directory", $"{itemPath}.working-directory");
+            var timeoutMinutes = ReadOptionalPositiveInt(errors, stepMap, "timeout-minutes", $"{itemPath}.timeout-minutes");
+            var continueOnError = ReadOptionalBoolean(errors, stepMap, "continue-on-error", $"{itemPath}.continue-on-error") ?? false;
 
             ValidateStepId(errors, stepIds, id, $"{itemPath}.id");
 
@@ -437,7 +443,7 @@ public sealed partial class WorkflowParser
 
             if (name is not null)
             {
-                steps.Add(new WorkflowStep(name, run, uses, id, env, shell, workingDirectory));
+                steps.Add(new WorkflowStep(name, run, uses, id, env, shell, workingDirectory, condition, timeoutMinutes, continueOnError));
             }
         }
 
@@ -1410,7 +1416,13 @@ public sealed partial class WorkflowParser
                 continue;
             }
 
-            if (condition!.Kind == WorkflowConditionExpressionKind.Input)
+            if (condition!.Kind == WorkflowConditionExpressionKind.StatusFunction)
+            {
+                errors.Add($"workflow.jobs.{job.Name}.if uses an unsupported expression.");
+                continue;
+            }
+
+            if (condition.Kind == WorkflowConditionExpressionKind.Input)
             {
                 if (!dispatchInputNames.Contains(condition.Name))
                 {
@@ -1435,6 +1447,60 @@ public sealed partial class WorkflowParser
             if (!job.Needs.Contains(referencedJob, StringComparer.Ordinal))
             {
                 errors.Add($"workflow.jobs.{job.Name}.if references needs.{referencedJob}, but '{referencedJob}' is not declared in workflow.jobs.{job.Name}.needs.");
+            }
+        }
+
+        ValidateStepConditions(errors, jobs, dispatchInputNames);
+    }
+
+    private static void ValidateStepConditions(
+        List<string> errors,
+        IReadOnlyDictionary<string, WorkflowJob> jobs,
+        IReadOnlySet<string> dispatchInputNames)
+    {
+        foreach (var job in jobs.Values)
+        {
+            for (var index = 0; index < job.Steps.Count; index++)
+            {
+                var step = job.Steps[index];
+                if (step.If is null)
+                {
+                    continue;
+                }
+
+                var path = $"workflow.jobs.{job.Name}.steps[{index}].if";
+                if (!WorkflowConditionExpression.TryParse(step.If, out var condition))
+                {
+                    errors.Add($"{path} uses an unsupported expression.");
+                    continue;
+                }
+
+                if (condition!.Kind == WorkflowConditionExpressionKind.Input)
+                {
+                    if (!dispatchInputNames.Contains(condition.Name))
+                    {
+                        errors.Add($"{path} references inputs.{condition.Name}, but workflow.on.workflow_dispatch.inputs.{condition.Name} is not declared.");
+                    }
+
+                    continue;
+                }
+
+                if (condition.Kind is WorkflowConditionExpressionKind.EventPayload or WorkflowConditionExpressionKind.StatusFunction)
+                {
+                    continue;
+                }
+
+                var referencedJob = condition.ReferencedJob!;
+                if (!jobs.ContainsKey(referencedJob))
+                {
+                    errors.Add($"{path} references unknown job '{referencedJob}'.");
+                    continue;
+                }
+
+                if (!job.Needs.Contains(referencedJob, StringComparer.Ordinal))
+                {
+                    errors.Add($"{path} references needs.{referencedJob}, but '{referencedJob}' is not declared in workflow.jobs.{job.Name}.needs.");
+                }
             }
         }
     }

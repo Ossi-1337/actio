@@ -14,7 +14,8 @@ internal sealed class JobExecutor
     private readonly IRunStore _runStore;
     private readonly OutputMarkerParser _outputMarkerParser;
     private readonly ActionResolver _actionResolver;
-    private readonly Func<int, TimeSpan> _createJobTimeout;
+    private readonly ConditionEvaluator _conditionEvaluator;
+    private readonly Func<int, TimeSpan> _createTimeout;
 
     public JobExecutor(
         IRunnerProvider runnerProvider,
@@ -27,13 +28,17 @@ internal sealed class JobExecutor
         _runStore = runStore;
         _outputMarkerParser = outputMarkerParser;
         _actionResolver = actionResolver;
-        _createJobTimeout = createJobTimeout ?? (minutes => TimeSpan.FromMinutes(minutes));
+        _conditionEvaluator = new ConditionEvaluator();
+        _createTimeout = createJobTimeout ?? (minutes => TimeSpan.FromMinutes(minutes));
     }
 
     public async Task<JobExecutionOutcome> ExecuteAsync(
         WorkflowJob job,
         IReadOnlyDictionary<string, string> workflowEnv,
         WorkflowRunDefaults workflowDefaults,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
+        IReadOnlyDictionary<string, string> inputs,
+        WorkflowEventPayload eventPayload,
         string projectRoot,
         string runId,
         TextWriter output,
@@ -44,10 +49,13 @@ internal sealed class JobExecutor
         var successfulSteps = 0;
         var failedSteps = 0;
         var skippedSteps = 0;
+        var continuedSteps = 0;
         var errors = new List<string>();
         var stepRecords = new List<StepRunRecord>();
         var outputs = new Dictionary<string, string>(job.Outputs, StringComparer.Ordinal);
         var stepOutputs = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal);
+        var previousStepStatuses = new List<string>();
+        var hardFailureSeen = false;
         var artifacts = new List<WorkflowRunArtifact>();
         var runDefaults = workflowDefaults.Merge(job.Defaults);
         using var timeoutTokenSource = CreateTimeoutTokenSource(job, cancellationToken);
@@ -60,7 +68,7 @@ internal sealed class JobExecutor
         {
             errors.Add($"workflow.jobs.{job.Name}.runs-on '{job.RunsOn}' is not supported by the configured runner provider.");
             stepRecords.AddRange(CreateSkippedStepRecords(job.Steps));
-            return CompleteJob(job, FailedStatus, startedAt, outputs, stepRecords, artifacts, errors, 0, 0, job.Steps.Count);
+            return CompleteJob(job, FailedStatus, startedAt, outputs, stepRecords, artifacts, errors, 0, 0, job.Steps.Count, 0);
         }
 
         try
@@ -71,6 +79,46 @@ internal sealed class JobExecutor
                 var step = job.Steps[index];
                 currentStep = step;
                 jobCancellationToken.ThrowIfCancellationRequested();
+
+                if (hardFailureSeen && !CanRunAfterHardFailure(step.If))
+                {
+                    output.WriteLine($"[{job.DisplayName}] {step.Name} (skipped)");
+                    var skippedRecord = CreateSkippedStepRecord(step);
+                    stepRecords.Add(skippedRecord);
+                    skippedSteps++;
+                    previousStepStatuses.Add(skippedRecord.Status);
+                    continue;
+                }
+
+                var condition = _conditionEvaluator.EvaluateStep(
+                    step.If,
+                    jobOutputs,
+                    inputs,
+                    eventPayload,
+                    previousStepStatuses);
+
+                if (!condition.Success)
+                {
+                    var finishedAt = DateTimeOffset.UtcNow;
+                    errors.Add($"workflow.jobs.{job.Name}.steps[{index}].if could not be evaluated: {condition.Error}");
+                    var failedRecord = CreateFailedStepRecord(step, finishedAt);
+                    stepRecords.Add(failedRecord);
+                    failedSteps++;
+                    hardFailureSeen = true;
+                    previousStepStatuses.Add(failedRecord.Status);
+                    continue;
+                }
+
+                if (!condition.ShouldRun)
+                {
+                    output.WriteLine($"[{job.DisplayName}] {step.Name} (skipped)");
+                    var skippedRecord = CreateSkippedStepRecord(step);
+                    stepRecords.Add(skippedRecord);
+                    skippedSteps++;
+                    previousStepStatuses.Add(skippedRecord.Status);
+                    continue;
+                }
+
                 output.WriteLine($"[{job.DisplayName}] {step.Name}");
 
                 var stepStartedAt = DateTimeOffset.UtcNow;
@@ -95,7 +143,14 @@ internal sealed class JobExecutor
                     stepOutputs[step.Id] = new Dictionary<string, string>(stepResult.Outputs, StringComparer.Ordinal);
                 }
 
-                errors.AddRange(stepResult.Errors);
+                var continuedFailure = step.ContinueOnError &&
+                    stepResult.CountsAsFailedStep &&
+                    IsFailureStatus(stepResult.Status);
+                if (!continuedFailure)
+                {
+                    errors.AddRange(stepResult.Errors);
+                }
+
                 stepRecords.Add(new StepRunRecord(
                     step.Name,
                     stepResult.Status,
@@ -107,15 +162,23 @@ internal sealed class JobExecutor
                     ToDurationMilliseconds(stepStartedAt, stepFinishedAt),
                     step.Id,
                     stepResult.Shell,
-                    stepResult.WorkingDirectory));
+                    stepResult.WorkingDirectory,
+                    step.If,
+                    step.TimeoutMinutes,
+                    step.ContinueOnError));
+                previousStepStatuses.Add(stepResult.Status);
 
-                if (stepResult.Status == FailedStatus)
+                if (continuedFailure)
+                {
+                    continuedSteps++;
+                    continue;
+                }
+
+                if (IsFailureStatus(stepResult.Status))
                 {
                     failedSteps += stepResult.CountsAsFailedStep ? 1 : 0;
-                    var remainingSteps = job.Steps.Skip(index + 1).ToArray();
-                    stepRecords.AddRange(CreateSkippedStepRecords(remainingSteps));
-                    skippedSteps += remainingSteps.Length;
-                    break;
+                    hardFailureSeen = true;
+                    continue;
                 }
 
                 successfulSteps++;
@@ -162,7 +225,10 @@ internal sealed class JobExecutor
                     ToDurationMilliseconds(currentStepStartedAt ?? timedOutAt, timedOutAt),
                     currentStep.Id,
                     timedOutShell,
-                    timedOutWorkingDirectory));
+                    timedOutWorkingDirectory,
+                    currentStep.If,
+                    currentStep.TimeoutMinutes,
+                    currentStep.ContinueOnError));
                 failedSteps++;
             }
 
@@ -181,7 +247,8 @@ internal sealed class JobExecutor
                 errors,
                 successfulSteps,
                 failedSteps,
-                skippedSteps);
+                skippedSteps,
+                continuedSteps);
         }
 
         return CompleteJob(
@@ -194,7 +261,8 @@ internal sealed class JobExecutor
             errors,
             successfulSteps,
             failedSteps,
-            skippedSteps);
+            skippedSteps,
+            continuedSteps);
     }
 
     private CancellationTokenSource? CreateTimeoutTokenSource(
@@ -207,7 +275,7 @@ internal sealed class JobExecutor
         }
 
         var timeoutTokenSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutTokenSource.CancelAfter(_createJobTimeout(job.TimeoutMinutes.Value));
+        timeoutTokenSource.CancelAfter(_createTimeout(job.TimeoutMinutes.Value));
         return timeoutTokenSource;
     }
 
@@ -218,6 +286,34 @@ internal sealed class JobExecutor
         return timeoutTokenSource is not null &&
             timeoutTokenSource.IsCancellationRequested &&
             !externalCancellationToken.IsCancellationRequested;
+    }
+
+    private CancellationTokenSource? CreateStepTimeoutTokenSource(
+        WorkflowStep step,
+        CancellationToken cancellationToken)
+    {
+        if (step.TimeoutMinutes is null)
+        {
+            return null;
+        }
+
+        var timeoutTokenSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutTokenSource.CancelAfter(_createTimeout(step.TimeoutMinutes.Value));
+        return timeoutTokenSource;
+    }
+
+    private static bool IsStepTimeout(
+        CancellationTokenSource? timeoutTokenSource,
+        CancellationToken parentCancellationToken)
+    {
+        return timeoutTokenSource is not null &&
+            timeoutTokenSource.IsCancellationRequested &&
+            !parentCancellationToken.IsCancellationRequested;
+    }
+
+    private static string FormatStepTimeoutError(string jobName, string stepName, int timeoutMinutes)
+    {
+        return $"workflow.jobs.{jobName}.steps.{stepName} timed out after {timeoutMinutes} minute(s).";
     }
 
     private async Task<StepExecutionOutcome> ExecuteStepAsync(
@@ -233,11 +329,23 @@ internal sealed class JobExecutor
         TextWriter error,
         CancellationToken cancellationToken)
     {
+        using var timeoutTokenSource = CreateStepTimeoutTokenSource(step, cancellationToken);
+        var stepCancellationToken = timeoutTokenSource?.Token ?? cancellationToken;
         IStepLog stepLog;
 
         try
         {
-            stepLog = await _runStore.OpenStepLogAsync(runId, job.Name, stepIndex, step.Name, cancellationToken);
+            stepLog = await _runStore.OpenStepLogAsync(runId, job.Name, stepIndex, step.Name, stepCancellationToken);
+        }
+        catch (OperationCanceledException) when (IsStepTimeout(timeoutTokenSource, cancellationToken))
+        {
+            return StepExecutionOutcome.TimedOut(
+                step.Run ?? step.Uses ?? string.Empty,
+                null,
+                new Dictionary<string, string>(),
+                null,
+                null,
+                FormatStepTimeoutError(job.Name, step.Name, step.TimeoutMinutes!.Value));
         }
         catch (Exception ex) when (StorageError.IsRecoverable(ex))
         {
@@ -245,16 +353,17 @@ internal sealed class JobExecutor
         }
 
         await using var collector = new StepOutputCollector(output, error, stepLog, _outputMarkerParser);
+        var effectiveRunDefaults = runDefaults.Merge(new WorkflowRunDefaults(step.Shell, step.WorkingDirectory));
+        StepExecutionPlan? plan = null;
 
         try
         {
-            var plan = await ResolveStepExecutionAsync(step, projectRoot, cancellationToken);
+            plan = await ResolveStepExecutionAsync(step, projectRoot, stepCancellationToken);
             if (!plan.Success)
             {
                 return StepExecutionOutcome.FailedWithoutExitCode(step.Uses ?? string.Empty, plan.Errors, collector.LogPath);
             }
 
-            var effectiveRunDefaults = runDefaults.Merge(new WorkflowRunDefaults(step.Shell, step.WorkingDirectory));
             var environment = CreateStepEnvironment(workflowEnv, job.Env, stepOutputs, step.Env, plan.Environment);
             var result = plan.Kind == StepExecutionKind.DockerImageAction
                 ? await _runnerProvider.ExecuteDockerActionAsync(
@@ -265,7 +374,7 @@ internal sealed class JobExecutor
                         projectRoot,
                         environment),
                     collector,
-                    cancellationToken)
+                    stepCancellationToken)
                 : await _runnerProvider.ExecuteStepAsync(
                     new StepExecutionRequest(
                         job.Name,
@@ -278,7 +387,7 @@ internal sealed class JobExecutor
                         effectiveRunDefaults.WorkingDirectory,
                         plan.AdditionalMounts),
                     collector,
-                    cancellationToken);
+                    stepCancellationToken);
             var resultShell = plan.Kind == StepExecutionKind.DockerImageAction ? null : effectiveRunDefaults.Shell;
             var resultWorkingDirectory = plan.Kind == StepExecutionKind.DockerImageAction ? null : effectiveRunDefaults.WorkingDirectory;
 
@@ -307,6 +416,17 @@ internal sealed class JobExecutor
             return StepExecutionOutcome.StorageFailed(
                 StorageError.Format($"writing log for job '{job.Name}' step '{step.Name}'", ex),
                 collector.LogPath);
+        }
+        catch (OperationCanceledException) when (IsStepTimeout(timeoutTokenSource, cancellationToken))
+        {
+            var usesShellExecution = plan?.Kind == StepExecutionKind.ShellCommand || step.Run is not null;
+            return StepExecutionOutcome.TimedOut(
+                step.Run ?? step.Uses ?? string.Empty,
+                collector.LogPath,
+                collector.CapturedOutputs,
+                usesShellExecution ? effectiveRunDefaults.Shell : null,
+                usesShellExecution ? effectiveRunDefaults.WorkingDirectory : null,
+                FormatStepTimeoutError(job.Name, step.Name, step.TimeoutMinutes!.Value));
         }
     }
 
@@ -341,7 +461,8 @@ internal sealed class JobExecutor
         IReadOnlyList<string> errors,
         int successfulSteps,
         int failedSteps,
-        int skippedSteps)
+        int skippedSteps,
+        int continuedSteps)
     {
         var finishedAt = DateTimeOffset.UtcNow;
         var record = new JobRunRecord(
@@ -363,25 +484,65 @@ internal sealed class JobExecutor
             job.Concurrency?.Group,
             job.Concurrency?.CancelInProgress ?? false);
 
-        return new JobExecutionOutcome(record, successfulSteps, failedSteps, skippedSteps);
+        return new JobExecutionOutcome(record, successfulSteps, failedSteps, skippedSteps, continuedSteps);
     }
 
     public static IReadOnlyList<StepRunRecord> CreateSkippedStepRecords(IEnumerable<WorkflowStep> steps)
     {
         return steps
-            .Select(step => new StepRunRecord(
-                step.Name,
-                SkippedStatus,
-                step.Run ?? step.Uses ?? string.Empty,
-                null,
-                null,
-                null,
-                null,
-                0,
-                step.Id,
-                step.Shell,
-                step.WorkingDirectory))
+            .Select(CreateSkippedStepRecord)
             .ToArray();
+    }
+
+    private static StepRunRecord CreateSkippedStepRecord(WorkflowStep step)
+    {
+        return new StepRunRecord(
+            step.Name,
+            SkippedStatus,
+            step.Run ?? step.Uses ?? string.Empty,
+            null,
+            null,
+            null,
+            null,
+            0,
+            step.Id,
+            step.Shell,
+            step.WorkingDirectory,
+            step.If,
+            step.TimeoutMinutes,
+            step.ContinueOnError);
+    }
+
+    private static StepRunRecord CreateFailedStepRecord(WorkflowStep step, DateTimeOffset finishedAt)
+    {
+        return new StepRunRecord(
+            step.Name,
+            FailedStatus,
+            step.Run ?? step.Uses ?? string.Empty,
+            null,
+            null,
+            finishedAt,
+            finishedAt,
+            0,
+            step.Id,
+            step.Shell,
+            step.WorkingDirectory,
+            step.If,
+            step.TimeoutMinutes,
+            step.ContinueOnError);
+    }
+
+    private static bool IsFailureStatus(string status)
+    {
+        return string.Equals(status, FailedStatus, StringComparison.Ordinal) ||
+            string.Equals(status, TimedOutStatus, StringComparison.Ordinal);
+    }
+
+    private static bool CanRunAfterHardFailure(string? expression)
+    {
+        return expression is not null &&
+            WorkflowConditionExpression.TryParse(expression, out var condition) &&
+            condition?.Kind == WorkflowConditionExpressionKind.StatusFunction;
     }
 
     private static IReadOnlyDictionary<string, string> CreateStepEnvironment(
@@ -471,6 +632,17 @@ internal sealed class JobExecutor
         public static StepExecutionOutcome StorageFailed(string error, string? logPath = null)
         {
             return new StepExecutionOutcome(FailedStatus, string.Empty, null, logPath, null, null, new Dictionary<string, string>(), [error], false);
+        }
+
+        public static StepExecutionOutcome TimedOut(
+            string command,
+            string? logPath,
+            IReadOnlyDictionary<string, string> outputs,
+            string? shell,
+            string? workingDirectory,
+            string error)
+        {
+            return new StepExecutionOutcome(TimedOutStatus, command, null, logPath, shell, workingDirectory, outputs, [error], true);
         }
 
         public static StepExecutionOutcome FailedWithoutExitCode(

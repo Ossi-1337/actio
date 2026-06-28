@@ -11,4 +11,7 @@ public sealed record StepRunRecord(
     long DurationMilliseconds,
     string? Id = null,
     string? Shell = null,
-    string? WorkingDirectory = null);
+    string? WorkingDirectory = null,
+    string? If = null,
+    int? TimeoutMinutes = null,
+    bool ContinueOnError = false);

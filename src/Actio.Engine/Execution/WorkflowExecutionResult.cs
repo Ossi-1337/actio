@@ -14,7 +14,8 @@ public sealed record WorkflowExecutionResult
         string? runId = null,
         string? runRecordPath = null,
         int failedSteps = 0,
-        int skippedSteps = 0)
+        int skippedSteps = 0,
+        int continuedSteps = 0)
     {
         Status = status;
         SuccessfulSteps = successfulSteps;
@@ -26,6 +27,7 @@ public sealed record WorkflowExecutionResult
         RunRecordPath = runRecordPath;
         FailedSteps = failedSteps;
         SkippedSteps = skippedSteps;
+        ContinuedSteps = continuedSteps;
     }
 
     public WorkflowExecutionStatus Status { get; init; }
@@ -47,6 +49,8 @@ public sealed record WorkflowExecutionResult
     public int FailedSteps { get; init; }
 
     public int SkippedSteps { get; init; }
+
+    public int ContinuedSteps { get; init; }
 
     public bool Success => Status == WorkflowExecutionStatus.Success;
 }

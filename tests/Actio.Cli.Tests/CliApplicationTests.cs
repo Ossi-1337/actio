@@ -718,6 +718,33 @@ public sealed class CliApplicationTests : IDisposable
     }
 
     [Fact]
+    public void Run_PrintsContinuedStepCount()
+    {
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+                    continue-on-error: true
+            """);
+
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var executor = new FakeWorkflowExecutor(
+            new WorkflowExecutionResult(WorkflowExecutionStatus.Success, 0, 1, [], continuedSteps: 1));
+
+        var exitCode = CreateApplication(executor).Run(["ci.yml"], _root, output, error);
+
+        Assert.Equal(ExitCodes.Success, exitCode);
+        Assert.Contains("Success (0 / 1, 1 continued)", output.ToString());
+    }
+
+    [Fact]
     public void Run_PrintsOutputsAndArtifactsFromExecutionResult()
     {
         File.WriteAllText(

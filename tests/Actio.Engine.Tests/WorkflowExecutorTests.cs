@@ -504,6 +504,137 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_SkipsStepWhenConditionIsFalse()
+    {
+        var runner = new FakeRunnerProvider([0]);
+        var store = new RecordingRunStore();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep("Only on failure", "echo failed", null, If: "${{ failure() }}"),
+                    new WorkflowStep("After", "dotnet test", null)
+                ]));
+
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal(1, result.SuccessfulSteps);
+        Assert.Equal(1, result.SkippedSteps);
+        Assert.Equal("After", Assert.Single(runner.Requests).StepName);
+        var steps = Assert.Single(store.SavedRecords.Last().Jobs).Steps;
+        Assert.Equal("Skipped", steps[0].Status);
+        Assert.Equal("${{ failure() }}", steps[0].If);
+        Assert.Equal("Success", steps[1].Status);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ContinuesAfterStepFailureWhenStepIsContinueOnError()
+    {
+        var runner = new FakeRunnerProvider([42, 0]);
+        var store = new RecordingRunStore();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep("Allowed failure", "exit 42", null, ContinueOnError: true),
+                    new WorkflowStep("Report failure", "echo failed", null, If: "${{ failure() }}")
+                ]));
+
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal(1, result.SuccessfulSteps);
+        Assert.Equal(0, result.FailedSteps);
+        Assert.Equal(1, result.ContinuedSteps);
+        Assert.Equal(["Allowed failure", "Report failure"], runner.Requests.Select(request => request.StepName));
+        var job = Assert.Single(store.SavedRecords.Last().Jobs);
+        Assert.Equal("Success", job.Status);
+        Assert.Equal(["Failed", "Success"], job.Steps.Select(step => step.Status));
+        Assert.True(job.Steps[0].ContinueOnError);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_RunsFailureConditionStepAfterHardStepFailure()
+    {
+        var runner = new FakeRunnerProvider([42, 0]);
+        var store = new RecordingRunStore();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep("Fail", "exit 42", null),
+                    new WorkflowStep("Cleanup", "echo cleanup", null, If: "${{ failure() }}"),
+                    new WorkflowStep("Normal after failure", "echo normal", null)
+                ]));
+
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Equal(1, result.SuccessfulSteps);
+        Assert.Equal(1, result.FailedSteps);
+        Assert.Equal(1, result.SkippedSteps);
+        Assert.Equal(["Fail", "Cleanup"], runner.Requests.Select(request => request.StepName));
+        var steps = Assert.Single(store.SavedRecords.Last().Jobs).Steps;
+        Assert.Equal(["Failed", "Success", "Skipped"], steps.Select(step => step.Status));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_MarksStepTimedOutWhenStepTimeoutExpires()
+    {
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(0, delay: TimeSpan.FromSeconds(5))]);
+        var store = new RecordingRunStore();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Long test", "dotnet test", null, TimeoutMinutes: 1)]));
+
+        var result = await new WorkflowExecutor(
+            runner,
+            store,
+            createJobTimeout: _ => TimeSpan.FromMilliseconds(20)).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions("C:\\repo"),
+                TextWriter.Null,
+                TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Equal(1, result.FailedSteps);
+        Assert.Contains(result.Errors, error => error.Contains("timed out", StringComparison.OrdinalIgnoreCase));
+        var step = Assert.Single(Assert.Single(store.SavedRecords.Last().Jobs).Steps);
+        Assert.Equal("TimedOut", step.Status);
+        Assert.Equal(1, step.TimeoutMinutes);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_EvaluatesIfConditionFromWorkflowDispatchInputs()
     {
         var runner = new FakeRunnerProvider([0]);

@@ -61,6 +61,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         var successfulSteps = 0;
         var failedSteps = 0;
         var skippedSteps = 0;
+        var continuedSteps = 0;
         var errors = new List<string>();
         var jobRecords = new List<JobRunRecord>();
         var runOutputs = new List<WorkflowRunOutput>();
@@ -120,6 +121,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 successfulSteps += outcome.SuccessfulSteps;
                 failedSteps += outcome.FailedSteps;
                 skippedSteps += outcome.SkippedSteps;
+                continuedSteps += outcome.ContinuedSteps;
                 jobRecords.Add(outcome.Job);
                 var toleratedFailure = job.ContinueOnError && IsUnsuccessfulJobStatus(outcome.Job.Status);
                 jobStatuses[job.Name] = toleratedFailure ? SuccessStatus : outcome.Job.Status;
@@ -187,7 +189,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             runId,
             runRecordPath,
             failedSteps,
-            skippedSteps);
+            skippedSteps,
+            continuedSteps);
     }
 
     private async Task<JobExecutionOutcome> ExecuteOrSkipJobAsync(
@@ -222,7 +225,18 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         }
 
         return skipReason is null
-            ? await _jobExecutor.ExecuteAsync(job, workflowEnv, workflowDefaults, projectRoot, runId, output, error, cancellationToken)
+            ? await _jobExecutor.ExecuteAsync(
+                job,
+                workflowEnv,
+                workflowDefaults,
+                jobOutputs,
+                inputs,
+                eventPayload,
+                projectRoot,
+                runId,
+                output,
+                error,
+                cancellationToken)
             : CreateSkippedJobOutcome(job, skipReason);
     }
 

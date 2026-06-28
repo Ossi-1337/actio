@@ -221,7 +221,16 @@ public sealed record WorkflowStep(
     string? Id = null,
     IReadOnlyDictionary<string, string>? Env = null,
     string? Shell = null,
-    string? WorkingDirectory = null)
+    string? WorkingDirectory = null,
+    string? If = null,
+    int? TimeoutMinutes = null,
+    bool ContinueOnError = false)
 {
     public IReadOnlyDictionary<string, string> Env { get; init; } = Env ?? new Dictionary<string, string>();
+
+    public string? If { get; init; } = If;
+
+    public int? TimeoutMinutes { get; init; } = TimeoutMinutes;
+
+    public bool ContinueOnError { get; init; } = ContinueOnError;
 }

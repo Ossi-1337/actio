@@ -6,4 +6,5 @@ internal sealed record JobExecutionOutcome(
     JobRunRecord Job,
     int SuccessfulSteps,
     int FailedSteps,
-    int SkippedSteps);
+    int SkippedSteps,
+    int ContinuedSteps = 0);

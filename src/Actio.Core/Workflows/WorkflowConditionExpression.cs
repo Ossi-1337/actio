@@ -6,7 +6,8 @@ public enum WorkflowConditionExpressionKind
 {
     NeedsOutput,
     Input,
-    EventPayload
+    EventPayload,
+    StatusFunction
 }
 
 public sealed partial record WorkflowConditionExpression(
@@ -50,6 +51,17 @@ public sealed partial record WorkflowConditionExpression(
             return true;
         }
 
+        var statusFunctionMatch = StatusFunctionConditionRegex().Match(expression);
+        if (statusFunctionMatch.Success)
+        {
+            condition = new WorkflowConditionExpression(
+                WorkflowConditionExpressionKind.StatusFunction,
+                null,
+                statusFunctionMatch.Groups["function"].Value,
+                string.Empty);
+            return true;
+        }
+
         condition = null;
         return false;
     }
@@ -62,4 +74,7 @@ public sealed partial record WorkflowConditionExpression(
 
     [GeneratedRegex("^\\$\\{\\{\\s*github\\.event\\.(?<path>[A-Za-z0-9_.-]+)\\s*==\\s*'(?<value>[^']*)'\\s*\\}\\}$")]
     private static partial Regex EventPayloadConditionRegex();
+
+    [GeneratedRegex("^\\$\\{\\{\\s*(?<function>success|failure|cancelled|always)\\(\\)\\s*\\}\\}$")]
+    private static partial Regex StatusFunctionConditionRegex();
 }
