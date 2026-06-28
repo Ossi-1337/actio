@@ -72,6 +72,12 @@ internal sealed class ActionResolver
             return ActionResolutionResult.Failed(inputBinding.Errors);
         }
 
+        var command = BuildCommand(parseResult.Action!, inputBinding.Inputs);
+        if (!command.Success)
+        {
+            return ActionResolutionResult.Failed(command.Errors);
+        }
+
         try
         {
             var contentHash = await ComputeContentHashAsync(actionPathResult.ActionPath!, cancellationToken);
@@ -82,7 +88,7 @@ internal sealed class ActionResolver
             return ActionResolutionResult.ResolvedLocalAction(
                 parseResult.Action!,
                 cacheEntry,
-                BuildCommand(parseResult.Action!, inputBinding.Inputs),
+                command.Value,
                 inputBinding.Environment);
         }
         catch (Exception ex) when (StorageError.IsRecoverable(ex))
@@ -165,10 +171,16 @@ internal sealed class ActionResolver
             return ActionResolutionResult.Failed(inputBinding.Errors);
         }
 
+        var command = BuildCommand(parseResult.Action!, inputBinding.Inputs);
+        if (!command.Success)
+        {
+            return ActionResolutionResult.Failed(command.Errors);
+        }
+
         return ActionResolutionResult.ResolvedGitHubAction(
             parseResult.Action!,
             sourceResult.CacheEntry!,
-            BuildCommand(parseResult.Action!, inputBinding.Inputs),
+            command.Value,
             MergeEnvironment(
                 inputBinding.Environment,
                 new Dictionary<string, string>(StringComparer.Ordinal)
@@ -221,13 +233,29 @@ internal sealed class ActionResolver
         return ActionPathResult.Failed([$"uses '{uses}' could not be resolved to a local action.yml or action.yaml file."]);
     }
 
-    private static string BuildCommand(
+    private static ActionInputInterpolationResult BuildCommand(
         ActionDocument action,
         IReadOnlyDictionary<string, string> inputs)
     {
-        return string.Join(
-            Environment.NewLine,
-            action.Steps.Select(step => ActionInputBinder.InterpolateInputExpressions(step.Run, inputs)));
+        var commands = new List<string>();
+        var errors = new List<string>();
+
+        foreach (var step in action.Steps)
+        {
+            var interpolation = ActionInputBinder.InterpolateInputExpressions(step.Run, inputs);
+            if (interpolation.Success)
+            {
+                commands.Add(interpolation.Value);
+            }
+            else
+            {
+                errors.AddRange(interpolation.Errors);
+            }
+        }
+
+        return errors.Count == 0
+            ? ActionInputInterpolationResult.Resolved(string.Join(Environment.NewLine, commands))
+            : ActionInputInterpolationResult.Failed(errors);
     }
 
     private static IReadOnlyDictionary<string, string> MergeEnvironment(

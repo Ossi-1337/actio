@@ -1,9 +1,9 @@
-using System.Text.RegularExpressions;
 using Actio.Core.Actions;
+using Actio.Core.Expressions;
 
 namespace Actio.Engine.Execution;
 
-internal static partial class ActionInputBinder
+internal static class ActionInputBinder
 {
     public static ActionInputBindingResult Bind(
         ActionDocument action,
@@ -51,15 +51,17 @@ internal static partial class ActionInputBinder
         return environment;
     }
 
-    public static string InterpolateInputExpressions(
+    public static ActionInputInterpolationResult InterpolateInputExpressions(
         string command,
         IReadOnlyDictionary<string, string> inputs)
     {
-        return InputExpressionRegex().Replace(
+        var interpolation = ExpressionTemplate.Interpolate(
             command,
-            match => inputs.TryGetValue(match.Groups["name"].Value, out var value)
-                ? value
-                : string.Empty);
+            new ExpressionEvaluationContext(reference => ResolveInputReference(reference, inputs)));
+
+        return interpolation.Success
+            ? ActionInputInterpolationResult.Resolved(interpolation.Value)
+            : ActionInputInterpolationResult.Failed(interpolation.Errors);
     }
 
     private static string ToEnvironmentName(string inputName)
@@ -71,8 +73,20 @@ internal static partial class ActionInputBinder
         return $"INPUT_{new string(segment)}";
     }
 
-    [GeneratedRegex("\\$\\{\\{\\s*inputs\\.(?<name>[A-Za-z0-9_-]+)\\s*\\}\\}")]
-    private static partial Regex InputExpressionRegex();
+    private static ExpressionReferenceResolution ResolveInputReference(
+        ExpressionReference reference,
+        IReadOnlyDictionary<string, string> inputs)
+    {
+        if (string.Equals(reference.Root, "inputs", StringComparison.Ordinal) && reference.Path.Count == 1)
+        {
+            return ExpressionReferenceResolution.Resolved(
+                inputs.TryGetValue(reference.Path[0], out var value)
+                    ? ExpressionValue.FromString(value)
+                    : ExpressionValue.FromString(string.Empty));
+        }
+
+        return ExpressionReferenceResolution.Failed($"Unsupported expression reference '{reference}'.");
+    }
 }
 
 internal sealed record ActionInputBindingResult(
@@ -96,4 +110,16 @@ internal sealed record ActionInputBindingResult(
             new Dictionary<string, string>(),
             errors);
     }
+}
+
+internal sealed record ActionInputInterpolationResult(
+    bool Success,
+    string Value,
+    IReadOnlyList<string> Errors)
+{
+    public static ActionInputInterpolationResult Resolved(string value)
+        => new(true, value, []);
+
+    public static ActionInputInterpolationResult Failed(IReadOnlyList<string> errors)
+        => new(false, string.Empty, errors);
 }

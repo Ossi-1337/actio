@@ -1,4 +1,5 @@
 using Actio.Core.Actions;
+using Actio.Core.Expressions;
 using YamlDotNet.RepresentationModel;
 
 namespace Actio.Core.Workflows;
@@ -1418,44 +1419,13 @@ public sealed partial class WorkflowParser
                 continue;
             }
 
-            if (!WorkflowConditionExpression.TryParse(job.If, out var condition))
-            {
-                errors.Add($"workflow.jobs.{job.Name}.if uses an unsupported expression.");
-                continue;
-            }
-
-            if (condition!.Kind == WorkflowConditionExpressionKind.StatusFunction)
-            {
-                errors.Add($"workflow.jobs.{job.Name}.if uses an unsupported expression.");
-                continue;
-            }
-
-            if (condition.Kind == WorkflowConditionExpressionKind.Input)
-            {
-                if (!dispatchInputNames.Contains(condition.Name))
-                {
-                    errors.Add($"workflow.jobs.{job.Name}.if references inputs.{condition.Name}, but workflow.on.workflow_dispatch.inputs.{condition.Name} is not declared.");
-                }
-
-                continue;
-            }
-
-            if (condition.Kind == WorkflowConditionExpressionKind.EventPayload)
+            var expression = ValidateConditionExpression(errors, $"workflow.jobs.{job.Name}.if", job.If, allowStatusFunctions: false);
+            if (expression is null)
             {
                 continue;
             }
 
-            var referencedJob = condition.ReferencedJob!;
-            if (!jobs.ContainsKey(referencedJob))
-            {
-                errors.Add($"workflow.jobs.{job.Name}.if references unknown job '{referencedJob}'.");
-                continue;
-            }
-
-            if (!job.Needs.Contains(referencedJob, StringComparer.Ordinal))
-            {
-                errors.Add($"workflow.jobs.{job.Name}.if references needs.{referencedJob}, but '{referencedJob}' is not declared in workflow.jobs.{job.Name}.needs.");
-            }
+            ValidateExpressionReferences(errors, $"workflow.jobs.{job.Name}.if", expression, job, jobs, dispatchInputNames);
         }
 
         ValidateStepConditions(errors, jobs, dispatchInputNames);
@@ -1477,39 +1447,123 @@ public sealed partial class WorkflowParser
                 }
 
                 var path = $"workflow.jobs.{job.Name}.steps[{index}].if";
-                if (!WorkflowConditionExpression.TryParse(step.If, out var condition))
-                {
-                    errors.Add($"{path} uses an unsupported expression.");
-                    continue;
-                }
-
-                if (condition!.Kind == WorkflowConditionExpressionKind.Input)
-                {
-                    if (!dispatchInputNames.Contains(condition.Name))
-                    {
-                        errors.Add($"{path} references inputs.{condition.Name}, but workflow.on.workflow_dispatch.inputs.{condition.Name} is not declared.");
-                    }
-
-                    continue;
-                }
-
-                if (condition.Kind is WorkflowConditionExpressionKind.EventPayload or WorkflowConditionExpressionKind.StatusFunction)
+                var expression = ValidateConditionExpression(errors, path, step.If, allowStatusFunctions: true);
+                if (expression is null)
                 {
                     continue;
                 }
 
-                var referencedJob = condition.ReferencedJob!;
-                if (!jobs.ContainsKey(referencedJob))
-                {
-                    errors.Add($"{path} references unknown job '{referencedJob}'.");
-                    continue;
-                }
-
-                if (!job.Needs.Contains(referencedJob, StringComparer.Ordinal))
-                {
-                    errors.Add($"{path} references needs.{referencedJob}, but '{referencedJob}' is not declared in workflow.jobs.{job.Name}.needs.");
-                }
+                ValidateExpressionReferences(errors, path, expression, job, jobs, dispatchInputNames);
             }
+        }
+    }
+
+    private static ExpressionNode? ValidateConditionExpression(
+        List<string> errors,
+        string path,
+        string expression,
+        bool allowStatusFunctions)
+    {
+        var parseResult = ExpressionParser.ParseTemplateExpression(expression);
+        if (!parseResult.Success)
+        {
+            errors.Add($"{path} uses an unsupported expression: {string.Join(" ", parseResult.Errors)}");
+            return null;
+        }
+
+        foreach (var function in ExpressionAnalysis.CollectFunctionCalls(parseResult.Expression!))
+        {
+            if (ExpressionBuiltIns.IsStatusFunction(function.Name) && allowStatusFunctions)
+            {
+                continue;
+            }
+
+            var reason = ExpressionBuiltIns.IsStatusFunction(function.Name)
+                ? $"status function '{function.Name}' is not supported here"
+                : $"function '{function.Name}' is not supported";
+            errors.Add($"{path} uses an unsupported expression: {reason}.");
+            return null;
+        }
+
+        return parseResult.Expression;
+    }
+
+    private static void ValidateExpressionReferences(
+        List<string> errors,
+        string path,
+        ExpressionNode expression,
+        WorkflowJob job,
+        IReadOnlyDictionary<string, WorkflowJob> jobs,
+        IReadOnlySet<string> dispatchInputNames)
+    {
+        var seenReferences = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var reference in ExpressionAnalysis.CollectReferences(expression))
+        {
+            if (!seenReferences.Add(reference.ToString()))
+            {
+                continue;
+            }
+
+            if (string.Equals(reference.Root, "inputs", StringComparison.Ordinal))
+            {
+                if (reference.Path.Count != 1)
+                {
+                    errors.Add($"{path} references unsupported expression context '{reference}'.");
+                    continue;
+                }
+
+                var inputName = reference.Path[0];
+                if (!dispatchInputNames.Contains(inputName))
+                {
+                    errors.Add($"{path} references inputs.{inputName}, but workflow.on.workflow_dispatch.inputs.{inputName} is not declared.");
+                }
+
+                continue;
+            }
+
+            if (string.Equals(reference.Root, "github", StringComparison.Ordinal))
+            {
+                if (reference.Path.Count < 2 || !string.Equals(reference.Path[0], "event", StringComparison.Ordinal))
+                {
+                    errors.Add($"{path} references unsupported expression context '{reference}'.");
+                }
+
+                continue;
+            }
+
+            if (string.Equals(reference.Root, "needs", StringComparison.Ordinal))
+            {
+                ValidateNeedsReference(errors, path, reference, job, jobs);
+                continue;
+            }
+
+            errors.Add($"{path} references unsupported expression context '{reference}'.");
+        }
+    }
+
+    private static void ValidateNeedsReference(
+        List<string> errors,
+        string path,
+        ExpressionReference reference,
+        WorkflowJob job,
+        IReadOnlyDictionary<string, WorkflowJob> jobs)
+    {
+        if (reference.Path.Count != 3 || !string.Equals(reference.Path[1], "outputs", StringComparison.Ordinal))
+        {
+            errors.Add($"{path} references unsupported expression context '{reference}'.");
+            return;
+        }
+
+        var referencedJob = reference.Path[0];
+        if (!jobs.ContainsKey(referencedJob))
+        {
+            errors.Add($"{path} references unknown job '{referencedJob}'.");
+            return;
+        }
+
+        if (!job.Needs.Contains(referencedJob, StringComparer.Ordinal))
+        {
+            errors.Add($"{path} references needs.{referencedJob}, but '{referencedJob}' is not declared in workflow.jobs.{job.Name}.needs.");
         }
     }
 

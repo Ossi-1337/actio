@@ -1,3 +1,4 @@
+using Actio.Core.Expressions;
 using Actio.Core.Workflows;
 using Actio.Engine.Runs;
 
@@ -540,9 +541,16 @@ internal sealed class JobExecutor
 
     private static bool CanRunAfterHardFailure(string? expression)
     {
-        return expression is not null &&
-            WorkflowConditionExpression.TryParse(expression, out var condition) &&
-            condition?.Kind == WorkflowConditionExpressionKind.StatusFunction;
+        if (expression is null)
+        {
+            return false;
+        }
+
+        var parseResult = ExpressionParser.ParseTemplateExpression(expression);
+        return parseResult.Success &&
+            ExpressionAnalysis
+                .CollectFunctionCalls(parseResult.Expression!)
+                .Any(function => ExpressionBuiltIns.IsStatusFunction(function.Name));
     }
 
     private static IReadOnlyDictionary<string, string> CreateStepEnvironment(

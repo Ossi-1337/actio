@@ -504,6 +504,59 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_EvaluatesBooleanAndComparisonConditions()
+    {
+        var runner = new FakeRunnerProvider(
+            [
+                new FakeRunnerStep(0, ["actio.output changed-count=2"]),
+                new FakeRunnerStep(0)
+            ]);
+        var workflow = new WorkflowDocument(
+            "CI",
+            new Dictionary<string, string>(),
+            new Dictionary<string, WorkflowJob>
+            {
+                ["prepare"] = new(
+                    "prepare",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Detect changes", "echo actio.output changed-count=2", null)]),
+                ["test"] = new(
+                    "test",
+                    ["prepare"],
+                    "${{ inputs.environment == 'staging' && needs.prepare.outputs.changed-count >= 2 && github.event.event_name == 'workflow_dispatch' }}",
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Test", "dotnet test", null)])
+            },
+            [
+                new WorkflowTrigger(
+                    "workflow_dispatch",
+                    null,
+                    Dispatch: new WorkflowDispatch(new Dictionary<string, WorkflowDispatchInput>
+                    {
+                        ["environment"] = new("environment", null, true, null, "string", [])
+                    }))
+            ]);
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(
+                "C:\\repo",
+                RunTrigger: new WorkflowRunTrigger(
+                    "workflow_dispatch",
+                    "CLI",
+                    new Dictionary<string, string> { ["environment"] = "staging" })),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal(["prepare", "test"], runner.Requests.Select(request => request.JobName));
+    }
+
+    [Fact]
     public async Task ExecuteAsync_SkipsStepWhenConditionIsFalse()
     {
         var runner = new FakeRunnerProvider([0]);
@@ -584,7 +637,7 @@ public sealed class WorkflowExecutorTests
                 new Dictionary<string, string>(),
                 [
                     new WorkflowStep("Fail", "exit 42", null),
-                    new WorkflowStep("Cleanup", "echo cleanup", null, If: "${{ failure() }}"),
+                    new WorkflowStep("Cleanup", "echo cleanup", null, If: "${{ failure() && true }}"),
                     new WorkflowStep("Normal after failure", "echo normal", null)
                 ]));
 
@@ -964,6 +1017,52 @@ public sealed class WorkflowExecutorTests
             Assert.Empty(runner.Requests);
             Assert.Empty(cache.Requests);
             Assert.Contains(result.Errors, error => error.Contains("action.inputs.name is required", StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_FailsLocalCompositeActionWhenInterpolationUsesUnsupportedContext()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-action-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(projectRoot, ".actio", "actions", "hello"));
+        await File.WriteAllTextAsync(
+            Path.Combine(projectRoot, ".actio", "actions", "hello", "action.yml"),
+            """
+            name: Hello
+            runs:
+              using: composite
+              steps:
+                - name: Greet
+                  run: echo "${{ env.NAME }}"
+            """);
+
+        try
+        {
+            var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+            var cache = new RecordingActionCache();
+            var workflow = CreateWorkflow(
+                new WorkflowJob(
+                    "test",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Use hello", null, "./.actio/actions/hello")]));
+
+            var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.False(result.Success);
+            Assert.Empty(runner.Requests);
+            Assert.Empty(cache.Requests);
+            Assert.Contains(result.Errors, error => error.Contains("Unsupported expression reference 'env.NAME'", StringComparison.OrdinalIgnoreCase));
         }
         finally
         {

@@ -957,6 +957,38 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
+    public void Parse_AcceptsBooleanAndComparisonConditionExpressions()
+    {
+        var result = Parse(
+            """
+            name: CI
+            on:
+              workflow_dispatch:
+                inputs:
+                  environment:
+                    type: string
+            jobs:
+              prepare:
+                runs-on: ubuntu-latest
+                outputs:
+                  changed-count: "2"
+                steps:
+                  - name: Prepare
+                    run: dotnet restore
+              test:
+                needs: prepare
+                if: "${{ inputs.environment == 'staging' && needs.prepare.outputs.changed-count >= 2 && github.event.event_name != 'schedule' }}"
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    if: "${{ success() && inputs.environment == 'staging' }}"
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+    }
+
+    [Fact]
     public void Parse_AcceptsGitHubEventPayloadConditionExpression()
     {
         var result = Parse(
@@ -972,6 +1004,25 @@ public sealed class WorkflowParserTests
             """);
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+    }
+
+    [Fact]
+    public void Parse_RejectsUnsupportedConditionContext()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                if: "${{ env.RUN_TESTS == 'true' }}"
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error.Contains("unsupported expression context 'env.RUN_TESTS'", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
