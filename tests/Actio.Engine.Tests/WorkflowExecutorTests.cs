@@ -213,6 +213,110 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_AllowsWorkflowToContinueWhenJobFailureIsContinueOnError()
+    {
+        var runner = new FakeRunnerProvider([42, 0]);
+        var store = new RecordingRunStore();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "allow_failure",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Allowed failure", "exit 42", null)])
+            {
+                ContinueOnError = true
+            },
+            new WorkflowJob(
+                "after",
+                ["allow_failure"],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("After", "dotnet test", null)]));
+
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal(1, result.SuccessfulSteps);
+        Assert.Equal(1, result.FailedSteps);
+        Assert.Equal(["allow_failure", "after"], runner.Requests.Select(request => request.JobName));
+        var jobs = store.SavedRecords.Last().Jobs;
+        Assert.Equal("Failed", jobs[0].Status);
+        Assert.True(jobs[0].ContinueOnError);
+        Assert.Equal("Success", jobs[1].Status);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_MarksJobAndStepTimedOutWhenJobTimeoutExpires()
+    {
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(0, delay: TimeSpan.FromSeconds(5))]);
+        var store = new RecordingRunStore();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Long test", "dotnet test", null)])
+            {
+                TimeoutMinutes = 1
+            });
+
+        var result = await new WorkflowExecutor(
+            runner,
+            store,
+            createJobTimeout: _ => TimeSpan.FromMilliseconds(20)).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions("C:\\repo"),
+                TextWriter.Null,
+                TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Equal(1, result.FailedSteps);
+        Assert.Contains(result.Errors, error => error.Contains("timed out", StringComparison.OrdinalIgnoreCase));
+        var job = Assert.Single(store.SavedRecords.Last().Jobs);
+        Assert.Equal("TimedOut", job.Status);
+        Assert.Equal(1, job.TimeoutMinutes);
+        Assert.Equal("TimedOut", Assert.Single(job.Steps).Status);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_SavesJobConcurrencyMetadata()
+    {
+        var runner = new FakeRunnerProvider([0]);
+        var store = new RecordingRunStore();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "deploy",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Deploy", "./deploy.sh", null)])
+            {
+                Concurrency = new WorkflowJobConcurrency("deploy-main", true)
+            });
+
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var job = Assert.Single(store.SavedRecords.Last().Jobs);
+        Assert.Equal("deploy-main", job.ConcurrencyGroup);
+        Assert.True(job.ConcurrencyCancelInProgress);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_RunsJobsInDependencyOrder()
     {
         var runner = new FakeRunnerProvider([0, 0]);
@@ -900,6 +1004,11 @@ public sealed class WorkflowExecutorTests
             IStepOutputSink output,
             CancellationToken cancellationToken)
         {
+            if (step.Delay > TimeSpan.Zero)
+            {
+                await Task.Delay(step.Delay, cancellationToken);
+            }
+
             foreach (var line in step.OutputLines)
             {
                 await output.WriteOutputLineAsync(line, cancellationToken);
@@ -1083,11 +1192,13 @@ public sealed class WorkflowExecutorTests
         public FakeRunnerStep(
             int exitCode,
             IReadOnlyList<string>? outputLines = null,
-            IReadOnlyList<string>? errorLines = null)
+            IReadOnlyList<string>? errorLines = null,
+            TimeSpan? delay = null)
         {
             ExitCode = exitCode;
             OutputLines = outputLines ?? [];
             ErrorLines = errorLines ?? [];
+            Delay = delay ?? TimeSpan.Zero;
         }
 
         public int ExitCode { get; }
@@ -1095,5 +1206,7 @@ public sealed class WorkflowExecutorTests
         public IReadOnlyList<string> OutputLines { get; }
 
         public IReadOnlyList<string> ErrorLines { get; }
+
+        public TimeSpan Delay { get; }
     }
 }

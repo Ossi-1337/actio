@@ -410,6 +410,14 @@ input[type="search"] {
   display: grid;
 }
 
+.job-metadata {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--line-soft);
+}
+
 .step-row {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) auto;

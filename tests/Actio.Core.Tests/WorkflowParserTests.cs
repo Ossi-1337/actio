@@ -189,6 +189,81 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
+    public void Parse_AcceptsJobControls()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              deploy:
+                runs-on: ubuntu-latest
+                timeout-minutes: 5
+                continue-on-error: true
+                concurrency:
+                  group: deploy-main
+                  cancel-in-progress: true
+                steps:
+                  - name: Deploy
+                    run: ./deploy.sh
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var job = result.Workflow!.Jobs["deploy"];
+        Assert.Equal(5, job.TimeoutMinutes);
+        Assert.True(job.ContinueOnError);
+        Assert.NotNull(job.Concurrency);
+        Assert.Equal("deploy-main", job.Concurrency.Group);
+        Assert.True(job.Concurrency.CancelInProgress);
+    }
+
+    [Fact]
+    public void Parse_AcceptsScalarJobConcurrency()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              deploy:
+                runs-on: ubuntu-latest
+                concurrency: deploy-main
+                steps:
+                  - name: Deploy
+                    run: ./deploy.sh
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var concurrency = result.Workflow!.Jobs["deploy"].Concurrency;
+        Assert.NotNull(concurrency);
+        Assert.Equal("deploy-main", concurrency.Group);
+        Assert.False(concurrency.CancelInProgress);
+    }
+
+    [Fact]
+    public void Parse_RejectsInvalidJobControls()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              deploy:
+                runs-on: ubuntu-latest
+                timeout-minutes: 0
+                continue-on-error: sometimes
+                concurrency:
+                  cancel-in-progress: later
+                steps:
+                  - name: Deploy
+                    run: ./deploy.sh
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.deploy.timeout-minutes must be a positive integer.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.deploy.continue-on-error must be true or false.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.deploy.concurrency.group is required.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.deploy.concurrency.cancel-in-progress must be true or false.");
+    }
+
+    [Fact]
     public void Parse_RejectsUnsupportedDefaults()
     {
         var result = Parse(

@@ -25,6 +25,9 @@ public sealed partial class WorkflowParser
         "runs-on",
         "env",
         "defaults",
+        "timeout-minutes",
+        "continue-on-error",
+        "concurrency",
         "outputs",
         "artifacts",
         "steps"
@@ -97,6 +100,12 @@ public sealed partial class WorkflowParser
     {
         "bash",
         "sh"
+    };
+
+    private static readonly HashSet<string> JobConcurrencyKeys = new(StringComparer.Ordinal)
+    {
+        "group",
+        "cancel-in-progress"
     };
 
     private static readonly IReadOnlyDictionary<string, IReadOnlySet<string>> KnownActivityTypes =
@@ -229,6 +238,9 @@ public sealed partial class WorkflowParser
             var runsOn = ReadRequiredScalar(errors, jobMap, "runs-on", $"workflow.jobs.{jobName}.runs-on");
             var env = ReadOptionalStringMap(errors, jobMap, "env", $"workflow.jobs.{jobName}.env");
             var defaults = ReadRunDefaults(errors, jobMap, "defaults", $"workflow.jobs.{jobName}.defaults");
+            var timeoutMinutes = ReadOptionalPositiveInt(errors, jobMap, "timeout-minutes", $"workflow.jobs.{jobName}.timeout-minutes");
+            var continueOnError = ReadOptionalBoolean(errors, jobMap, "continue-on-error", $"workflow.jobs.{jobName}.continue-on-error") ?? false;
+            var concurrency = ReadJobConcurrency(errors, jobMap, jobName);
             var outputs = ReadOptionalStringMap(errors, jobMap, "outputs", $"workflow.jobs.{jobName}.outputs");
             var artifacts = ReadArtifacts(errors, jobMap, jobName);
             var steps = ReadSteps(errors, warnings, jobMap, jobName);
@@ -243,6 +255,9 @@ public sealed partial class WorkflowParser
                     runsOn,
                     env,
                     defaults,
+                    timeoutMinutes,
+                    continueOnError,
+                    concurrency,
                     outputs,
                     artifacts,
                     steps);
@@ -1172,6 +1187,60 @@ public sealed partial class WorkflowParser
         }
 
         return new WorkflowRunDefaults(shell, workingDirectory);
+    }
+
+    private static int? ReadOptionalPositiveInt(
+        List<string> errors,
+        YamlMappingNode map,
+        string key,
+        string path)
+    {
+        var value = ReadOptionalScalar(errors, map, key, path);
+        if (value is null)
+        {
+            return null;
+        }
+
+        if (int.TryParse(value, out var result) && result > 0)
+        {
+            return result;
+        }
+
+        errors.Add($"{path} must be a positive integer.");
+        return null;
+    }
+
+    private static WorkflowJobConcurrency? ReadJobConcurrency(
+        List<string> errors,
+        YamlMappingNode jobMap,
+        string jobName)
+    {
+        if (!TryGet(jobMap, "concurrency", out var node))
+        {
+            return null;
+        }
+
+        var path = $"workflow.jobs.{jobName}.concurrency";
+        if (node is YamlScalarNode scalar)
+        {
+            var group = ReadScalarValue(errors, scalar, path);
+            return group is null ? null : new WorkflowJobConcurrency(group, false);
+        }
+
+        if (node is not YamlMappingNode concurrencyMap)
+        {
+            errors.Add($"{path} must be a string or a mapping.");
+            return null;
+        }
+
+        AddUnknownKeyErrors(errors, concurrencyMap, JobConcurrencyKeys, path);
+        var groupValue = ReadRequiredScalar(errors, concurrencyMap, "group", $"{path}.group");
+        var cancelInProgress =
+            ReadOptionalBoolean(errors, concurrencyMap, "cancel-in-progress", $"{path}.cancel-in-progress") ?? false;
+
+        return groupValue is null
+            ? null
+            : new WorkflowJobConcurrency(groupValue, cancelInProgress);
     }
 
     private static IReadOnlyList<string> ReadOptionalStringList(

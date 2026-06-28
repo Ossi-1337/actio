@@ -8,22 +8,26 @@ internal sealed class JobExecutor
     private const string SuccessStatus = "Success";
     private const string FailedStatus = "Failed";
     private const string SkippedStatus = "Skipped";
+    private const string TimedOutStatus = "TimedOut";
 
     private readonly IRunnerProvider _runnerProvider;
     private readonly IRunStore _runStore;
     private readonly OutputMarkerParser _outputMarkerParser;
     private readonly ActionResolver _actionResolver;
+    private readonly Func<int, TimeSpan> _createJobTimeout;
 
     public JobExecutor(
         IRunnerProvider runnerProvider,
         IRunStore runStore,
         OutputMarkerParser outputMarkerParser,
-        ActionResolver actionResolver)
+        ActionResolver actionResolver,
+        Func<int, TimeSpan>? createJobTimeout = null)
     {
         _runnerProvider = runnerProvider;
         _runStore = runStore;
         _outputMarkerParser = outputMarkerParser;
         _actionResolver = actionResolver;
+        _createJobTimeout = createJobTimeout ?? (minutes => TimeSpan.FromMinutes(minutes));
     }
 
     public async Task<JobExecutionOutcome> ExecuteAsync(
@@ -45,6 +49,11 @@ internal sealed class JobExecutor
         var outputs = new Dictionary<string, string>(job.Outputs, StringComparer.Ordinal);
         var artifacts = new List<WorkflowRunArtifact>();
         var runDefaults = workflowDefaults.Merge(job.Defaults);
+        using var timeoutTokenSource = CreateTimeoutTokenSource(job, cancellationToken);
+        var jobCancellationToken = timeoutTokenSource?.Token ?? cancellationToken;
+        var currentStepIndex = -1;
+        WorkflowStep? currentStep = null;
+        DateTimeOffset? currentStepStartedAt = null;
 
         if (!_runnerProvider.SupportsRunner(job.RunsOn))
         {
@@ -53,68 +62,110 @@ internal sealed class JobExecutor
             return CompleteJob(job, FailedStatus, startedAt, outputs, stepRecords, artifacts, errors, 0, 0, job.Steps.Count);
         }
 
-        for (var index = 0; index < job.Steps.Count; index++)
+        try
         {
-            var step = job.Steps[index];
-            cancellationToken.ThrowIfCancellationRequested();
-            output.WriteLine($"[{job.DisplayName}] {step.Name}");
-
-            var stepStartedAt = DateTimeOffset.UtcNow;
-            var stepResult = await ExecuteStepAsync(
-                job,
-                step,
-                index,
-                workflowEnv,
-                runDefaults,
-                projectRoot,
-                runId,
-                output,
-                error,
-                cancellationToken);
-            var stepFinishedAt = DateTimeOffset.UtcNow;
-
-            outputs.Merge(stepResult.Outputs);
-            errors.AddRange(stepResult.Errors);
-            stepRecords.Add(new StepRunRecord(
-                step.Name,
-                stepResult.Status,
-                stepResult.Command,
-                stepResult.ExitCode,
-                stepResult.LogPath,
-                stepStartedAt,
-                stepFinishedAt,
-                ToDurationMilliseconds(stepStartedAt, stepFinishedAt)));
-
-            if (stepResult.Status == FailedStatus)
+            for (var index = 0; index < job.Steps.Count; index++)
             {
-                failedSteps += stepResult.CountsAsFailedStep ? 1 : 0;
-                var remainingSteps = job.Steps.Skip(index + 1).ToArray();
-                stepRecords.AddRange(CreateSkippedStepRecords(remainingSteps));
-                skippedSteps += remainingSteps.Length;
-                break;
-            }
+                currentStepIndex = index;
+                var step = job.Steps[index];
+                currentStep = step;
+                jobCancellationToken.ThrowIfCancellationRequested();
+                output.WriteLine($"[{job.DisplayName}] {step.Name}");
 
-            successfulSteps++;
-        }
-
-        if (errors.Count == 0)
-        {
-            try
-            {
-                var artifactResult = await _runStore.SaveArtifactsAsync(
-                    runId,
-                    job.Name,
+                var stepStartedAt = DateTimeOffset.UtcNow;
+                currentStepStartedAt = stepStartedAt;
+                var stepResult = await ExecuteStepAsync(
+                    job,
+                    step,
+                    index,
+                    workflowEnv,
+                    runDefaults,
                     projectRoot,
-                    job.Artifacts,
-                    cancellationToken);
+                    runId,
+                    output,
+                    error,
+                    jobCancellationToken);
+                var stepFinishedAt = DateTimeOffset.UtcNow;
 
-                artifacts.AddRange(artifactResult.Artifacts);
-                errors.AddRange(artifactResult.Errors);
+                outputs.Merge(stepResult.Outputs);
+                errors.AddRange(stepResult.Errors);
+                stepRecords.Add(new StepRunRecord(
+                    step.Name,
+                    stepResult.Status,
+                    stepResult.Command,
+                    stepResult.ExitCode,
+                    stepResult.LogPath,
+                    stepStartedAt,
+                    stepFinishedAt,
+                    ToDurationMilliseconds(stepStartedAt, stepFinishedAt)));
+
+                if (stepResult.Status == FailedStatus)
+                {
+                    failedSteps += stepResult.CountsAsFailedStep ? 1 : 0;
+                    var remainingSteps = job.Steps.Skip(index + 1).ToArray();
+                    stepRecords.AddRange(CreateSkippedStepRecords(remainingSteps));
+                    skippedSteps += remainingSteps.Length;
+                    break;
+                }
+
+                successfulSteps++;
             }
-            catch (Exception ex) when (StorageError.IsRecoverable(ex))
+
+            if (errors.Count == 0)
             {
-                errors.Add(StorageError.Format($"saving artifacts for job '{job.Name}'", ex));
+                try
+                {
+                    var artifactResult = await _runStore.SaveArtifactsAsync(
+                        runId,
+                        job.Name,
+                        projectRoot,
+                        job.Artifacts,
+                        jobCancellationToken);
+
+                    artifacts.AddRange(artifactResult.Artifacts);
+                    errors.AddRange(artifactResult.Errors);
+                }
+                catch (Exception ex) when (StorageError.IsRecoverable(ex))
+                {
+                    errors.Add(StorageError.Format($"saving artifacts for job '{job.Name}'", ex));
+                }
             }
+        }
+        catch (OperationCanceledException) when (IsJobTimeout(timeoutTokenSource, cancellationToken))
+        {
+            var timedOutAt = DateTimeOffset.UtcNow;
+            errors.Add($"workflow.jobs.{job.Name} timed out after {job.TimeoutMinutes} minute(s).");
+
+            if (currentStep is not null && stepRecords.Count == currentStepIndex)
+            {
+                stepRecords.Add(new StepRunRecord(
+                    currentStep.Name,
+                    TimedOutStatus,
+                    currentStep.Run ?? currentStep.Uses ?? string.Empty,
+                    null,
+                    null,
+                    currentStepStartedAt,
+                    timedOutAt,
+                    ToDurationMilliseconds(currentStepStartedAt ?? timedOutAt, timedOutAt)));
+                failedSteps++;
+            }
+
+            var remainingStepStart = currentStepIndex < 0 ? 0 : currentStepIndex + 1;
+            var remainingSteps = job.Steps.Skip(remainingStepStart).ToArray();
+            stepRecords.AddRange(CreateSkippedStepRecords(remainingSteps));
+            skippedSteps += remainingSteps.Length;
+
+            return CompleteJob(
+                job,
+                TimedOutStatus,
+                startedAt,
+                outputs,
+                stepRecords,
+                artifacts,
+                errors,
+                successfulSteps,
+                failedSteps,
+                skippedSteps);
         }
 
         return CompleteJob(
@@ -128,6 +179,29 @@ internal sealed class JobExecutor
             successfulSteps,
             failedSteps,
             skippedSteps);
+    }
+
+    private CancellationTokenSource? CreateTimeoutTokenSource(
+        WorkflowJob job,
+        CancellationToken cancellationToken)
+    {
+        if (job.TimeoutMinutes is null)
+        {
+            return null;
+        }
+
+        var timeoutTokenSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutTokenSource.CancelAfter(_createJobTimeout(job.TimeoutMinutes.Value));
+        return timeoutTokenSource;
+    }
+
+    private static bool IsJobTimeout(
+        CancellationTokenSource? timeoutTokenSource,
+        CancellationToken externalCancellationToken)
+    {
+        return timeoutTokenSource is not null &&
+            timeoutTokenSource.IsCancellationRequested &&
+            !externalCancellationToken.IsCancellationRequested;
     }
 
     private async Task<StepExecutionOutcome> ExecuteStepAsync(
@@ -255,7 +329,11 @@ internal sealed class JobExecutor
             stepRecords,
             artifacts,
             errors,
-            job.Name);
+            job.Name,
+            job.TimeoutMinutes,
+            job.ContinueOnError,
+            job.Concurrency?.Group,
+            job.Concurrency?.CancelInProgress ?? false);
 
         return new JobExecutionOutcome(record, successfulSteps, failedSteps, skippedSteps);
     }

@@ -67,6 +67,10 @@ public sealed record WorkflowRunDefaults(
     }
 }
 
+public sealed record WorkflowJobConcurrency(
+    string Group,
+    bool CancelInProgress);
+
 public sealed record WorkflowTriggerValue(
     string Kind,
     string? Value,
@@ -112,6 +116,9 @@ public sealed record WorkflowJob
             runsOn,
             new Dictionary<string, string>(),
             WorkflowRunDefaults.Empty,
+            null,
+            false,
+            null,
             outputs,
             artifacts,
             steps)
@@ -129,6 +136,37 @@ public sealed record WorkflowJob
         IReadOnlyDictionary<string, string> outputs,
         IReadOnlyList<WorkflowArtifact> artifacts,
         IReadOnlyList<WorkflowStep> steps)
+        : this(
+            name,
+            displayName,
+            needs,
+            ifExpression,
+            runsOn,
+            env,
+            defaults,
+            null,
+            false,
+            null,
+            outputs,
+            artifacts,
+            steps)
+    {
+    }
+
+    public WorkflowJob(
+        string name,
+        string? displayName,
+        IReadOnlyList<string> needs,
+        string? ifExpression,
+        string runsOn,
+        IReadOnlyDictionary<string, string> env,
+        WorkflowRunDefaults? defaults,
+        int? timeoutMinutes,
+        bool continueOnError,
+        WorkflowJobConcurrency? concurrency,
+        IReadOnlyDictionary<string, string> outputs,
+        IReadOnlyList<WorkflowArtifact> artifacts,
+        IReadOnlyList<WorkflowStep> steps)
     {
         Name = name;
         DisplayName = string.IsNullOrWhiteSpace(displayName) ? name : displayName;
@@ -137,6 +175,9 @@ public sealed record WorkflowJob
         RunsOn = runsOn;
         Env = env;
         Defaults = defaults ?? WorkflowRunDefaults.Empty;
+        TimeoutMinutes = timeoutMinutes;
+        ContinueOnError = continueOnError;
+        Concurrency = concurrency;
         Outputs = outputs;
         Artifacts = artifacts;
         Steps = steps;
@@ -155,6 +196,12 @@ public sealed record WorkflowJob
     public IReadOnlyDictionary<string, string> Env { get; init; }
 
     public WorkflowRunDefaults Defaults { get; init; }
+
+    public int? TimeoutMinutes { get; init; }
+
+    public bool ContinueOnError { get; init; }
+
+    public WorkflowJobConcurrency? Concurrency { get; init; }
 
     public IReadOnlyDictionary<string, string> Outputs { get; init; }
 

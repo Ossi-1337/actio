@@ -11,6 +11,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
     private const string FailedStatus = "Failed";
     private const string RunningStatus = "Running";
     private const string SkippedStatus = "Skipped";
+    private const string TimedOutStatus = "TimedOut";
 
     private readonly IRunStore _runStore;
     private readonly ConditionEvaluator _conditionEvaluator;
@@ -19,7 +20,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
     public WorkflowExecutor(
         IRunnerProvider runnerProvider,
         IRunStore? runStore = null,
-        IActionCache? actionCache = null)
+        IActionCache? actionCache = null,
+        Func<int, TimeSpan>? createJobTimeout = null)
     {
         _runStore = runStore ?? new NullRunStore();
         var cache = actionCache ?? NullActionCache.Instance;
@@ -27,7 +29,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         var outputMarkerParser = new OutputMarkerParser();
         _conditionEvaluator = new ConditionEvaluator();
         var actionResolver = new ActionResolver(new ActionParser(), cache, githubActionSourceProvider);
-        _jobExecutor = new JobExecutor(runnerProvider, _runStore, outputMarkerParser, actionResolver);
+        _jobExecutor = new JobExecutor(runnerProvider, _runStore, outputMarkerParser, actionResolver, createJobTimeout);
     }
 
     public async Task<WorkflowExecutionResult> ExecuteAsync(
@@ -119,9 +121,13 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 failedSteps += outcome.FailedSteps;
                 skippedSteps += outcome.SkippedSteps;
                 jobRecords.Add(outcome.Job);
-                jobStatuses[job.Name] = outcome.Job.Status;
+                var toleratedFailure = job.ContinueOnError && IsUnsuccessfulJobStatus(outcome.Job.Status);
+                jobStatuses[job.Name] = toleratedFailure ? SuccessStatus : outcome.Job.Status;
                 jobOutputs[job.Name] = outcome.Job.Outputs;
-                errors.AddRange(outcome.Job.Status == FailedStatus ? outcome.Job.Errors : []);
+                errors.AddRange(
+                    IsUnsuccessfulJobStatus(outcome.Job.Status) && !toleratedFailure
+                        ? outcome.Job.Errors
+                        : []);
                 runArtifacts.AddRange(outcome.Job.Artifacts);
                 runOutputs.AddRange(outcome.Job.Outputs.Select(item =>
                     new WorkflowRunOutput(job.Name, item.Key, item.Value)));
@@ -279,7 +285,11 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             JobExecutor.CreateSkippedStepRecords(job.Steps),
             [],
             [reason],
-            job.Name);
+            job.Name,
+            job.TimeoutMinutes,
+            job.ContinueOnError,
+            job.Concurrency?.Group,
+            job.Concurrency?.CancelInProgress ?? false);
 
         return new JobExecutionOutcome(record, 0, 0, job.Steps.Count);
     }
@@ -287,7 +297,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
     private static JobExecutionOutcome CreateFailedSkippedJobOutcome(WorkflowJob job, string error)
     {
         var record = new JobRunRecord(
-            job.Name,
+            job.DisplayName,
             FailedStatus,
             job.RunsOn,
             job.Needs,
@@ -298,7 +308,12 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             new Dictionary<string, string>(),
             JobExecutor.CreateSkippedStepRecords(job.Steps),
             [],
-            [error]);
+            [error],
+            job.Name,
+            job.TimeoutMinutes,
+            job.ContinueOnError,
+            job.Concurrency?.Group,
+            job.Concurrency?.CancelInProgress ?? false);
 
         return new JobExecutionOutcome(record, 0, 0, job.Steps.Count);
     }
@@ -322,5 +337,11 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
     private static long ToDurationMilliseconds(DateTimeOffset startedAt, DateTimeOffset finishedAt)
     {
         return Math.Max(0, (long)(finishedAt - startedAt).TotalMilliseconds);
+    }
+
+    private static bool IsUnsuccessfulJobStatus(string status)
+    {
+        return string.Equals(status, FailedStatus, StringComparison.Ordinal) ||
+            string.Equals(status, TimedOutStatus, StringComparison.Ordinal);
     }
 }

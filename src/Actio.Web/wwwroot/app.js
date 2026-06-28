@@ -296,6 +296,7 @@ function renderGraph(run) {
             <div class="job-name">${escapeHtml(job.name)}</div>
             <div class="muted">${escapeHtml(job.status)} · ${job.steps.length} steps</div>
             <div class="muted">${job.needs.length ? `needs ${escapeHtml(job.needs.join(", "))}` : "no dependencies"}</div>
+            ${renderJobControlSummary(job)}
           </div>
         `).join("")}
       </div>
@@ -347,6 +348,7 @@ function renderJobs(run) {
         <span class="pill ${statusClass(job.status)}">${escapeHtml(job.status)}</span>
       </div>
       <div class="job-body">
+        ${renderJobControls(job)}
         ${job.errors.length ? `<div class="empty">${job.errors.map(escapeHtml).join("<br>")}</div>` : ""}
         ${job.steps.map(step => renderStep(run, job, step)).join("")}
       </div>
@@ -748,10 +750,51 @@ function summaryCell(label, value) {
 function statusClass(status) {
   const value = (status ?? "").toLowerCase();
   if (value === "success") return "status-success";
-  if (value === "failed") return "status-failed";
+  if (value === "failed" || value === "timedout") return "status-failed";
   if (value === "skipped") return "status-skipped";
   if (value === "running") return "status-running";
   return "";
+}
+
+function renderJobControls(job) {
+  const items = jobControlItems(job);
+  if (items.length === 0) {
+    return "";
+  }
+
+  return `
+    <div class="job-metadata">
+      ${items.map(item => `<span class="pill">${escapeHtml(item)}</span>`).join("")}
+    </div>
+  `;
+}
+
+function renderJobControlSummary(job) {
+  const summary = jobControlSummary(job);
+  return summary ? `<div class="muted">${escapeHtml(summary)}</div>` : "";
+}
+
+function jobControlSummary(job) {
+  return jobControlItems(job).join(" · ");
+}
+
+function jobControlItems(job) {
+  const items = [];
+
+  if (job.timeoutMinutes) {
+    items.push(`timeout ${job.timeoutMinutes} min`);
+  }
+
+  if (job.continueOnError) {
+    items.push("continue on error");
+  }
+
+  if (job.concurrencyGroup) {
+    const suffix = job.concurrencyCancelInProgress ? " (cancel in progress)" : "";
+    items.push(`concurrency ${job.concurrencyGroup}${suffix}`);
+  }
+
+  return items;
 }
 
 function formatDate(value) {
