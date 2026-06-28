@@ -4,15 +4,18 @@ public sealed record WorkflowDocument(
     string Name,
     IReadOnlyDictionary<string, string> Env,
     IReadOnlyDictionary<string, WorkflowJob> Jobs,
-    IReadOnlyList<WorkflowTrigger> Triggers)
+    IReadOnlyList<WorkflowTrigger> Triggers,
+    WorkflowRunDefaults? Defaults = null)
 {
     public WorkflowDocument(
         string name,
         IReadOnlyDictionary<string, string> env,
         IReadOnlyDictionary<string, WorkflowJob> jobs)
-        : this(name, env, jobs, [])
+        : this(name, env, jobs, [], WorkflowRunDefaults.Empty)
     {
     }
+
+    public WorkflowRunDefaults Defaults { get; init; } = Defaults ?? WorkflowRunDefaults.Empty;
 
     public int StepCount => Jobs.Values.Sum(job => job.Steps.Count);
 }
@@ -49,6 +52,20 @@ public sealed record WorkflowDispatchInput(
     IReadOnlyList<string> Options);
 
 public sealed record WorkflowSchedule(string Cron);
+
+public sealed record WorkflowRunDefaults(
+    string? Shell,
+    string? WorkingDirectory)
+{
+    public static WorkflowRunDefaults Empty { get; } = new(null, null);
+
+    public WorkflowRunDefaults Merge(WorkflowRunDefaults other)
+    {
+        return new WorkflowRunDefaults(
+            other.Shell ?? Shell,
+            other.WorkingDirectory ?? WorkingDirectory);
+    }
+}
 
 public sealed record WorkflowTriggerValue(
     string Kind,
@@ -87,11 +104,39 @@ public sealed record WorkflowJob
         IReadOnlyDictionary<string, string> outputs,
         IReadOnlyList<WorkflowArtifact> artifacts,
         IReadOnlyList<WorkflowStep> steps)
+        : this(
+            name,
+            null,
+            needs,
+            ifExpression,
+            runsOn,
+            new Dictionary<string, string>(),
+            WorkflowRunDefaults.Empty,
+            outputs,
+            artifacts,
+            steps)
+    {
+    }
+
+    public WorkflowJob(
+        string name,
+        string? displayName,
+        IReadOnlyList<string> needs,
+        string? ifExpression,
+        string runsOn,
+        IReadOnlyDictionary<string, string> env,
+        WorkflowRunDefaults? defaults,
+        IReadOnlyDictionary<string, string> outputs,
+        IReadOnlyList<WorkflowArtifact> artifacts,
+        IReadOnlyList<WorkflowStep> steps)
     {
         Name = name;
+        DisplayName = string.IsNullOrWhiteSpace(displayName) ? name : displayName;
         Needs = needs;
         If = ifExpression;
         RunsOn = runsOn;
+        Env = env;
+        Defaults = defaults ?? WorkflowRunDefaults.Empty;
         Outputs = outputs;
         Artifacts = artifacts;
         Steps = steps;
@@ -99,11 +144,17 @@ public sealed record WorkflowJob
 
     public string Name { get; init; }
 
+    public string DisplayName { get; init; }
+
     public IReadOnlyList<string> Needs { get; init; }
 
     public string? If { get; init; }
 
     public string RunsOn { get; init; }
+
+    public IReadOnlyDictionary<string, string> Env { get; init; }
+
+    public WorkflowRunDefaults Defaults { get; init; }
 
     public IReadOnlyDictionary<string, string> Outputs { get; init; }
 

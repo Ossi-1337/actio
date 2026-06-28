@@ -53,12 +53,44 @@ public sealed class DockerRunnerProviderTests
             "echo remote",
             Directory.GetCurrentDirectory(),
             new Dictionary<string, string>(),
-            [new StepExecutionMount(actionPath, "/actio/action", ReadOnly: true)]);
+            AdditionalMounts: [new StepExecutionMount(actionPath, "/actio/action", ReadOnly: true)]);
 
         var startInfo = DockerRunnerProvider.CreateShellStepStartInfo(request, "alpine:3.20", "actio-test");
         var args = startInfo.ArgumentList.ToArray();
 
         Assert.Contains("-v", args);
         Assert.Contains($"{Path.GetFullPath(actionPath)}:/actio/action:ro", args);
+    }
+
+    [Fact]
+    public void CreateShellStepStartInfo_UsesConfiguredShellAndWorkingDirectory()
+    {
+        var request = new StepExecutionRequest(
+            "test",
+            "Run tests",
+            "ubuntu-latest",
+            "dotnet test",
+            Directory.GetCurrentDirectory(),
+            new Dictionary<string, string>(),
+            Shell: "bash",
+            WorkingDirectory: "src/Actio.Core");
+
+        var startInfo = DockerRunnerProvider.CreateShellStepStartInfo(request, "ubuntu:24.04", "actio-test");
+        var args = startInfo.ArgumentList.ToArray();
+
+        Assert.Contains("bash", args);
+        Assert.Contains("/workspace/src/Actio.Core", args);
+    }
+
+    [Theory]
+    [InlineData(null, "/workspace")]
+    [InlineData("", "/workspace")]
+    [InlineData("src", "/workspace/src")]
+    [InlineData("src\\Actio.Core", "/workspace/src/Actio.Core")]
+    public void ToContainerWorkingDirectory_MapsRelativePathsInsideWorkspace(
+        string? workingDirectory,
+        string expected)
+    {
+        Assert.Equal(expected, DockerRunnerProvider.ToContainerWorkingDirectory(workingDirectory));
     }
 }

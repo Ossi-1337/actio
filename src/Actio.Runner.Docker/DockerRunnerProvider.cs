@@ -108,9 +108,10 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             request.ProjectRoot,
             request.Environment,
             containerName,
+            request.WorkingDirectory,
             request.AdditionalMounts);
         startInfo.ArgumentList.Add(image);
-        startInfo.ArgumentList.Add("sh");
+        startInfo.ArgumentList.Add(NormalizeShell(request.Shell));
         startInfo.ArgumentList.Add("-lc");
         startInfo.ArgumentList.Add(BuildShellScript(request.Command));
 
@@ -127,6 +128,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             request.ProjectRoot,
             request.Environment,
             containerName,
+            null,
             []);
         startInfo.ArgumentList.Add(request.Image);
         return startInfo;
@@ -138,6 +140,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         string projectRoot,
         IReadOnlyDictionary<string, string> environment,
         string containerName,
+        string? workingDirectory,
         IReadOnlyList<StepExecutionMount>? additionalMounts)
     {
         var startInfo = new ProcessStartInfo("docker")
@@ -162,7 +165,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         startInfo.ArgumentList.Add("-v");
         startInfo.ArgumentList.Add($"{Path.GetFullPath(projectRoot)}:/workspace");
         startInfo.ArgumentList.Add("-w");
-        startInfo.ArgumentList.Add("/workspace");
+        startInfo.ArgumentList.Add(ToContainerWorkingDirectory(workingDirectory));
 
         foreach (var mount in additionalMounts ?? [])
         {
@@ -178,6 +181,22 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         }
 
         return startInfo;
+    }
+
+    private static string NormalizeShell(string? shell)
+        => string.IsNullOrWhiteSpace(shell) ? "sh" : shell;
+
+    internal static string ToContainerWorkingDirectory(string? workingDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(workingDirectory))
+        {
+            return "/workspace";
+        }
+
+        var normalized = workingDirectory.Replace('\\', '/').Trim('/');
+        return string.IsNullOrWhiteSpace(normalized)
+            ? "/workspace"
+            : $"/workspace/{normalized}";
     }
 
     internal static string BuildShellScript(string command)

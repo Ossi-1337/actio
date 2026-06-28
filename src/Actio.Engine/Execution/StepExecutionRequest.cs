@@ -7,6 +7,8 @@ public sealed record StepExecutionRequest(
     string Command,
     string ProjectRoot,
     IReadOnlyDictionary<string, string> Environment,
+    string? Shell = null,
+    string? WorkingDirectory = null,
     IReadOnlyList<StepExecutionMount>? AdditionalMounts = null)
 {
     public IReadOnlyList<StepExecutionMount> AdditionalMounts { get; init; } = AdditionalMounts ?? [];

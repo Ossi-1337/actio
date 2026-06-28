@@ -112,7 +112,9 @@ public sealed class ActioWebDataService
     {
         var run = await GetRunAsync(runId, cancellationToken);
         var step = run?.Jobs
-            .FirstOrDefault(job => string.Equals(job.Name, jobName, StringComparison.Ordinal))?
+            .FirstOrDefault(job =>
+                string.Equals(job.Id, jobName, StringComparison.Ordinal) ||
+                string.Equals(job.Name, jobName, StringComparison.Ordinal))?
             .Steps
             .FirstOrDefault(item => string.Equals(item.Name, stepName, StringComparison.Ordinal));
 

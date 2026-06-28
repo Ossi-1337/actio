@@ -158,6 +158,27 @@ public sealed class ActioWebDataServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task GetStepLogAsync_CanResolveJobByIdWhenDisplayNameDiffers()
+    {
+        var workflowPath = WriteWorkflow("ci.yml", "CI");
+        var logPath = Path.Combine(_actioHome, "logs", "run-1", "test", "001-Test.log");
+        Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
+        await File.WriteAllTextAsync(logPath, "hello display log");
+        await SaveRunAsync(CreateRun(
+            "run-1",
+            "CI",
+            workflowPath,
+            logPath: logPath,
+            jobName: "Run tests",
+            jobId: "test"));
+
+        var log = await CreateService().GetStepLogAsync("run-1", "test", "Test");
+
+        Assert.NotNull(log);
+        Assert.Equal("hello display log", log.Content);
+    }
+
+    [Fact]
     public async Task GetArtifactAsync_ReturnsFileArtifact()
     {
         var workflowPath = WriteWorkflow("ci.yml", "CI");
@@ -384,7 +405,9 @@ public sealed class ActioWebDataServiceTests : IDisposable
         DateTimeOffset? startedAt = null,
         DateTimeOffset? finishedAt = null,
         long durationMilliseconds = 10,
-        WorkflowRunTrigger? runTrigger = null)
+        WorkflowRunTrigger? runTrigger = null,
+        string jobName = "test",
+        string? jobId = null)
     {
         var start = startedAt ?? DateTimeOffset.UtcNow;
         var finish = finishedAt ?? start;
@@ -403,7 +426,7 @@ public sealed class ActioWebDataServiceTests : IDisposable
             durationMilliseconds,
             [
                 new JobRunRecord(
-                    "test",
+                    jobName,
                     status,
                     "ubuntu-latest",
                     [],
@@ -414,7 +437,8 @@ public sealed class ActioWebDataServiceTests : IDisposable
                     new Dictionary<string, string>(),
                     [new StepRunRecord("Test", status, "dotnet test", 0, logPath, start, finish, durationMilliseconds)],
                     artifact,
-                    [])
+                    [],
+                    jobId)
             ],
             [],
             artifact,

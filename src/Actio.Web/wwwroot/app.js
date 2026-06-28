@@ -355,7 +355,8 @@ function renderJobs(run) {
 }
 
 function renderStep(run, job, step) {
-  const key = logKey(run.runId, job.name, step.name);
+  const jobId = job.id ?? job.name;
+  const key = logKey(run.runId, jobId, step.name);
   const isOpen = state.openLogs.has(key);
   const content = state.logContents.get(key) ?? "Loading...";
 
@@ -366,9 +367,9 @@ function renderStep(run, job, step) {
         <span class="job-name">${escapeHtml(step.name)}</span>
         <span class="run-sub muted">${escapeHtml(step.status)} · ${formatDuration(step.durationMilliseconds)}</span>
       </span>
-      ${step.logPath ? `<button class="log-button" data-log-key="${escapeHtml(key)}" data-job="${escapeHtml(job.name)}" data-step="${escapeHtml(step.name)}">Log</button>` : `<span class="muted">No log</span>`}
+      ${step.logPath ? `<button class="log-button" data-log-key="${escapeHtml(key)}" data-job="${escapeHtml(jobId)}" data-step="${escapeHtml(step.name)}">Log</button>` : `<span class="muted">No log</span>`}
     </div>
-    <pre class="log-view" ${isOpen ? "" : "hidden"} data-log-key="${escapeHtml(key)}" data-job="${escapeHtml(job.name)}" data-step="${escapeHtml(step.name)}">${escapeHtml(content)}</pre>
+    <pre class="log-view" ${isOpen ? "" : "hidden"} data-log-key="${escapeHtml(key)}" data-job="${escapeHtml(jobId)}" data-step="${escapeHtml(step.name)}">${escapeHtml(content)}</pre>
   `;
 }
 

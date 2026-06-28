@@ -104,6 +104,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 var outcome = await ExecuteOrSkipJobAsync(
                     job,
                     workflow.Env,
+                    workflow.Defaults,
                     options.ProjectRoot,
                     options.RunTrigger.Inputs,
                     options.RunTrigger.EventPayload,
@@ -186,6 +187,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
     private async Task<JobExecutionOutcome> ExecuteOrSkipJobAsync(
         WorkflowJob job,
         IReadOnlyDictionary<string, string> workflowEnv,
+        WorkflowRunDefaults workflowDefaults,
         string projectRoot,
         IReadOnlyDictionary<string, string> inputs,
         WorkflowEventPayload eventPayload,
@@ -214,7 +216,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         }
 
         return skipReason is null
-            ? await _jobExecutor.ExecuteAsync(job, workflowEnv, projectRoot, runId, output, error, cancellationToken)
+            ? await _jobExecutor.ExecuteAsync(job, workflowEnv, workflowDefaults, projectRoot, runId, output, error, cancellationToken)
             : CreateSkippedJobOutcome(job, skipReason);
     }
 
@@ -265,7 +267,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
     private static JobExecutionOutcome CreateSkippedJobOutcome(WorkflowJob job, string reason)
     {
         var record = new JobRunRecord(
-            job.Name,
+            job.DisplayName,
             SkippedStatus,
             job.RunsOn,
             job.Needs,
@@ -276,7 +278,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             new Dictionary<string, string>(),
             JobExecutor.CreateSkippedStepRecords(job.Steps),
             [],
-            [reason]);
+            [reason],
+            job.Name);
 
         return new JobExecutionOutcome(record, 0, 0, job.Steps.Count);
     }

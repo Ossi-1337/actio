@@ -29,6 +29,7 @@ internal sealed class JobExecutor
     public async Task<JobExecutionOutcome> ExecuteAsync(
         WorkflowJob job,
         IReadOnlyDictionary<string, string> workflowEnv,
+        WorkflowRunDefaults workflowDefaults,
         string projectRoot,
         string runId,
         TextWriter output,
@@ -43,6 +44,7 @@ internal sealed class JobExecutor
         var stepRecords = new List<StepRunRecord>();
         var outputs = new Dictionary<string, string>(job.Outputs, StringComparer.Ordinal);
         var artifacts = new List<WorkflowRunArtifact>();
+        var runDefaults = workflowDefaults.Merge(job.Defaults);
 
         if (!_runnerProvider.SupportsRunner(job.RunsOn))
         {
@@ -55,7 +57,7 @@ internal sealed class JobExecutor
         {
             var step = job.Steps[index];
             cancellationToken.ThrowIfCancellationRequested();
-            output.WriteLine($"[{job.Name}] {step.Name}");
+            output.WriteLine($"[{job.DisplayName}] {step.Name}");
 
             var stepStartedAt = DateTimeOffset.UtcNow;
             var stepResult = await ExecuteStepAsync(
@@ -63,6 +65,7 @@ internal sealed class JobExecutor
                 step,
                 index,
                 workflowEnv,
+                runDefaults,
                 projectRoot,
                 runId,
                 output,
@@ -132,6 +135,7 @@ internal sealed class JobExecutor
         WorkflowStep step,
         int stepIndex,
         IReadOnlyDictionary<string, string> workflowEnv,
+        WorkflowRunDefaults runDefaults,
         string projectRoot,
         string runId,
         TextWriter output,
@@ -159,7 +163,7 @@ internal sealed class JobExecutor
                 return StepExecutionOutcome.FailedWithoutExitCode(step.Uses ?? string.Empty, plan.Errors, collector.LogPath);
             }
 
-            var environment = CreateStepEnvironment(workflowEnv, plan.Environment);
+            var environment = CreateStepEnvironment(workflowEnv, job.Env, plan.Environment);
             var result = plan.Kind == StepExecutionKind.DockerImageAction
                 ? await _runnerProvider.ExecuteDockerActionAsync(
                     new DockerActionExecutionRequest(
@@ -178,6 +182,8 @@ internal sealed class JobExecutor
                         plan.Command!,
                         projectRoot,
                         environment,
+                        runDefaults.Shell,
+                        runDefaults.WorkingDirectory,
                         plan.AdditionalMounts),
                     collector,
                     cancellationToken);
@@ -237,7 +243,7 @@ internal sealed class JobExecutor
     {
         var finishedAt = DateTimeOffset.UtcNow;
         var record = new JobRunRecord(
-            job.Name,
+            job.DisplayName,
             status,
             job.RunsOn,
             job.Needs,
@@ -248,7 +254,8 @@ internal sealed class JobExecutor
             outputs,
             stepRecords,
             artifacts,
-            errors);
+            errors,
+            job.Name);
 
         return new JobExecutionOutcome(record, successfulSteps, failedSteps, skippedSteps);
     }
@@ -262,9 +269,11 @@ internal sealed class JobExecutor
 
     private static IReadOnlyDictionary<string, string> CreateStepEnvironment(
         IReadOnlyDictionary<string, string> workflowEnv,
+        IReadOnlyDictionary<string, string> jobEnv,
         IReadOnlyDictionary<string, string> actionEnv)
     {
         var environment = new Dictionary<string, string>(workflowEnv, StringComparer.Ordinal);
+        environment.Merge(jobEnv);
         environment.Merge(actionEnv);
         return environment;
     }

@@ -19,9 +19,12 @@ public sealed partial class WorkflowParser
 
     private static readonly HashSet<string> JobKeys = new(StringComparer.Ordinal)
     {
+        "name",
         "needs",
         "if",
         "runs-on",
+        "env",
+        "defaults",
         "outputs",
         "artifacts",
         "steps"
@@ -77,6 +80,23 @@ public sealed partial class WorkflowParser
     private static readonly HashSet<string> ScheduleKeys = new(StringComparer.Ordinal)
     {
         "cron"
+    };
+
+    private static readonly HashSet<string> DefaultsKeys = new(StringComparer.Ordinal)
+    {
+        "run"
+    };
+
+    private static readonly HashSet<string> DefaultsRunKeys = new(StringComparer.Ordinal)
+    {
+        "shell",
+        "working-directory"
+    };
+
+    private static readonly HashSet<string> SupportedDefaultShells = new(StringComparer.Ordinal)
+    {
+        "bash",
+        "sh"
     };
 
     private static readonly IReadOnlyDictionary<string, IReadOnlySet<string>> KnownActivityTypes =
@@ -150,6 +170,7 @@ public sealed partial class WorkflowParser
 
         var name = ReadRequiredScalar(errors, root, "name", "workflow.name");
         var env = ReadOptionalStringMap(errors, root, "env", "workflow.env");
+        var defaults = ReadRunDefaults(errors, root, "defaults", "workflow.defaults");
         var jobs = ReadJobs(errors, warnings, root);
         ValidateConditions(errors, jobs, triggers);
 
@@ -158,7 +179,7 @@ public sealed partial class WorkflowParser
             return WorkflowParseResult.Failed(errors, warnings);
         }
 
-        return WorkflowParseResult.Parsed(new WorkflowDocument(name!, env, jobs, triggers), warnings);
+        return WorkflowParseResult.Parsed(new WorkflowDocument(name!, env, jobs, triggers, defaults), warnings);
     }
 
     private static IReadOnlyDictionary<string, WorkflowJob> ReadJobs(
@@ -202,16 +223,29 @@ public sealed partial class WorkflowParser
 
             AddUnknownKeyErrors(errors, jobMap, JobKeys, $"workflow.jobs.{jobName}");
 
+            var displayName = ReadOptionalScalar(errors, jobMap, "name", $"workflow.jobs.{jobName}.name");
             var needs = ReadNeeds(errors, jobMap, $"workflow.jobs.{jobName}.needs");
             var condition = ReadOptionalScalar(errors, jobMap, "if", $"workflow.jobs.{jobName}.if");
             var runsOn = ReadRequiredScalar(errors, jobMap, "runs-on", $"workflow.jobs.{jobName}.runs-on");
+            var env = ReadOptionalStringMap(errors, jobMap, "env", $"workflow.jobs.{jobName}.env");
+            var defaults = ReadRunDefaults(errors, jobMap, "defaults", $"workflow.jobs.{jobName}.defaults");
             var outputs = ReadOptionalStringMap(errors, jobMap, "outputs", $"workflow.jobs.{jobName}.outputs");
             var artifacts = ReadArtifacts(errors, jobMap, jobName);
             var steps = ReadSteps(errors, warnings, jobMap, jobName);
 
             if (runsOn is not null)
             {
-                jobs[jobName] = new WorkflowJob(jobName, needs, condition, runsOn, outputs, artifacts, steps);
+                jobs[jobName] = new WorkflowJob(
+                    jobName,
+                    displayName,
+                    needs,
+                    condition,
+                    runsOn,
+                    env,
+                    defaults,
+                    outputs,
+                    artifacts,
+                    steps);
             }
         }
 
@@ -415,13 +449,6 @@ public sealed partial class WorkflowParser
             "workflow.run-name",
             "workflow.run-name is accepted for GitHub Actions compatibility but Actio does not use it as the run display name yet.");
         ValidatePermissionsCompatibility(errors, warnings, root);
-        ValidateCompatibilityMapping(
-            errors,
-            warnings,
-            root,
-            "defaults",
-            "workflow.defaults",
-            "workflow.defaults is accepted for GitHub Actions compatibility but Actio does not apply top-level defaults yet.");
         ValidateCompatibilityStringOrMapping(
             errors,
             warnings,
@@ -933,30 +960,6 @@ public sealed partial class WorkflowParser
         }
     }
 
-    private static void ValidateCompatibilityMapping(
-        List<string> errors,
-        List<string> warnings,
-        YamlMappingNode root,
-        string key,
-        string path,
-        string warning)
-    {
-        if (!TryGet(root, key, out var node))
-        {
-            return;
-        }
-
-        if (node is not YamlMappingNode map)
-        {
-            errors.Add($"{path} must be a mapping.");
-            return;
-        }
-
-        var errorCount = errors.Count;
-        ValidateScalarKeys(errors, map, path);
-        AddWarningIfNoNewErrors(errors, errorCount, warnings, warning);
-    }
-
     private static void ValidateCompatibilityStringOrMapping(
         List<string> errors,
         List<string> warnings,
@@ -1124,6 +1127,53 @@ public sealed partial class WorkflowParser
         return null;
     }
 
+    private static WorkflowRunDefaults ReadRunDefaults(
+        List<string> errors,
+        YamlMappingNode map,
+        string key,
+        string path)
+    {
+        if (!TryGet(map, key, out var node))
+        {
+            return WorkflowRunDefaults.Empty;
+        }
+
+        if (node is not YamlMappingNode defaultsMap)
+        {
+            errors.Add($"{path} must be a mapping.");
+            return WorkflowRunDefaults.Empty;
+        }
+
+        AddUnknownKeyErrors(errors, defaultsMap, DefaultsKeys, path);
+        if (!TryGet(defaultsMap, "run", out var runNode))
+        {
+            return WorkflowRunDefaults.Empty;
+        }
+
+        var runPath = $"{path}.run";
+        if (runNode is not YamlMappingNode runMap)
+        {
+            errors.Add($"{runPath} must be a mapping.");
+            return WorkflowRunDefaults.Empty;
+        }
+
+        AddUnknownKeyErrors(errors, runMap, DefaultsRunKeys, runPath);
+        var shell = ReadOptionalScalar(errors, runMap, "shell", $"{runPath}.shell");
+        var workingDirectory = ReadOptionalScalar(errors, runMap, "working-directory", $"{runPath}.working-directory");
+
+        if (shell is not null && !SupportedDefaultShells.Contains(shell))
+        {
+            errors.Add($"{runPath}.shell must be bash or sh.");
+        }
+
+        if (workingDirectory is not null && !IsSafeRelativePath(workingDirectory))
+        {
+            errors.Add($"{runPath}.working-directory must be a relative path inside the workspace.");
+        }
+
+        return new WorkflowRunDefaults(shell, workingDirectory);
+    }
+
     private static IReadOnlyList<string> ReadOptionalStringList(
         List<string> errors,
         YamlMappingNode map,
@@ -1261,6 +1311,18 @@ public sealed partial class WorkflowParser
 
     private static bool HasFiveCronFields(string cron)
         => cron.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Length == 5;
+
+    private static bool IsSafeRelativePath(string path)
+    {
+        if (Path.IsPathRooted(path) || path.StartsWith("/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return !path
+            .Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
+            .Any(segment => string.Equals(segment, "..", StringComparison.Ordinal));
+    }
 
     private static IReadOnlySet<string> CreatePullRequestActivityTypes()
     {

@@ -12,4 +12,8 @@ public sealed record JobRunRecord(
     IReadOnlyDictionary<string, string> Outputs,
     IReadOnlyList<StepRunRecord> Steps,
     IReadOnlyList<WorkflowRunArtifact> Artifacts,
-    IReadOnlyList<string> Errors);
+    IReadOnlyList<string> Errors,
+    string? Id = null)
+{
+    public string Id { get; init; } = Id ?? Name;
+}

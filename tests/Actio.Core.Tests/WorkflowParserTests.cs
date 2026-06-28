@@ -109,8 +109,9 @@ public sealed class WorkflowParserTests
         Assert.Contains(result.Warnings, warning => warning.Contains("workflow.run-name", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Warnings, warning => warning.Contains("workflow.on", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Warnings, warning => warning.Contains("workflow.permissions", StringComparison.OrdinalIgnoreCase));
-        Assert.Contains(result.Warnings, warning => warning.Contains("workflow.defaults", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Warnings, warning => warning.Contains("workflow.concurrency", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(result.Warnings, warning => warning.Contains("workflow.defaults", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal("bash", result.Workflow!.Defaults.Shell);
         var trigger = Assert.Single(result.Workflow!.Triggers);
         Assert.Equal("push", trigger.EventName);
         Assert.NotNull(trigger.Configuration);
@@ -148,6 +149,70 @@ public sealed class WorkflowParserTests
         Assert.Contains(result.Errors, error => error == "workflow.defaults must be a mapping.");
         Assert.Contains(result.Errors, error => error == "workflow.concurrency must be a string or a mapping.");
         Assert.Empty(result.Warnings);
+    }
+
+    [Fact]
+    public void Parse_AcceptsJobIdentityEnvAndDefaults()
+    {
+        var result = Parse(
+            """
+            name: CI
+            defaults:
+              run:
+                shell: sh
+                working-directory: src
+            jobs:
+              test:
+                name: Run tests
+                env:
+                  DOTNET_NOLOGO: "true"
+                defaults:
+                  run:
+                    shell: bash
+                    working-directory: src/Actio.Core
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal("sh", result.Workflow!.Defaults.Shell);
+        Assert.Equal("src", result.Workflow.Defaults.WorkingDirectory);
+
+        var job = Assert.Single(result.Workflow.Jobs.Values);
+        Assert.Equal("test", job.Name);
+        Assert.Equal("Run tests", job.DisplayName);
+        Assert.Equal("true", job.Env["DOTNET_NOLOGO"]);
+        Assert.Equal("bash", job.Defaults.Shell);
+        Assert.Equal("src/Actio.Core", job.Defaults.WorkingDirectory);
+    }
+
+    [Fact]
+    public void Parse_RejectsUnsupportedDefaults()
+    {
+        var result = Parse(
+            """
+            name: CI
+            defaults:
+              run:
+                shell: pwsh
+                working-directory: ../outside
+            jobs:
+              test:
+                defaults:
+                  run:
+                    working-directory: /absolute
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "workflow.defaults.run.shell must be bash or sh.");
+        Assert.Contains(result.Errors, error => error == "workflow.defaults.run.working-directory must be a relative path inside the workspace.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.defaults.run.working-directory must be a relative path inside the workspace.");
     }
 
     [Fact]

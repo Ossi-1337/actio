@@ -98,6 +98,91 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_UsesJobDisplayNameInOutputAndRunRecord()
+    {
+        var runner = new FakeRunnerProvider([0]);
+        var store = new RecordingRunStore();
+        var workflow = new WorkflowDocument(
+            "CI",
+            new Dictionary<string, string>(),
+            new Dictionary<string, WorkflowJob>
+            {
+                ["test"] = new WorkflowJob(
+                    "test",
+                    "Run tests",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    WorkflowRunDefaults.Empty,
+                    new Dictionary<string, string>(),
+                    [],
+                    [new WorkflowStep("Test", "dotnet test", null)])
+            });
+
+        using var output = new StringWriter();
+
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            output,
+            TextWriter.Null);
+
+        Assert.True(result.Success);
+        var job = Assert.Single(store.SavedRecords.Last().Jobs);
+        Assert.Equal("test", job.Id);
+        Assert.Equal("Run tests", job.Name);
+        Assert.Contains("[Run tests] Test", output.ToString());
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_MergesJobEnvAndPassesRunDefaultsToRunner()
+    {
+        var runner = new FakeRunnerProvider([0]);
+        var workflow = new WorkflowDocument(
+            "CI",
+            new Dictionary<string, string>
+            {
+                ["DOTNET_NOLOGO"] = "false",
+                ["WORKFLOW_ONLY"] = "workflow"
+            },
+            new Dictionary<string, WorkflowJob>
+            {
+                ["test"] = new WorkflowJob(
+                    "test",
+                    null,
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>
+                    {
+                        ["DOTNET_NOLOGO"] = "true",
+                        ["JOB_ONLY"] = "job"
+                    },
+                    new WorkflowRunDefaults("bash", "src/Actio.Core"),
+                    new Dictionary<string, string>(),
+                    [],
+                    [new WorkflowStep("Test", "dotnet test", null)])
+            },
+            [],
+            new WorkflowRunDefaults("sh", "src"));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success);
+        var request = Assert.Single(runner.Requests);
+        Assert.Equal("true", request.Environment["DOTNET_NOLOGO"]);
+        Assert.Equal("workflow", request.Environment["WORKFLOW_ONLY"]);
+        Assert.Equal("job", request.Environment["JOB_ONLY"]);
+        Assert.Equal("bash", request.Shell);
+        Assert.Equal("src/Actio.Core", request.WorkingDirectory);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_StopsAfterFailedStep()
     {
         var runner = new FakeRunnerProvider([0, 42]);
