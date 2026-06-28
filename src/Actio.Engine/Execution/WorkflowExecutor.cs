@@ -106,6 +106,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                     workflow.Env,
                     options.ProjectRoot,
                     options.RunTrigger.Inputs,
+                    options.RunTrigger.EventPayload,
                     runId,
                     jobStatuses,
                     jobOutputs,
@@ -187,6 +188,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         IReadOnlyDictionary<string, string> workflowEnv,
         string projectRoot,
         IReadOnlyDictionary<string, string> inputs,
+        WorkflowEventPayload eventPayload,
         string runId,
         IReadOnlyDictionary<string, string> jobStatuses,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
@@ -197,7 +199,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         var skipReason = GetDependencySkipReason(job, jobStatuses);
         if (skipReason is null)
         {
-            var condition = _conditionEvaluator.Evaluate(job.If, jobOutputs, inputs);
+            var condition = _conditionEvaluator.Evaluate(job.If, jobOutputs, inputs, eventPayload);
 
             if (!condition.Success)
             {

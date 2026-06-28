@@ -89,6 +89,12 @@ public sealed class ActioWebDataServiceTests : IDisposable
         var run = Assert.Single(await CreateService().GetRunsAsync());
 
         Assert.Equal("repository_dispatch (Local API)", run.Trigger);
+
+        var detail = await CreateService().GetRunAsync("run-1");
+        Assert.NotNull(detail);
+        Assert.Equal("repository_dispatch", detail.RunTrigger.EventPayload.EventName);
+        Assert.Equal("Local API", detail.RunTrigger.EventPayload.Source);
+        Assert.Equal("deploy", detail.RunTrigger.EventPayload.Inputs["event_type"]);
     }
 
     [Fact]

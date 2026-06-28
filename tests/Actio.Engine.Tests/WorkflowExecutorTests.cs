@@ -309,6 +309,35 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_EvaluatesIfConditionFromEventPayload()
+    {
+        var runner = new FakeRunnerProvider([0]);
+        var workflow = new WorkflowDocument(
+            "CI",
+            new Dictionary<string, string>(),
+            new Dictionary<string, WorkflowJob>
+            {
+                ["test"] = new(
+                    "test",
+                    [],
+                    "${{ github.event.event_name == 'workflow_dispatch' }}",
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Test", "dotnet test", null)])
+            });
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var request = Assert.Single(runner.Requests);
+        Assert.Equal("test", request.JobName);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_ReturnsCleanFailureWhenRunStorageInitializationFails()
     {
         var runner = new FakeRunnerProvider([0]);

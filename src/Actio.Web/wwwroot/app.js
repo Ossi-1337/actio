@@ -273,6 +273,7 @@ function renderSummary(run) {
         ${summaryCell("Duration", formatDuration(run.durationMilliseconds))}
         ${summaryCell("Trigger", formatRunTrigger(run.runTrigger))}
         ${Object.keys(run.runTrigger?.inputs ?? {}).length ? summaryCell("Trigger inputs", formatRunInputs(run.runTrigger.inputs)) : ""}
+        ${run.runTrigger?.eventPayload ? summaryCell("Event payload", formatEventPayload(run.runTrigger.eventPayload)) : ""}
         ${run.triggers?.length ? summaryCell("Configured triggers", formatTriggers(run.triggers)) : ""}
         ${summaryCell("Workflow file", run.workflowPath ?? "Unknown")}
       </div>
@@ -786,6 +787,30 @@ function formatRunInputs(inputs) {
   return Object.entries(inputs)
     .map(([name, value]) => `${name}=${value}`)
     .join(", ");
+}
+
+function formatEventPayload(payload) {
+  const parts = [];
+  if (payload.eventName) {
+    parts.push(`event_name=${payload.eventName}`);
+  }
+
+  if (payload.source) {
+    parts.push(`source=${payload.source}`);
+  }
+
+  if (payload.action) {
+    parts.push(`action=${payload.action}`);
+  }
+
+  Object.entries(payload.inputs ?? {})
+    .forEach(([name, value]) => parts.push(`inputs.${name}=${value}`));
+
+  Object.entries(payload.properties ?? {})
+    .filter(([name]) => !["event_name", "eventName", "source", "action"].includes(name))
+    .forEach(([name, value]) => parts.push(`${name}=${value}`));
+
+  return parts.length ? parts.join(", ") : "No payload values";
 }
 
 function shortRunId(runId) {

@@ -51,6 +51,9 @@ public sealed class FileSystemRunStoreTests : IDisposable
         Assert.Equal("workflow_dispatch", loaded.RunTrigger.EventName);
         Assert.Equal("CLI", loaded.RunTrigger.Source);
         Assert.Equal("staging", loaded.RunTrigger.Inputs["environment"]);
+        Assert.Equal("workflow_dispatch", loaded.RunTrigger.EventPayload.EventName);
+        Assert.Equal("CLI", loaded.RunTrigger.EventPayload.Source);
+        Assert.Equal("staging", loaded.RunTrigger.EventPayload.Inputs["environment"]);
         Assert.True(File.Exists(Path.Combine(_root, "runs", runId, "run.json")));
     }
 
@@ -110,6 +113,8 @@ public sealed class FileSystemRunStoreTests : IDisposable
         Assert.Empty(loaded.Triggers);
         Assert.Equal("workflow_dispatch", loaded.RunTrigger.EventName);
         Assert.Equal("CLI", loaded.RunTrigger.Source);
+        Assert.Equal("workflow_dispatch", loaded.RunTrigger.EventPayload.EventName);
+        Assert.Equal("CLI", loaded.RunTrigger.EventPayload.Source);
     }
 
     [Fact]
@@ -150,6 +155,7 @@ public sealed class FileSystemRunStoreTests : IDisposable
         Assert.Equal("push", trigger.EventName);
         Assert.Empty(trigger.Filters.Branches);
         Assert.Empty(trigger.Filters.Paths);
+        Assert.Empty(trigger.ActivityTypes);
     }
 
     [Fact]

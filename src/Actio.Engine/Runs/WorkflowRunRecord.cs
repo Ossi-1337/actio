@@ -26,7 +26,8 @@ public sealed record WorkflowRunRecord(
 public sealed record WorkflowRunTrigger(
     string EventName,
     string Source,
-    IReadOnlyDictionary<string, string>? Inputs = null)
+    IReadOnlyDictionary<string, string>? Inputs = null,
+    WorkflowEventPayload? EventPayload = null)
 {
     public static WorkflowRunTrigger CliWorkflowDispatch { get; } = new(
         "workflow_dispatch",
@@ -34,4 +35,7 @@ public sealed record WorkflowRunTrigger(
         new Dictionary<string, string>());
 
     public IReadOnlyDictionary<string, string> Inputs { get; init; } = Inputs ?? new Dictionary<string, string>();
+
+    public WorkflowEventPayload EventPayload { get; init; } =
+        EventPayload ?? WorkflowEventPayload.Create(EventName, Source, inputs: Inputs);
 }

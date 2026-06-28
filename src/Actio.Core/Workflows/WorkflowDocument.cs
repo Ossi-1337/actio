@@ -22,13 +22,16 @@ public sealed record WorkflowTrigger(
     WorkflowTriggerValue? Configuration,
     WorkflowTriggerFilters? Filters = null,
     WorkflowDispatch? Dispatch = null,
-    IReadOnlyList<WorkflowSchedule>? Schedules = null)
+    IReadOnlyList<WorkflowSchedule>? Schedules = null,
+    IReadOnlyList<string>? ActivityTypes = null)
 {
     public WorkflowTriggerFilters Filters { get; init; } = Filters ?? WorkflowTriggerFilters.Empty;
 
     public WorkflowDispatch Dispatch { get; init; } = Dispatch ?? WorkflowDispatch.Empty;
 
     public IReadOnlyList<WorkflowSchedule> Schedules { get; init; } = Schedules ?? [];
+
+    public IReadOnlyList<string> ActivityTypes { get; init; } = ActivityTypes ?? [];
 }
 
 public sealed record WorkflowDispatch(

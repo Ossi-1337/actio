@@ -7,7 +7,8 @@ internal sealed partial class ConditionEvaluator
     public ConditionEvaluationResult Evaluate(
         string? expression,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
-        IReadOnlyDictionary<string, string> inputs)
+        IReadOnlyDictionary<string, string> inputs,
+        WorkflowEventPayload eventPayload)
     {
         if (expression is null)
         {
@@ -23,6 +24,14 @@ internal sealed partial class ConditionEvaluator
         {
             inputs.TryGetValue(condition.Name, out var actualInputValue);
             return string.Equals(actualInputValue, condition.ExpectedValue, StringComparison.Ordinal)
+                ? ConditionEvaluationResult.Run()
+                : ConditionEvaluationResult.Skip();
+        }
+
+        if (condition.Kind == WorkflowConditionExpressionKind.EventPayload)
+        {
+            var actualPayloadValue = eventPayload.GetValue(condition.Name);
+            return string.Equals(actualPayloadValue, condition.ExpectedValue, StringComparison.Ordinal)
                 ? ConditionEvaluationResult.Run()
                 : ConditionEvaluationResult.Skip();
         }

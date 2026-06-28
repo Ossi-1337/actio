@@ -195,6 +195,8 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Equal("run-1", executor.Options!.RunId);
         Assert.Equal("workflow_dispatch", executor.Options.RunTrigger.EventName);
         Assert.Equal("CLI", executor.Options.RunTrigger.Source);
+        Assert.Equal("workflow_dispatch", executor.Options.RunTrigger.EventPayload.EventName);
+        Assert.Equal("CLI", executor.Options.RunTrigger.EventPayload.Source);
         Assert.Equal(string.Empty, error.ToString());
     }
 
@@ -230,6 +232,8 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Equal(ExitCodes.Success, result.ExitCode);
         Assert.Equal("staging", result.Executor.Options!.RunTrigger.Inputs["environment"]);
         Assert.Equal("false", result.Executor.Options.RunTrigger.Inputs["dry-run"]);
+        Assert.Equal("staging", result.Executor.Options.RunTrigger.EventPayload.Inputs["environment"]);
+        Assert.Equal("false", result.Executor.Options.RunTrigger.EventPayload.Inputs["dry-run"]);
     }
 
     [Fact]

@@ -79,6 +79,38 @@ public sealed partial class WorkflowParser
         "cron"
     };
 
+    private static readonly IReadOnlyDictionary<string, IReadOnlySet<string>> KnownActivityTypes =
+        new Dictionary<string, IReadOnlySet<string>>(StringComparer.Ordinal)
+        {
+            ["issues"] = new HashSet<string>(StringComparer.Ordinal)
+            {
+                "opened",
+                "edited",
+                "deleted",
+                "transferred",
+                "pinned",
+                "unpinned",
+                "closed",
+                "reopened",
+                "assigned",
+                "unassigned",
+                "labeled",
+                "unlabeled",
+                "locked",
+                "unlocked",
+                "milestoned",
+                "demilestoned"
+            },
+            ["pull_request"] = CreatePullRequestActivityTypes(),
+            ["pull_request_target"] = CreatePullRequestActivityTypes(),
+            ["workflow_run"] = new HashSet<string>(StringComparer.Ordinal)
+            {
+                "requested",
+                "in_progress",
+                "completed"
+            }
+        };
+
     public WorkflowParseResult ParseFile(string workflowPath)
     {
         try
@@ -463,7 +495,8 @@ public sealed partial class WorkflowParser
                 var filters = ReadTriggerFilters(errors, valueNode, configurationPath);
                 var dispatch = ReadWorkflowDispatch(errors, eventName, valueNode, configurationPath);
                 var schedules = ReadWorkflowSchedules(errors, eventName, valueNode, configurationPath);
-                triggers.Add(new WorkflowTrigger(eventName, configuration, filters, dispatch, schedules));
+                var activityTypes = ReadActivityTypes(errors, warnings, eventName, valueNode, configurationPath);
+                triggers.Add(new WorkflowTrigger(eventName, configuration, filters, dispatch, schedules, activityTypes));
                 AddTriggerWarnings(warnings, eventName);
             }
 
@@ -552,6 +585,35 @@ public sealed partial class WorkflowParser
         }
 
         return new WorkflowDispatch(inputs);
+    }
+
+    private static IReadOnlyList<string> ReadActivityTypes(
+        List<string> errors,
+        List<string> warnings,
+        string eventName,
+        YamlNode node,
+        string path)
+    {
+        if (node is not YamlMappingNode map)
+        {
+            return [];
+        }
+
+        var activityTypes = ReadOptionalStringList(errors, map, "types", $"{path}.types");
+        if (activityTypes.Count == 0 || !KnownActivityTypes.TryGetValue(eventName, out var knownTypes))
+        {
+            return activityTypes;
+        }
+
+        foreach (var activityType in activityTypes)
+        {
+            if (!knownTypes.Contains(activityType))
+            {
+                warnings.Add($"{path}.types contains unknown activity type '{activityType}' for event '{eventName}'. Actio stores it as metadata but may not match it in future trigger evaluation.");
+            }
+        }
+
+        return activityTypes;
     }
 
     private static IReadOnlyList<WorkflowSchedule> ReadWorkflowSchedules(
@@ -1178,6 +1240,11 @@ public sealed partial class WorkflowParser
                 continue;
             }
 
+            if (condition.Kind == WorkflowConditionExpressionKind.EventPayload)
+            {
+                continue;
+            }
+
             var referencedJob = condition.ReferencedJob!;
             if (!jobs.ContainsKey(referencedJob))
             {
@@ -1194,6 +1261,30 @@ public sealed partial class WorkflowParser
 
     private static bool HasFiveCronFields(string cron)
         => cron.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Length == 5;
+
+    private static IReadOnlySet<string> CreatePullRequestActivityTypes()
+    {
+        return new HashSet<string>(StringComparer.Ordinal)
+        {
+            "assigned",
+            "unassigned",
+            "labeled",
+            "unlabeled",
+            "opened",
+            "edited",
+            "closed",
+            "reopened",
+            "synchronize",
+            "converted_to_draft",
+            "ready_for_review",
+            "locked",
+            "unlocked",
+            "review_requested",
+            "review_request_removed",
+            "auto_merge_enabled",
+            "auto_merge_disabled"
+        };
+    }
 
     private static void AddUnknownKeyErrors(
         List<string> errors,

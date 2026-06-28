@@ -199,9 +199,35 @@ public sealed class WorkflowParserTests
         var trigger = Assert.Single(result.Workflow!.Triggers);
         Assert.Equal("pull_request", trigger.EventName);
         Assert.Equal("mapping", trigger.Configuration!.Kind);
+        Assert.Equal(["opened", "synchronize"], trigger.ActivityTypes);
         Assert.Equal(["opened", "synchronize"], trigger.Configuration.Properties["types"].Items.Select(item => item.Value));
         Assert.Equal("main", Assert.Single(trigger.Configuration.Properties["branches"].Items).Value);
         Assert.Equal("src/**", Assert.Single(trigger.Configuration.Properties["paths"].Items).Value);
+    }
+
+    [Fact]
+    public void Parse_WarnsForUnknownKnownEventActivityType()
+    {
+        var result = Parse(
+            """
+            name: CI
+            on:
+              pull_request:
+                types:
+                  - opened
+                  - invented
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var trigger = Assert.Single(result.Workflow!.Triggers);
+        Assert.Equal(["opened", "invented"], trigger.ActivityTypes);
+        Assert.Contains(result.Warnings, warning => warning.Contains("unknown activity type 'invented'", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -654,6 +680,24 @@ public sealed class WorkflowParserTests
 
         Assert.False(result.Success);
         Assert.Contains(result.Errors, error => error.Contains("unsupported expression", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Parse_AcceptsGitHubEventPayloadConditionExpression()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                if: "${{ github.event.event_name == 'workflow_dispatch' }}"
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
     }
 
     [Fact]

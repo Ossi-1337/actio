@@ -5,7 +5,8 @@ namespace Actio.Core.Workflows;
 public enum WorkflowConditionExpressionKind
 {
     NeedsOutput,
-    Input
+    Input,
+    EventPayload
 }
 
 public sealed partial record WorkflowConditionExpression(
@@ -38,6 +39,17 @@ public sealed partial record WorkflowConditionExpression(
             return true;
         }
 
+        var eventPayloadMatch = EventPayloadConditionRegex().Match(expression);
+        if (eventPayloadMatch.Success)
+        {
+            condition = new WorkflowConditionExpression(
+                WorkflowConditionExpressionKind.EventPayload,
+                null,
+                eventPayloadMatch.Groups["path"].Value,
+                eventPayloadMatch.Groups["value"].Value);
+            return true;
+        }
+
         condition = null;
         return false;
     }
@@ -47,4 +59,7 @@ public sealed partial record WorkflowConditionExpression(
 
     [GeneratedRegex("^\\$\\{\\{\\s*inputs\\.(?<input>[A-Za-z0-9_-]+)\\s*==\\s*'(?<value>[^']*)'\\s*\\}\\}$")]
     private static partial Regex InputConditionRegex();
+
+    [GeneratedRegex("^\\$\\{\\{\\s*github\\.event\\.(?<path>[A-Za-z0-9_.-]+)\\s*==\\s*'(?<value>[^']*)'\\s*\\}\\}$")]
+    private static partial Regex EventPayloadConditionRegex();
 }
