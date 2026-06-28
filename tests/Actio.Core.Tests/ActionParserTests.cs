@@ -49,9 +49,62 @@ public sealed class ActionParserTests
             """);
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var input = result.Action!.Inputs["name"];
+        Assert.Equal("Name to greet", input.Description);
+        Assert.False(input.Required);
         var step = Assert.Single(result.Action!.Steps);
         Assert.Equal("Greet", step.Name);
         Assert.Equal("echo hello", step.Run);
+    }
+
+    [Fact]
+    public void Parse_AcceptsActionInputDefaultsAndRequiredFlags()
+    {
+        var result = Parse(
+            """
+            name: Say hello
+            inputs:
+              name:
+                description: Name to greet
+                required: true
+              punctuation:
+                default: "!"
+            runs:
+              using: composite
+              steps:
+                - name: Greet
+                  run: echo hello
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.True(result.Action!.Inputs["name"].Required);
+        Assert.Null(result.Action.Inputs["name"].Default);
+        Assert.False(result.Action.Inputs["punctuation"].Required);
+        Assert.Equal("!", result.Action.Inputs["punctuation"].Default);
+    }
+
+    [Fact]
+    public void Parse_RejectsInvalidActionInputMetadata()
+    {
+        var result = Parse(
+            """
+            name: Say hello
+            inputs:
+              name:
+                required: maybe
+              bad:
+                nested:
+                  value: no
+            runs:
+              using: composite
+              steps:
+                - name: Greet
+                  run: echo hello
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "action.inputs.name.required must be true or false.");
+        Assert.Contains(result.Errors, error => error == "action.inputs.bad.nested is not supported.");
     }
 
     [Fact]

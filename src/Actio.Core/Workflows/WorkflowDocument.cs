@@ -224,7 +224,8 @@ public sealed record WorkflowStep(
     string? WorkingDirectory = null,
     string? If = null,
     int? TimeoutMinutes = null,
-    bool ContinueOnError = false)
+    bool ContinueOnError = false,
+    IReadOnlyDictionary<string, string>? With = null)
 {
     public IReadOnlyDictionary<string, string> Env { get; init; } = Env ?? new Dictionary<string, string>();
 
@@ -233,4 +234,6 @@ public sealed record WorkflowStep(
     public int? TimeoutMinutes { get; init; } = TimeoutMinutes;
 
     public bool ContinueOnError { get; init; } = ContinueOnError;
+
+    public IReadOnlyDictionary<string, string> With { get; init; } = With ?? new Dictionary<string, string>();
 }

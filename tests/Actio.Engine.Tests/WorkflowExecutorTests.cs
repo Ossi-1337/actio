@@ -862,6 +862,116 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_BindsInputsForLocalCompositeAction()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-action-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(projectRoot, ".actio", "actions", "hello"));
+        await File.WriteAllTextAsync(
+            Path.Combine(projectRoot, ".actio", "actions", "hello", "action.yml"),
+            """
+            name: Hello
+            inputs:
+              name:
+                required: true
+              punctuation:
+                default: "!"
+            runs:
+              using: composite
+              steps:
+                - name: Greet
+                  run: echo "${{ inputs.name }}${{ inputs.punctuation }}"
+            """);
+
+        try
+        {
+            var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+            var cache = new RecordingActionCache();
+            var workflow = CreateWorkflow(
+                new WorkflowJob(
+                    "test",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [
+                        new WorkflowStep(
+                            "Use hello",
+                            null,
+                            "./.actio/actions/hello",
+                            With: new Dictionary<string, string>
+                            {
+                                ["name"] = "Actio"
+                            })
+                    ]));
+
+            var result = await new WorkflowExecutor(runner).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+            var request = Assert.Single(runner.Requests);
+            Assert.Equal("echo \"Actio!\"", request.Command);
+            Assert.Equal("Actio", request.Environment["INPUT_NAME"]);
+            Assert.Equal("!", request.Environment["INPUT_PUNCTUATION"]);
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_FailsLocalCompositeActionWhenRequiredInputIsMissing()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-action-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(projectRoot, ".actio", "actions", "hello"));
+        await File.WriteAllTextAsync(
+            Path.Combine(projectRoot, ".actio", "actions", "hello", "action.yml"),
+            """
+            name: Hello
+            inputs:
+              name:
+                required: true
+            runs:
+              using: composite
+              steps:
+                - name: Greet
+                  run: echo "${{ inputs.name }}"
+            """);
+
+        try
+        {
+            var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+            var cache = new RecordingActionCache();
+            var workflow = CreateWorkflow(
+                new WorkflowJob(
+                    "test",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Use hello", null, "./.actio/actions/hello")]));
+
+            var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.False(result.Success);
+            Assert.Empty(runner.Requests);
+            Assert.Empty(cache.Requests);
+            Assert.Contains(result.Errors, error => error.Contains("action.inputs.name is required", StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ExecuteAsync_RunsDockerImageAction()
     {
         var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
@@ -873,7 +983,16 @@ public sealed class WorkflowExecutorTests
                 null,
                 "ubuntu-latest",
                 new Dictionary<string, string>(),
-                [new WorkflowStep("Use image", null, "docker://alpine:3.20")]));
+                [
+                    new WorkflowStep(
+                        "Use image",
+                        null,
+                        "docker://alpine:3.20",
+                        With: new Dictionary<string, string>
+                        {
+                            ["node-version"] = "22"
+                        })
+                ]));
 
         var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
             workflow,
@@ -886,6 +1005,7 @@ public sealed class WorkflowExecutorTests
         var request = Assert.Single(runner.DockerActionRequests);
         Assert.Equal("alpine:3.20", request.Image);
         Assert.Equal("true", request.Environment["DOTNET_NOLOGO"]);
+        Assert.Equal("22", request.Environment["INPUT_NODE_VERSION"]);
         Assert.Equal("alpine:3.20", Assert.Single(cache.DockerImageRequests).Image);
     }
 
@@ -949,11 +1069,16 @@ public sealed class WorkflowExecutorTests
             actionPath,
             """
             name: Remote hello
+            inputs:
+              name:
+                required: true
+              punctuation:
+                default: "!"
             runs:
               using: composite
               steps:
                 - name: Greet
-                  run: echo remote
+                  run: echo "${{ inputs.name }}${{ inputs.punctuation }}"
             """);
 
         try
@@ -981,7 +1106,16 @@ public sealed class WorkflowExecutorTests
                     null,
                     "ubuntu-latest",
                     new Dictionary<string, string>(),
-                    [new WorkflowStep("Use GitHub action", null, "owner/repo/action@v1")]));
+                    [
+                        new WorkflowStep(
+                            "Use GitHub action",
+                            null,
+                            "owner/repo/action@v1",
+                            With: new Dictionary<string, string>
+                            {
+                                ["name"] = "Remote"
+                            })
+                    ]));
 
             var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
                 workflow,
@@ -996,7 +1130,9 @@ public sealed class WorkflowExecutorTests
             Assert.Equal("action", sourceRequest.ActionPath);
             Assert.Equal("v1", sourceRequest.Ref);
             var request = Assert.Single(runner.Requests);
-            Assert.Equal("echo remote", request.Command);
+            Assert.Equal("echo \"Remote!\"", request.Command);
+            Assert.Equal("Remote", request.Environment["INPUT_NAME"]);
+            Assert.Equal("!", request.Environment["INPUT_PUNCTUATION"]);
             Assert.Equal("/actio/action", request.Environment["GITHUB_ACTION_PATH"]);
             var mount = Assert.Single(request.AdditionalMounts);
             Assert.Equal(actionRoot, mount.HostPath);
@@ -1034,6 +1170,41 @@ public sealed class WorkflowExecutorTests
         var request = Assert.Single(runner.Requests);
         Assert.Contains("Actio checkout shim", request.Command, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(request.Environment.Keys, key => string.Equals(key, "GITHUB_ACTION_PATH", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_FailsCheckoutShimWhenWithInputsAreProvided()
+    {
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+        var cache = new RecordingActionCache();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Checkout",
+                        null,
+                        "actions/checkout@v4",
+                        With: new Dictionary<string, string>
+                        {
+                            ["path"] = "src"
+                        })
+                ]));
+
+        var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(Environment.CurrentDirectory),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Empty(cache.GitHubSourceRequests);
+        Assert.Empty(runner.Requests);
+        Assert.Contains(result.Errors, error => error.Contains("checkout@v4 with inputs is not supported", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

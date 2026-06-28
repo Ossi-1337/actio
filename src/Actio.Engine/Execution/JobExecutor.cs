@@ -447,7 +447,7 @@ internal sealed class JobExecutor
         }
 
         return action.IsDockerImageAction
-            ? StepExecutionPlan.DockerImageAction(action.Command!, action.DockerImage!)
+            ? StepExecutionPlan.DockerImageAction(action.Command!, action.DockerImage!, action.Environment)
             : StepExecutionPlan.ShellCommand(action.Command!, action.Environment, action.AdditionalMounts);
     }
 
@@ -684,8 +684,13 @@ internal sealed class JobExecutor
                 []);
         }
 
-        public static StepExecutionPlan DockerImageAction(string command, string dockerImage)
-            => new(true, StepExecutionKind.DockerImageAction, command, dockerImage, new Dictionary<string, string>(), [], []);
+        public static StepExecutionPlan DockerImageAction(
+            string command,
+            string dockerImage,
+            IReadOnlyDictionary<string, string> environment)
+        {
+            return new(true, StepExecutionKind.DockerImageAction, command, dockerImage, environment, [], []);
+        }
 
         public static StepExecutionPlan Failed(IReadOnlyList<string> errors)
             => new(false, StepExecutionKind.ShellCommand, null, null, new Dictionary<string, string>(), [], errors);

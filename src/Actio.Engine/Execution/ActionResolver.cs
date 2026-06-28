@@ -66,6 +66,12 @@ internal sealed class ActionResolver
             return ActionResolutionResult.Failed(parseResult.Errors);
         }
 
+        var inputBinding = ActionInputBinder.Bind(parseResult.Action!, step.With);
+        if (!inputBinding.Success)
+        {
+            return ActionResolutionResult.Failed(inputBinding.Errors);
+        }
+
         try
         {
             var contentHash = await ComputeContentHashAsync(actionPathResult.ActionPath!, cancellationToken);
@@ -76,7 +82,8 @@ internal sealed class ActionResolver
             return ActionResolutionResult.ResolvedLocalAction(
                 parseResult.Action!,
                 cacheEntry,
-                BuildCommand(parseResult.Action!));
+                BuildCommand(parseResult.Action!, inputBinding.Inputs),
+                inputBinding.Environment);
         }
         catch (Exception ex) when (StorageError.IsRecoverable(ex))
         {
@@ -97,7 +104,11 @@ internal sealed class ActionResolver
                 new DockerImageActionCacheRequest(uses, reference.Target, reference.IsPinned, reference.MutablePart),
                 cancellationToken);
 
-            return ActionResolutionResult.ResolvedDockerImage(uses, reference.Target, cacheEntry);
+            return ActionResolutionResult.ResolvedDockerImage(
+                uses,
+                reference.Target,
+                cacheEntry,
+                ActionInputBinder.CreateEnvironment(step.With));
         }
         catch (Exception ex) when (StorageError.IsRecoverable(ex))
         {
@@ -118,6 +129,11 @@ internal sealed class ActionResolver
 
         if (IsCheckoutShim(githubAction!))
         {
+            if (step.With.Count > 0)
+            {
+                return ActionResolutionResult.Failed(["actions/checkout@v4 with inputs is not supported by the Actio checkout shim yet."]);
+            }
+
             return ActionResolutionResult.ResolvedBuiltInAction(CheckoutShimCommand);
         }
 
@@ -143,15 +159,23 @@ internal sealed class ActionResolver
             return ActionResolutionResult.Failed(parseResult.Errors);
         }
 
+        var inputBinding = ActionInputBinder.Bind(parseResult.Action!, step.With);
+        if (!inputBinding.Success)
+        {
+            return ActionResolutionResult.Failed(inputBinding.Errors);
+        }
+
         return ActionResolutionResult.ResolvedGitHubAction(
             parseResult.Action!,
             sourceResult.CacheEntry!,
-            BuildCommand(parseResult.Action!),
-            new Dictionary<string, string>(StringComparer.Ordinal)
-            {
-                ["ACTIO_ACTION_PATH"] = GitHubActionContainerPath,
-                ["GITHUB_ACTION_PATH"] = GitHubActionContainerPath
-            },
+            BuildCommand(parseResult.Action!, inputBinding.Inputs),
+            MergeEnvironment(
+                inputBinding.Environment,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["ACTIO_ACTION_PATH"] = GitHubActionContainerPath,
+                    ["GITHUB_ACTION_PATH"] = GitHubActionContainerPath
+                }),
             [new StepExecutionMount(sourceResult.ActionDirectory!, GitHubActionContainerPath, ReadOnly: true)]);
     }
 
@@ -197,9 +221,26 @@ internal sealed class ActionResolver
         return ActionPathResult.Failed([$"uses '{uses}' could not be resolved to a local action.yml or action.yaml file."]);
     }
 
-    private static string BuildCommand(ActionDocument action)
+    private static string BuildCommand(
+        ActionDocument action,
+        IReadOnlyDictionary<string, string> inputs)
     {
-        return string.Join(Environment.NewLine, action.Steps.Select(step => step.Run));
+        return string.Join(
+            Environment.NewLine,
+            action.Steps.Select(step => ActionInputBinder.InterpolateInputExpressions(step.Run, inputs)));
+    }
+
+    private static IReadOnlyDictionary<string, string> MergeEnvironment(
+        IReadOnlyDictionary<string, string> first,
+        IReadOnlyDictionary<string, string> second)
+    {
+        var environment = new Dictionary<string, string>(first, StringComparer.Ordinal);
+        foreach (var item in second)
+        {
+            environment[item.Key] = item.Value;
+        }
+
+        return environment;
     }
 
     private static async Task<string> ComputeContentHashAsync(
@@ -258,9 +299,10 @@ internal sealed record ActionResolutionResult(
     public static ActionResolutionResult ResolvedLocalAction(
         ActionDocument action,
         ActionCacheEntry cacheEntry,
-        string command)
+        string command,
+        IReadOnlyDictionary<string, string> environment)
     {
-        return new ActionResolutionResult(true, action, cacheEntry, command, null, new Dictionary<string, string>(), [], []);
+        return new ActionResolutionResult(true, action, cacheEntry, command, null, environment, [], []);
     }
 
     public static ActionResolutionResult ResolvedGitHubAction(
@@ -281,9 +323,10 @@ internal sealed record ActionResolutionResult(
     public static ActionResolutionResult ResolvedDockerImage(
         string command,
         string dockerImage,
-        ActionCacheEntry cacheEntry)
+        ActionCacheEntry cacheEntry,
+        IReadOnlyDictionary<string, string> environment)
     {
-        return new ActionResolutionResult(true, null, cacheEntry, command, dockerImage, new Dictionary<string, string>(), [], []);
+        return new ActionResolutionResult(true, null, cacheEntry, command, dockerImage, environment, [], []);
     }
 
     public static ActionResolutionResult Failed(IReadOnlyList<string> errors)

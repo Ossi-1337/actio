@@ -324,6 +324,29 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
+    public void Parse_AcceptsActionStepWithInputs()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Use action
+                    uses: ./.actio/actions/hello
+                    with:
+                      name: Actio
+                      punctuation: "!"
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var step = Assert.Single(result.Workflow!.Jobs["test"].Steps);
+        Assert.Equal("Actio", step.With["name"]);
+        Assert.Equal("!", step.With["punctuation"]);
+    }
+
+    [Fact]
     public void Parse_RejectsInvalidStepIdentityAndExecutionSettings()
     {
         var result = Parse(
@@ -340,6 +363,8 @@ public sealed class WorkflowParserTests
                     working-directory: ../outside
                     timeout-minutes: 0
                     continue-on-error: maybe
+                    with:
+                      name: Actio
                   - id: build
                     name: Build
                     run: dotnet build
@@ -356,6 +381,7 @@ public sealed class WorkflowParserTests
         Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[0].working-directory must be a relative path inside the workspace.");
         Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[0].timeout-minutes must be a positive integer.");
         Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[0].continue-on-error must be true or false.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[0].with is supported only for uses steps.");
         Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[2].id 'build' is already used in this job.");
         Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[2].shell is supported only for run steps.");
         Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[2].working-directory is supported only for run steps.");

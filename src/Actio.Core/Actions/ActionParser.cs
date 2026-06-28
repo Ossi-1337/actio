@@ -21,6 +21,14 @@ public sealed class ActionParser
         "steps"
     };
 
+    private static readonly HashSet<string> InputKeys = new(StringComparer.Ordinal)
+    {
+        "default",
+        "deprecationMessage",
+        "description",
+        "required"
+    };
+
     private static readonly HashSet<string> StepKeys = new(StringComparer.Ordinal)
     {
         "name",
@@ -75,6 +83,7 @@ public sealed class ActionParser
         AddUnknownKeyErrors(errors, root, TopLevelKeys, "action");
 
         var name = ReadRequiredScalar(errors, root, "name", "action.name");
+        var inputs = ReadInputs(errors, root);
         var steps = ReadRuns(errors, root);
 
         if (errors.Count > 0)
@@ -82,7 +91,48 @@ public sealed class ActionParser
             return ActionParseResult.Failed(errors);
         }
 
-        return ActionParseResult.Parsed(new ActionDocument(name!, steps));
+        return ActionParseResult.Parsed(new ActionDocument(name!, steps, inputs));
+    }
+
+    private static IReadOnlyDictionary<string, ActionInput> ReadInputs(List<string> errors, YamlMappingNode root)
+    {
+        if (!TryGet(root, "inputs", out var inputsNode))
+        {
+            return new Dictionary<string, ActionInput>();
+        }
+
+        if (inputsNode is not YamlMappingNode inputsMap)
+        {
+            errors.Add("action.inputs must be a mapping.");
+            return new Dictionary<string, ActionInput>();
+        }
+
+        var inputs = new Dictionary<string, ActionInput>(StringComparer.Ordinal);
+
+        foreach (var (keyNode, valueNode) in inputsMap.Children)
+        {
+            var inputName = ReadMapKey(errors, keyNode, "action.inputs");
+            if (inputName is null)
+            {
+                continue;
+            }
+
+            var inputPath = $"action.inputs.{inputName}";
+            if (valueNode is not YamlMappingNode inputMap)
+            {
+                errors.Add($"{inputPath} must be a mapping.");
+                continue;
+            }
+
+            AddUnknownKeyErrors(errors, inputMap, InputKeys, inputPath);
+            var description = ReadOptionalScalar(errors, inputMap, "description", $"{inputPath}.description");
+            var required = ReadOptionalBoolean(errors, inputMap, "required", $"{inputPath}.required") ?? false;
+            var defaultValue = ReadOptionalScalar(errors, inputMap, "default", $"{inputPath}.default");
+
+            inputs[inputName] = new ActionInput(inputName, description, required, defaultValue);
+        }
+
+        return inputs;
     }
 
     private static IReadOnlyList<ActionStep> ReadRuns(List<string> errors, YamlMappingNode root)
@@ -173,6 +223,56 @@ public sealed class ActionParser
         if (string.IsNullOrWhiteSpace(scalar.Value))
         {
             errors.Add($"{path} cannot be empty.");
+            return null;
+        }
+
+        return scalar.Value;
+    }
+
+    private static string? ReadOptionalScalar(List<string> errors, YamlMappingNode map, string key, string path)
+    {
+        if (!TryGet(map, key, out var node))
+        {
+            return null;
+        }
+
+        if (node is not YamlScalarNode scalar)
+        {
+            errors.Add($"{path} must be a string.");
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(scalar.Value))
+        {
+            errors.Add($"{path} cannot be empty.");
+            return null;
+        }
+
+        return scalar.Value;
+    }
+
+    private static bool? ReadOptionalBoolean(List<string> errors, YamlMappingNode map, string key, string path)
+    {
+        var value = ReadOptionalScalar(errors, map, key, path);
+        if (value is null)
+        {
+            return null;
+        }
+
+        if (bool.TryParse(value, out var result))
+        {
+            return result;
+        }
+
+        errors.Add($"{path} must be true or false.");
+        return null;
+    }
+
+    private static string? ReadMapKey(List<string> errors, YamlNode keyNode, string path)
+    {
+        if (keyNode is not YamlScalarNode scalar || string.IsNullOrWhiteSpace(scalar.Value))
+        {
+            errors.Add($"{path} contains an empty or non-string key.");
             return null;
         }
 

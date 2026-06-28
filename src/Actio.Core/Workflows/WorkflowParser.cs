@@ -50,7 +50,8 @@ public sealed partial class WorkflowParser
         "shell",
         "working-directory",
         "timeout-minutes",
-        "continue-on-error"
+        "continue-on-error",
+        "with"
     };
 
     private static readonly HashSet<string> TriggerConfigurationKeys = new(StringComparer.Ordinal)
@@ -406,6 +407,7 @@ public sealed partial class WorkflowParser
             var workingDirectory = ReadOptionalScalar(errors, stepMap, "working-directory", $"{itemPath}.working-directory");
             var timeoutMinutes = ReadOptionalPositiveInt(errors, stepMap, "timeout-minutes", $"{itemPath}.timeout-minutes");
             var continueOnError = ReadOptionalBoolean(errors, stepMap, "continue-on-error", $"{itemPath}.continue-on-error") ?? false;
+            var with = ReadOptionalStringMap(errors, stepMap, "with", $"{itemPath}.with");
 
             ValidateStepId(errors, stepIds, id, $"{itemPath}.id");
 
@@ -439,11 +441,17 @@ public sealed partial class WorkflowParser
                 errors.Add($"{itemPath}.working-directory is supported only for run steps.");
             }
 
+            if (run is not null && with.Count > 0)
+            {
+                errors.Add($"{itemPath}.with is supported only for uses steps.");
+            }
+
             ValidateUsesReference(errors, warnings, itemPath, uses);
+            ValidateCheckoutShimInputs(errors, itemPath, uses, with);
 
             if (name is not null)
             {
-                steps.Add(new WorkflowStep(name, run, uses, id, env, shell, workingDirectory, condition, timeoutMinutes, continueOnError));
+                steps.Add(new WorkflowStep(name, run, uses, id, env, shell, workingDirectory, condition, timeoutMinutes, continueOnError, with));
             }
         }
 
@@ -1542,6 +1550,32 @@ public sealed partial class WorkflowParser
             "auto_merge_enabled",
             "auto_merge_disabled"
         };
+    }
+
+    private static void ValidateCheckoutShimInputs(
+        List<string> errors,
+        string itemPath,
+        string? uses,
+        IReadOnlyDictionary<string, string> with)
+    {
+        if (uses is null || with.Count == 0)
+        {
+            return;
+        }
+
+        if (!ActionReference.TryParse(uses, out var reference) ||
+            !reference!.TryGetGitHubAction(out var action))
+        {
+            return;
+        }
+
+        if (string.Equals(action!.Owner, "actions", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(action.Repository, "checkout", StringComparison.OrdinalIgnoreCase) &&
+            string.IsNullOrEmpty(action.ActionPath) &&
+            string.Equals(action.Ref, "v4", StringComparison.Ordinal))
+        {
+            errors.Add($"{itemPath}.with is not supported by the actions/checkout@v4 Actio shim yet.");
+        }
     }
 
     private static void AddUnknownKeyErrors(
