@@ -536,6 +536,53 @@ pre {
   border-left: 3px solid var(--accent);
 }
 
+.annotation-list {
+  display: grid;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--line-soft);
+  background: var(--panel-2);
+}
+
+.annotation-row {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  color: var(--text);
+}
+
+.annotation-level {
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: var(--line);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  text-align: center;
+  text-transform: capitalize;
+}
+
+.annotation-warning .annotation-level {
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+
+.annotation-error .annotation-level {
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+.annotation-notice .annotation-level {
+  background: var(--running-bg);
+  color: var(--running-text);
+}
+
+.annotation-title {
+  font-weight: 650;
+  margin-right: 4px;
+}
+
 .link-list {
   display: flex;
   flex-wrap: wrap;

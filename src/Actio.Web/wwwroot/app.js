@@ -372,9 +372,48 @@ function renderStep(run, job, step) {
       </span>
       ${step.logPath ? `<button class="log-button" data-log-key="${escapeHtml(key)}" data-job="${escapeHtml(jobId)}" data-step="${escapeHtml(stepId)}">Log</button>` : `<span class="muted">No log</span>`}
     </div>
+    ${renderStepAnnotations(step.annotations ?? [])}
     ${step.summary ? `<pre class="step-summary">${escapeHtml(step.summary)}</pre>` : ""}
     <pre class="log-view" ${isOpen ? "" : "hidden"} data-log-key="${escapeHtml(key)}" data-job="${escapeHtml(jobId)}" data-step="${escapeHtml(stepId)}">${escapeHtml(content)}</pre>
   `;
+}
+
+function renderStepAnnotations(annotations) {
+  if (annotations.length === 0) {
+    return "";
+  }
+
+  return `
+    <div class="annotation-list">
+      ${annotations.map(annotation => `
+        <div class="annotation-row annotation-${escapeHtml(annotation.level)}">
+          <span class="annotation-level">${escapeHtml(annotation.level)}</span>
+          <span>
+            ${annotation.title ? `<span class="annotation-title">${escapeHtml(annotation.title)}</span>` : ""}
+            ${escapeHtml(annotation.message)}
+            ${renderAnnotationLocation(annotation)}
+          </span>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderAnnotationLocation(annotation) {
+  const parts = [];
+  if (annotation.file) {
+    parts.push(annotation.file);
+  }
+
+  if (annotation.line) {
+    parts.push(`line ${annotation.line}`);
+  }
+
+  if (annotation.column) {
+    parts.push(`col ${annotation.column}`);
+  }
+
+  return parts.length ? `<span class="muted"> (${escapeHtml(parts.join(", "))})</span>` : "";
 }
 
 function stepMetadata(step) {

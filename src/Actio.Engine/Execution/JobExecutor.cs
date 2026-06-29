@@ -62,6 +62,7 @@ internal sealed class JobExecutor
         var stepOutputs = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal);
         var environmentUpdates = new Dictionary<string, string>(StringComparer.Ordinal);
         var pathEntries = new List<string>();
+        var secretMasker = new SecretMasker();
         var previousStepStatuses = new List<string>();
         var stepStatuses = new Dictionary<string, string>(StringComparer.Ordinal);
         var hardFailureSeen = false;
@@ -154,6 +155,7 @@ internal sealed class JobExecutor
                     stepOutputs,
                     environmentUpdates,
                     pathEntries,
+                    secretMasker,
                     projectRoot,
                     runId,
                     runTrigger,
@@ -194,7 +196,8 @@ internal sealed class JobExecutor
                     step.TimeoutMinutes,
                     step.ContinueOnError,
                     stepResult.SummaryPath,
-                    stepResult.Summary));
+                    stepResult.Summary,
+                    stepResult.Annotations));
                 previousStepStatuses.Add(stepResult.Status);
                 AddStepStatus(stepStatuses, step, stepResult.Status);
 
@@ -356,6 +359,7 @@ internal sealed class JobExecutor
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> stepOutputs,
         IReadOnlyDictionary<string, string> environmentUpdates,
         IReadOnlyList<string> pathEntries,
+        SecretMasker secretMasker,
         string projectRoot,
         string runId,
         WorkflowRunTrigger runTrigger,
@@ -386,7 +390,7 @@ internal sealed class JobExecutor
             return StepExecutionOutcome.StorageFailed(StorageError.Format($"opening log for job '{job.Name}' step '{step.Name}'", ex));
         }
 
-        await using var collector = new StepOutputCollector(output, error, stepLog, _outputMarkerParser);
+        await using var collector = new StepOutputCollector(output, error, stepLog, _outputMarkerParser, secretMasker);
         var effectiveRunDefaults = runDefaults.Merge(new WorkflowRunDefaults(step.Shell, step.WorkingDirectory));
         StepExecutionPlan? plan = null;
         StepEnvironmentFiles environmentFiles;
@@ -460,7 +464,8 @@ internal sealed class JobExecutor
             var resultShell = plan.Kind == StepExecutionKind.DockerImageAction ? null : effectiveRunDefaults.Shell;
             var resultWorkingDirectory = plan.Kind == StepExecutionKind.DockerImageAction ? null : effectiveRunDefaults.WorkingDirectory;
             var environmentFileResult = await _environmentFileReader.ReadAsync(environmentFiles, stepCancellationToken);
-            var outputs = MergeOutputs(collector.CapturedOutputs, environmentFileResult.Outputs);
+            var outputs = MergeOutputs(collector.CapturedOutputs, MaskValues(environmentFileResult.Outputs, collector));
+            var summary = environmentFileResult.Summary is null ? null : collector.Mask(environmentFileResult.Summary);
 
             if (environmentFileResult.Errors.Count > 0)
             {
@@ -472,7 +477,8 @@ internal sealed class JobExecutor
                     environmentFileResult.Environment,
                     environmentFileResult.PathEntries,
                     environmentFileResult.SummaryPath,
-                    environmentFileResult.Summary);
+                    summary,
+                    collector.Annotations);
             }
 
             if (!result.Success)
@@ -488,7 +494,8 @@ internal sealed class JobExecutor
                     environmentFileResult.Environment,
                     environmentFileResult.PathEntries,
                     environmentFileResult.SummaryPath,
-                    environmentFileResult.Summary);
+                    summary,
+                    collector.Annotations);
             }
 
             return StepExecutionOutcome.Succeeded(
@@ -501,7 +508,8 @@ internal sealed class JobExecutor
                 environmentFileResult.Environment,
                 environmentFileResult.PathEntries,
                 environmentFileResult.SummaryPath,
-                environmentFileResult.Summary);
+                summary,
+                collector.Annotations);
         }
         catch (Exception ex) when (StorageError.IsRecoverable(ex))
         {
@@ -518,7 +526,8 @@ internal sealed class JobExecutor
                 collector.CapturedOutputs,
                 usesShellExecution ? effectiveRunDefaults.Shell : null,
                 usesShellExecution ? effectiveRunDefaults.WorkingDirectory : null,
-                FormatStepTimeoutError(job.Name, step.Name, step.TimeoutMinutes!.Value));
+                FormatStepTimeoutError(job.Name, step.Name, step.TimeoutMinutes!.Value),
+                collector.Annotations);
         }
     }
 
@@ -752,6 +761,16 @@ internal sealed class JobExecutor
         return outputs;
     }
 
+    private static IReadOnlyDictionary<string, string> MaskValues(
+        IReadOnlyDictionary<string, string> values,
+        StepOutputCollector collector)
+    {
+        return values.ToDictionary(
+            item => item.Key,
+            item => collector.Mask(item.Value),
+            StringComparer.Ordinal);
+    }
+
     private sealed record StepExecutionOutcome(
         string Status,
         string Command,
@@ -765,6 +784,7 @@ internal sealed class JobExecutor
         IReadOnlyList<string> PathEntries,
         string? SummaryPath,
         string? Summary,
+        IReadOnlyList<StepLogAnnotation> Annotations,
         bool CountsAsFailedStep)
     {
         public static StepExecutionOutcome Succeeded(
@@ -777,9 +797,10 @@ internal sealed class JobExecutor
             IReadOnlyDictionary<string, string>? environmentUpdates = null,
             IReadOnlyList<string>? pathEntries = null,
             string? summaryPath = null,
-            string? summary = null)
+            string? summary = null,
+            IReadOnlyList<StepLogAnnotation>? annotations = null)
         {
-            return new StepExecutionOutcome(SuccessStatus, command, exitCode, logPath, shell, workingDirectory, outputs, [], environmentUpdates ?? new Dictionary<string, string>(), pathEntries ?? [], summaryPath, summary, false);
+            return new StepExecutionOutcome(SuccessStatus, command, exitCode, logPath, shell, workingDirectory, outputs, [], environmentUpdates ?? new Dictionary<string, string>(), pathEntries ?? [], summaryPath, summary, annotations ?? [], false);
         }
 
         public static StepExecutionOutcome Failed(
@@ -793,14 +814,15 @@ internal sealed class JobExecutor
             IReadOnlyDictionary<string, string>? environmentUpdates = null,
             IReadOnlyList<string>? pathEntries = null,
             string? summaryPath = null,
-            string? summary = null)
+            string? summary = null,
+            IReadOnlyList<StepLogAnnotation>? annotations = null)
         {
-            return new StepExecutionOutcome(FailedStatus, command, exitCode, logPath, shell, workingDirectory, outputs, [error], environmentUpdates ?? new Dictionary<string, string>(), pathEntries ?? [], summaryPath, summary, true);
+            return new StepExecutionOutcome(FailedStatus, command, exitCode, logPath, shell, workingDirectory, outputs, [error], environmentUpdates ?? new Dictionary<string, string>(), pathEntries ?? [], summaryPath, summary, annotations ?? [], true);
         }
 
         public static StepExecutionOutcome StorageFailed(string error, string? logPath = null)
         {
-            return new StepExecutionOutcome(FailedStatus, string.Empty, null, logPath, null, null, new Dictionary<string, string>(), [error], new Dictionary<string, string>(), [], null, null, false);
+            return new StepExecutionOutcome(FailedStatus, string.Empty, null, logPath, null, null, new Dictionary<string, string>(), [error], new Dictionary<string, string>(), [], null, null, [], false);
         }
 
         public static StepExecutionOutcome TimedOut(
@@ -809,9 +831,10 @@ internal sealed class JobExecutor
             IReadOnlyDictionary<string, string> outputs,
             string? shell,
             string? workingDirectory,
-            string error)
+            string error,
+            IReadOnlyList<StepLogAnnotation>? annotations = null)
         {
-            return new StepExecutionOutcome(TimedOutStatus, command, null, logPath, shell, workingDirectory, outputs, [error], new Dictionary<string, string>(), [], null, null, true);
+            return new StepExecutionOutcome(TimedOutStatus, command, null, logPath, shell, workingDirectory, outputs, [error], new Dictionary<string, string>(), [], null, null, annotations ?? [], true);
         }
 
         public static StepExecutionOutcome FailedWithoutExitCode(
@@ -822,9 +845,10 @@ internal sealed class JobExecutor
             IReadOnlyDictionary<string, string>? environmentUpdates = null,
             IReadOnlyList<string>? pathEntries = null,
             string? summaryPath = null,
-            string? summary = null)
+            string? summary = null,
+            IReadOnlyList<StepLogAnnotation>? annotations = null)
         {
-            return new StepExecutionOutcome(FailedStatus, command, null, logPath, null, null, outputs ?? new Dictionary<string, string>(), errors, environmentUpdates ?? new Dictionary<string, string>(), pathEntries ?? [], summaryPath, summary, true);
+            return new StepExecutionOutcome(FailedStatus, command, null, logPath, null, null, outputs ?? new Dictionary<string, string>(), errors, environmentUpdates ?? new Dictionary<string, string>(), pathEntries ?? [], summaryPath, summary, annotations ?? [], true);
         }
     }
 

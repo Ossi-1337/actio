@@ -16,4 +16,8 @@ public sealed record StepRunRecord(
     int? TimeoutMinutes = null,
     bool ContinueOnError = false,
     string? SummaryPath = null,
-    string? Summary = null);
+    string? Summary = null,
+    IReadOnlyList<StepLogAnnotation>? Annotations = null)
+{
+    public IReadOnlyList<StepLogAnnotation> Annotations { get; init; } = Annotations ?? [];
+}

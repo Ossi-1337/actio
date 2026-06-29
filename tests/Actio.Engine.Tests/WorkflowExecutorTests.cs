@@ -433,6 +433,126 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_ParsesWorkflowCommandsAndMasksLogs()
+    {
+        var runner = new FakeRunnerProvider(
+            [
+                new FakeRunnerStep(
+                    0,
+                    [
+                        "::add-mask::secret-value",
+                        "visible secret-value",
+                        "::group::Build secret-value",
+                        "::notice::notice secret-value",
+                        "::debug::debug secret-value",
+                        "::warning file=src/secret-value.cs,line=12,title=Careful secret-value::warning secret-value",
+                        "::error::failure secret-value",
+                        "::endgroup::"
+                    ]),
+                new FakeRunnerStep(
+                    0,
+                    ["after secret-value"],
+                    onExecute: (environment, mounts) =>
+                    {
+                        WriteEnvironmentFile(environment, mounts, "GITHUB_OUTPUT", "token=secret-value\n");
+                        WriteEnvironmentFile(environment, mounts, "GITHUB_STEP_SUMMARY", "summary secret-value\n");
+                    })
+            ]);
+        var store = new RecordingRunStore();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep("Annotate", "echo commands", null),
+                    new WorkflowStep("Use mask", "echo mask", null, Id: "use_mask")
+                ]));
+        using var output = new StringWriter();
+
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            output,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.DoesNotContain("secret-value", output.ToString());
+        Assert.DoesNotContain("secret-value", string.Join(Environment.NewLine, store.LogLines));
+        Assert.Contains("[stdout] visible ***", store.LogLines);
+        Assert.Contains("[stdout] [group] Build ***", store.LogLines);
+        Assert.Contains("[stdout] [endgroup]", store.LogLines);
+        Assert.Contains("[stdout] after ***", store.LogLines);
+        Assert.Contains(result.Outputs, output =>
+            output.JobName == "test" &&
+            output.Name == "token" &&
+            output.Value == "***");
+
+        var steps = Assert.Single(store.SavedRecords.Last().Jobs).Steps;
+        var step = steps[0];
+        Assert.Equal(4, step.Annotations.Count);
+        Assert.Contains(step.Annotations, annotation =>
+            annotation.Level == "notice" &&
+            annotation.Message == "notice ***");
+        Assert.Contains(step.Annotations, annotation =>
+            annotation.Level == "debug" &&
+            annotation.Message == "debug ***");
+        Assert.Contains(step.Annotations, annotation =>
+            annotation.Level == "warning" &&
+            annotation.Message == "warning ***" &&
+            annotation.Title == "Careful ***" &&
+            annotation.File == "src/***.cs" &&
+            annotation.Line == 12);
+        Assert.Contains(step.Annotations, annotation =>
+            annotation.Level == "error" &&
+            annotation.Message == "failure ***");
+        Assert.Equal("summary ***\n", steps[1].Summary);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_StopCommandsTreatsCommandsAsPlainLogTextUntilResume()
+    {
+        var runner = new FakeRunnerProvider(
+            [
+                new FakeRunnerStep(
+                    0,
+                    [
+                        "::stop-commands::pause",
+                        "::warning::not structured",
+                        "::pause::",
+                        "::warning::structured"
+                    ])
+            ]);
+        var store = new RecordingRunStore();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Stop commands", "echo commands", null)]));
+
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Contains("[stdout] [command] workflow commands stopped", store.LogLines);
+        Assert.Contains("[stdout] ::warning::not structured", store.LogLines);
+        Assert.Contains("[stdout] [command] workflow commands resumed", store.LogLines);
+
+        var step = Assert.Single(Assert.Single(store.SavedRecords.Last().Jobs).Steps);
+        var annotation = Assert.Single(step.Annotations);
+        Assert.Equal("warning", annotation.Level);
+        Assert.Equal("structured", annotation.Message);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_StopsAfterFailedStep()
     {
         var runner = new FakeRunnerProvider([0, 42]);
@@ -2014,6 +2134,8 @@ public sealed class WorkflowExecutorTests
     {
         public List<WorkflowRunRecord> SavedRecords { get; } = [];
 
+        public List<string> LogLines { get; } = [];
+
         public string CreateRunId()
         {
             return "run-1";
@@ -2031,7 +2153,7 @@ public sealed class WorkflowExecutorTests
             string stepName,
             CancellationToken cancellationToken = default)
         {
-            return Task.FromResult<IStepLog>(NullStepLog.Instance);
+            return Task.FromResult<IStepLog>(new RecordingStepLog(LogLines));
         }
 
         public Task<StepEnvironmentFiles> CreateStepEnvironmentFilesAsync(
@@ -2058,6 +2180,35 @@ public sealed class WorkflowExecutorTests
         {
             SavedRecords.Add(runRecord);
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class RecordingStepLog : IStepLog
+    {
+        private readonly List<string> _lines;
+
+        public RecordingStepLog(List<string> lines)
+        {
+            _lines = lines;
+        }
+
+        public string? LogPath => null;
+
+        public Task WriteOutputLineAsync(string line, CancellationToken cancellationToken = default)
+        {
+            _lines.Add($"[stdout] {line}");
+            return Task.CompletedTask;
+        }
+
+        public Task WriteErrorLineAsync(string line, CancellationToken cancellationToken = default)
+        {
+            _lines.Add($"[stderr] {line}");
+            return Task.CompletedTask;
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            return ValueTask.CompletedTask;
         }
     }
 

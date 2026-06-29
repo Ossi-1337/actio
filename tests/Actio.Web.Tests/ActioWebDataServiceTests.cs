@@ -207,6 +207,35 @@ public sealed class ActioWebDataServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task GetRunAsync_ReturnsStepAnnotations()
+    {
+        var workflowPath = WriteWorkflow("ci.yml", "CI");
+        await SaveRunAsync(CreateRun(
+            "run-1",
+            "CI",
+            workflowPath,
+            annotations:
+            [
+                new StepLogAnnotation(
+                    "warning",
+                    "be careful",
+                    "Careful",
+                    "src/app.cs",
+                    12)
+            ]));
+
+        var run = await CreateService().GetRunAsync("run-1");
+
+        Assert.NotNull(run);
+        var annotation = Assert.Single(Assert.Single(Assert.Single(run.Jobs).Steps).Annotations);
+        Assert.Equal("warning", annotation.Level);
+        Assert.Equal("be careful", annotation.Message);
+        Assert.Equal("Careful", annotation.Title);
+        Assert.Equal("src/app.cs", annotation.File);
+        Assert.Equal(12, annotation.Line);
+    }
+
+    [Fact]
     public async Task GetArtifactAsync_ReturnsFileArtifact()
     {
         var workflowPath = WriteWorkflow("ci.yml", "CI");
@@ -437,7 +466,8 @@ public sealed class ActioWebDataServiceTests : IDisposable
         string jobName = "test",
         string? jobId = null,
         string? stepId = null,
-        string? stepSummary = null)
+        string? stepSummary = null,
+        IReadOnlyList<StepLogAnnotation>? annotations = null)
     {
         var start = startedAt ?? DateTimeOffset.UtcNow;
         var finish = finishedAt ?? start;
@@ -465,7 +495,7 @@ public sealed class ActioWebDataServiceTests : IDisposable
                     finish,
                     durationMilliseconds,
                     new Dictionary<string, string>(),
-                    [new StepRunRecord("Test", status, "dotnet test", 0, logPath, start, finish, durationMilliseconds, stepId, Summary: stepSummary)],
+                    [new StepRunRecord("Test", status, "dotnet test", 0, logPath, start, finish, durationMilliseconds, stepId, Summary: stepSummary, Annotations: annotations)],
                     artifact,
                     [],
                     jobId)
