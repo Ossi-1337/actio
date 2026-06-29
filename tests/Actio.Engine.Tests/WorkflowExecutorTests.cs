@@ -275,6 +275,123 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_StartsServicesAndPassesNetworkToSteps()
+    {
+        var runner = new FakeRunnerProvider([0, 0]);
+        var projectRoot = Environment.CurrentDirectory;
+        var workflow = new WorkflowDocument(
+            "CI",
+            new Dictionary<string, string>(),
+            new Dictionary<string, WorkflowJob>
+            {
+                ["test"] = new WorkflowJob(
+                    "test",
+                    null,
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    WorkflowRunDefaults.Empty,
+                    null,
+                    false,
+                    null,
+                    WorkflowJobStrategy.Empty,
+                    new Dictionary<string, string>(),
+                    [],
+                    [
+                        new WorkflowStep("Test", "dotnet test", null),
+                        new WorkflowStep("Use image", null, "docker://alpine:3.20")
+                    ],
+                    null,
+                    new Dictionary<string, WorkflowJobService>
+                    {
+                        ["postgres"] = new WorkflowJobService(
+                            "postgres:16",
+                            new Dictionary<string, string>
+                            {
+                                ["POSTGRES_PASSWORD"] = "postgres"
+                            },
+                            ["5432:5432"],
+                            [new WorkflowJobContainerVolume("./db", "/var/lib/postgresql/data", ReadOnly: false)],
+                            ["--health-cmd=pg_isready"])
+                    })
+            });
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(projectRoot),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var startRequest = Assert.Single(runner.ServiceStartRequests);
+        var service = Assert.Single(startRequest.Services);
+        Assert.Equal("postgres", service.Name);
+        Assert.Equal("postgres:16", service.Image);
+        Assert.Equal("postgres", service.Environment["POSTGRES_PASSWORD"]);
+        Assert.Equal(["5432:5432"], service.Ports);
+        Assert.Equal(["--health-cmd=pg_isready"], service.Options);
+        var serviceVolume = Assert.Single(service.Volumes);
+        Assert.Equal(Path.Combine(projectRoot, "./db"), serviceVolume.HostPath);
+        Assert.Equal("/var/lib/postgresql/data", serviceVolume.ContainerPath);
+
+        var stepRequest = Assert.Single(runner.Requests);
+        Assert.NotNull(stepRequest.Services);
+        Assert.Equal("actio-test-network", stepRequest.Services.NetworkName);
+        var dockerActionRequest = Assert.Single(runner.DockerActionRequests);
+        Assert.NotNull(dockerActionRequest.Services);
+        Assert.Equal("actio-test-network", dockerActionRequest.Services.NetworkName);
+        var stoppedNetwork = Assert.Single(runner.StoppedServiceNetworks);
+        Assert.Equal("actio-test-network", stoppedNetwork.NetworkName);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_FailsJobWhenServiceStartupFails()
+    {
+        var runner = new FakeRunnerProvider(Array.Empty<int>());
+        runner.ServiceStartResult = ServiceContainerStartResult.Failed(["Service 'postgres' did not become healthy."]);
+        var workflow = new WorkflowDocument(
+            "CI",
+            new Dictionary<string, string>(),
+            new Dictionary<string, WorkflowJob>
+            {
+                ["test"] = new WorkflowJob(
+                    "test",
+                    null,
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    WorkflowRunDefaults.Empty,
+                    null,
+                    false,
+                    null,
+                    WorkflowJobStrategy.Empty,
+                    new Dictionary<string, string>(),
+                    [],
+                    [new WorkflowStep("Test", "dotnet test", null)],
+                    null,
+                    new Dictionary<string, WorkflowJobService>
+                    {
+                        ["postgres"] = new WorkflowJobService("postgres:16")
+                    })
+            });
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Equal(0, result.SuccessfulSteps);
+        Assert.Equal(1, result.SkippedSteps);
+        Assert.Empty(runner.Requests);
+        Assert.Empty(runner.StoppedServiceNetworks);
+        Assert.Contains(result.Errors, error => error.Contains("did not become healthy", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public async Task ExecuteAsync_AddsDefaultEnvironmentVariablesToRunSteps()
     {
         var runner = new FakeRunnerProvider([0]);
@@ -2331,9 +2448,35 @@ public sealed class WorkflowExecutorTests
 
         public List<DockerActionExecutionRequest> DockerActionRequests { get; } = [];
 
+        public List<ServiceContainerStartRequest> ServiceStartRequests { get; } = [];
+
+        public List<JobServiceNetwork> StoppedServiceNetworks { get; } = [];
+
+        public ServiceContainerStartResult? ServiceStartResult { get; set; }
+
         public bool SupportsRunner(string runsOn)
         {
             return _supportsRunner;
+        }
+
+        public Task<ServiceContainerStartResult> StartServiceContainersAsync(
+            ServiceContainerStartRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            ServiceStartRequests.Add(request);
+            return Task.FromResult(
+                ServiceStartResult ??
+                ServiceContainerStartResult.Started(new JobServiceNetwork(
+                    "actio-test-network",
+                    request.Services.Select(service => $"actio-{service.Name}").ToArray())));
+        }
+
+        public Task<ServiceContainerStopResult> StopServiceContainersAsync(
+            JobServiceNetwork network,
+            CancellationToken cancellationToken = default)
+        {
+            StoppedServiceNetworks.Add(network);
+            return Task.FromResult(new ServiceContainerStopResult([]));
         }
 
         public Task<StepExecutionResult> ExecuteStepAsync(

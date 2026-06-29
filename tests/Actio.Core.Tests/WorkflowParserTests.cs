@@ -311,6 +311,84 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
+    public void Parse_AcceptsJobServices()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                services:
+                  postgres:
+                    image: postgres:16
+                    env:
+                      POSTGRES_PASSWORD: postgres
+                    ports:
+                      - 5432:5432
+                    volumes:
+                      - ./db:/var/lib/postgresql/data
+                    options: --health-cmd=pg_isready --health-interval=5s --health-timeout=3s --health-retries=5
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var service = Assert.Single(result.Workflow!.Jobs["test"].Services);
+        Assert.Equal("postgres", service.Key);
+        Assert.Equal("postgres:16", service.Value.Image);
+        Assert.Equal("postgres", service.Value.Env["POSTGRES_PASSWORD"]);
+        Assert.Equal(["5432:5432"], service.Value.Ports);
+        var volume = Assert.Single(service.Value.Volumes);
+        Assert.Equal("./db", volume.Source);
+        Assert.Equal("/var/lib/postgresql/data", volume.Target);
+        Assert.False(volume.ReadOnly);
+        Assert.Equal(
+            ["--health-cmd=pg_isready", "--health-interval=5s", "--health-timeout=3s", "--health-retries=5"],
+            service.Value.Options);
+    }
+
+    [Fact]
+    public void Parse_RejectsUnsafeJobServices()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                services:
+                  - postgres
+                steps:
+                  - name: Test
+                    run: dotnet test
+              unsafe:
+                runs-on: ubuntu-latest
+                services:
+                  -bad:
+                    image: postgres:16
+                  redis:
+                    ports:
+                      - "6379 6379"
+                    volumes:
+                      - ../outside:/data
+                    options: --network host
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.services must be a mapping.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.unsafe.services.-bad must use a Docker-safe service name.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.unsafe.services.redis.image is required.");
+        Assert.Contains(result.Errors, error => error.Contains("invalid Docker port mapping", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("source must be a relative path inside the workspace", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("unsupported Docker option '--network'", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void Parse_AcceptsMatrixStrategy()
     {
         var result = Parse(

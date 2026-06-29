@@ -10,7 +10,8 @@ public sealed record StepExecutionRequest(
     string? Shell = null,
     string? WorkingDirectory = null,
     IReadOnlyList<StepExecutionMount>? AdditionalMounts = null,
-    JobContainerExecutionOptions? Container = null)
+    JobContainerExecutionOptions? Container = null,
+    JobServiceNetwork? Services = null)
 {
     public IReadOnlyList<StepExecutionMount> AdditionalMounts { get; init; } = AdditionalMounts ?? [];
 }

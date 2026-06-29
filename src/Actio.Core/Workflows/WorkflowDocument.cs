@@ -112,6 +112,22 @@ public sealed record WorkflowJobContainerVolume(
     string Target,
     bool ReadOnly);
 
+public sealed record WorkflowJobService(
+    string Image,
+    IReadOnlyDictionary<string, string>? Env = null,
+    IReadOnlyList<string>? Ports = null,
+    IReadOnlyList<WorkflowJobContainerVolume>? Volumes = null,
+    IReadOnlyList<string>? Options = null)
+{
+    public IReadOnlyDictionary<string, string> Env { get; init; } = Env ?? new Dictionary<string, string>();
+
+    public IReadOnlyList<string> Ports { get; init; } = Ports ?? [];
+
+    public IReadOnlyList<WorkflowJobContainerVolume> Volumes { get; init; } = Volumes ?? [];
+
+    public IReadOnlyList<string> Options { get; init; } = Options ?? [];
+}
+
 public sealed record WorkflowTriggerValue(
     string Kind,
     string? Value,
@@ -243,7 +259,8 @@ public sealed record WorkflowJob
         IReadOnlyDictionary<string, string> outputs,
         IReadOnlyList<WorkflowArtifact> artifacts,
         IReadOnlyList<WorkflowStep> steps,
-        WorkflowJobContainer? container = null)
+        WorkflowJobContainer? container = null,
+        IReadOnlyDictionary<string, WorkflowJobService>? services = null)
     {
         Name = name;
         BaseName = name;
@@ -259,6 +276,7 @@ public sealed record WorkflowJob
         Concurrency = concurrency;
         Strategy = strategy ?? WorkflowJobStrategy.Empty;
         Container = container;
+        Services = services ?? new Dictionary<string, WorkflowJobService>();
         Matrix = new Dictionary<string, string>();
         Outputs = outputs;
         Artifacts = artifacts;
@@ -292,6 +310,8 @@ public sealed record WorkflowJob
     public WorkflowJobStrategy Strategy { get; init; }
 
     public WorkflowJobContainer? Container { get; init; }
+
+    public IReadOnlyDictionary<string, WorkflowJobService> Services { get; init; }
 
     public IReadOnlyDictionary<string, string> Matrix { get; init; }
 

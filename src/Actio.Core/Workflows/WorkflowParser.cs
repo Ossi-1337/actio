@@ -27,6 +27,7 @@ public sealed partial class WorkflowParser
         "env",
         "defaults",
         "container",
+        "services",
         "timeout-minutes",
         "continue-on-error",
         "concurrency",
@@ -116,12 +117,26 @@ public sealed partial class WorkflowParser
         "options"
     };
 
+    private static readonly HashSet<string> JobServiceKeys = new(StringComparer.Ordinal)
+    {
+        "image",
+        "env",
+        "ports",
+        "volumes",
+        "options"
+    };
+
     private static readonly HashSet<string> SupportedContainerOptionsWithValues = new(StringComparer.Ordinal)
     {
         "--add-host",
         "--cpus",
         "--dns",
         "--dns-search",
+        "--health-cmd",
+        "--health-interval",
+        "--health-retries",
+        "--health-start-period",
+        "--health-timeout",
         "--hostname",
         "--memory",
         "--memory-reservation",
@@ -132,7 +147,8 @@ public sealed partial class WorkflowParser
 
     private static readonly HashSet<string> SupportedContainerOptionsWithoutValues = new(StringComparer.Ordinal)
     {
-        "--init"
+        "--init",
+        "--no-healthcheck"
     };
 
     private static readonly HashSet<string> SupportedDefaultShells = new(StringComparer.Ordinal)
@@ -285,6 +301,7 @@ public sealed partial class WorkflowParser
             var env = ReadOptionalStringMap(errors, jobMap, "env", $"workflow.jobs.{jobName}.env");
             var defaults = ReadRunDefaults(errors, jobMap, "defaults", $"workflow.jobs.{jobName}.defaults");
             var container = ReadJobContainer(errors, jobMap, jobName);
+            var services = ReadJobServices(errors, jobMap, jobName);
             var timeoutMinutes = ReadOptionalPositiveInt(errors, jobMap, "timeout-minutes", $"workflow.jobs.{jobName}.timeout-minutes");
             var continueOnError = ReadOptionalBoolean(errors, jobMap, "continue-on-error", $"workflow.jobs.{jobName}.continue-on-error") ?? false;
             var concurrency = ReadJobConcurrency(errors, jobMap, jobName);
@@ -310,7 +327,8 @@ public sealed partial class WorkflowParser
                     outputs,
                     artifacts,
                     steps,
-                    container);
+                    container,
+                    services);
             }
         }
 
@@ -1294,6 +1312,67 @@ public sealed partial class WorkflowParser
             : new WorkflowJobContainer(containerImage, containerEnv, ports, volumes, options);
     }
 
+    private static IReadOnlyDictionary<string, WorkflowJobService> ReadJobServices(
+        List<string> errors,
+        YamlMappingNode jobMap,
+        string jobName)
+    {
+        var path = $"workflow.jobs.{jobName}.services";
+        if (!TryGet(jobMap, "services", out var node))
+        {
+            return new Dictionary<string, WorkflowJobService>();
+        }
+
+        if (node is not YamlMappingNode servicesMap)
+        {
+            errors.Add($"{path} must be a mapping.");
+            return new Dictionary<string, WorkflowJobService>();
+        }
+
+        if (servicesMap.Children.Count == 0)
+        {
+            errors.Add($"{path} must contain at least one service.");
+            return new Dictionary<string, WorkflowJobService>();
+        }
+
+        var services = new Dictionary<string, WorkflowJobService>(StringComparer.Ordinal);
+        foreach (var (keyNode, valueNode) in servicesMap.Children)
+        {
+            var serviceName = ReadMapKey(errors, keyNode, path);
+            if (serviceName is null)
+            {
+                continue;
+            }
+
+            var servicePath = $"{path}.{serviceName}";
+            if (!IsSafeDockerAlias(serviceName))
+            {
+                errors.Add($"{servicePath} must use a Docker-safe service name.");
+                continue;
+            }
+
+            if (valueNode is not YamlMappingNode serviceMap)
+            {
+                errors.Add($"{servicePath} must be a mapping.");
+                continue;
+            }
+
+            AddUnknownKeyErrors(errors, serviceMap, JobServiceKeys, servicePath);
+            var image = ReadRequiredScalar(errors, serviceMap, "image", $"{servicePath}.image");
+            var env = ReadOptionalStringMap(errors, serviceMap, "env", $"{servicePath}.env");
+            var ports = ReadContainerPorts(errors, serviceMap, servicePath);
+            var volumes = ReadContainerVolumes(errors, serviceMap, servicePath);
+            var options = ReadContainerOptions(errors, serviceMap, servicePath);
+
+            if (image is not null)
+            {
+                services[serviceName] = new WorkflowJobService(image, env, ports, volumes, options);
+            }
+        }
+
+        return services;
+    }
+
     private static IReadOnlyList<string> ReadContainerPorts(
         List<string> errors,
         YamlMappingNode containerMap,
@@ -2226,6 +2305,15 @@ public sealed partial class WorkflowParser
         return !normalized
             .Split('/', StringSplitOptions.RemoveEmptyEntries)
             .Any(segment => string.Equals(segment, "..", StringComparison.Ordinal));
+    }
+
+    private static bool IsSafeDockerAlias(string value)
+    {
+        return value.Length <= 63 &&
+            char.IsAsciiLetterOrDigit(value[0]) &&
+            value.All(character =>
+                char.IsAsciiLetterOrDigit(character) ||
+                character is '-' or '_' or '.');
     }
 
     private static bool ContainsWhitespace(string value)

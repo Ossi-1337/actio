@@ -73,6 +73,8 @@ internal sealed class JobExecutor
         var currentStepIndex = -1;
         WorkflowStep? currentStep = null;
         DateTimeOffset? currentStepStartedAt = null;
+        JobServiceNetwork? serviceNetwork = null;
+        var servicesStopped = false;
 
         if (!_runnerProvider.SupportsRunner(job.RunsOn))
         {
@@ -83,6 +85,16 @@ internal sealed class JobExecutor
 
         try
         {
+            var serviceStart = await StartServiceContainersAsync(job, projectRoot, output, jobCancellationToken);
+            if (!serviceStart.Success)
+            {
+                errors.AddRange(serviceStart.Errors);
+                stepRecords.AddRange(CreateSkippedStepRecords(job.Steps));
+                return CompleteJob(job, FailedStatus, startedAt, outputs, stepRecords, artifacts, errors, 0, 0, job.Steps.Count, 0);
+            }
+
+            serviceNetwork = serviceStart.Network;
+
             for (var index = 0; index < job.Steps.Count; index++)
             {
                 currentStepIndex = index;
@@ -159,6 +171,7 @@ internal sealed class JobExecutor
                     projectRoot,
                     runId,
                     runTrigger,
+                    serviceNetwork,
                     output,
                     error,
                     jobCancellationToken);
@@ -270,6 +283,9 @@ internal sealed class JobExecutor
             stepRecords.AddRange(CreateSkippedStepRecords(remainingSteps));
             skippedSteps += remainingSteps.Length;
 
+            await StopServiceContainersAsync(serviceNetwork, errors, CancellationToken.None);
+            servicesStopped = true;
+
             return CompleteJob(
                 job,
                 TimedOutStatus,
@@ -282,6 +298,13 @@ internal sealed class JobExecutor
                 failedSteps,
                 skippedSteps,
                 continuedSteps);
+        }
+        finally
+        {
+            if (!servicesStopped)
+            {
+                await StopServiceContainersAsync(serviceNetwork, errors, CancellationToken.None);
+            }
         }
 
         return CompleteJob(
@@ -349,6 +372,40 @@ internal sealed class JobExecutor
         return $"workflow.jobs.{jobName}.steps.{stepName} timed out after {timeoutMinutes} minute(s).";
     }
 
+    private async Task<ServiceContainerStartResult> StartServiceContainersAsync(
+        WorkflowJob job,
+        string projectRoot,
+        TextWriter output,
+        CancellationToken cancellationToken)
+    {
+        if (job.Services.Count == 0)
+        {
+            return ServiceContainerStartResult.Started(null);
+        }
+
+        output.WriteLine($"[{job.DisplayName}] Starting service containers");
+        return await _runnerProvider.StartServiceContainersAsync(
+            new ServiceContainerStartRequest(
+                job.Name,
+                projectRoot,
+                CreateServiceDefinitions(job, projectRoot)),
+            cancellationToken);
+    }
+
+    private async Task StopServiceContainersAsync(
+        JobServiceNetwork? serviceNetwork,
+        List<string> errors,
+        CancellationToken cancellationToken)
+    {
+        if (serviceNetwork is null)
+        {
+            return;
+        }
+
+        var stopResult = await _runnerProvider.StopServiceContainersAsync(serviceNetwork, cancellationToken);
+        errors.AddRange(stopResult.Errors);
+    }
+
     private async Task<StepExecutionOutcome> ExecuteStepAsync(
         string workflowName,
         WorkflowJob job,
@@ -363,6 +420,7 @@ internal sealed class JobExecutor
         string projectRoot,
         string runId,
         WorkflowRunTrigger runTrigger,
+        JobServiceNetwork? serviceNetwork,
         TextWriter output,
         TextWriter error,
         CancellationToken cancellationToken)
@@ -446,7 +504,8 @@ internal sealed class JobExecutor
                         plan.DockerImage!,
                         projectRoot,
                         environment,
-                        additionalMounts),
+                        additionalMounts,
+                        serviceNetwork),
                     collector,
                     stepCancellationToken)
                 : await _runnerProvider.ExecuteStepAsync(
@@ -460,7 +519,8 @@ internal sealed class JobExecutor
                         effectiveRunDefaults.Shell,
                         effectiveRunDefaults.WorkingDirectory,
                         additionalMounts,
-                        CreateContainerExecutionOptions(job.Container, projectRoot)),
+                        CreateContainerExecutionOptions(job.Container, projectRoot),
+                        serviceNetwork),
                     collector,
                     stepCancellationToken);
             var resultShell = plan.Kind == StepExecutionKind.DockerImageAction ? null : effectiveRunDefaults.Shell;
@@ -709,6 +769,38 @@ internal sealed class JobExecutor
                 container.Ports,
                 container.Options,
                 CreateContainerVolumeMounts(container, projectRoot));
+    }
+
+    private static IReadOnlyList<ServiceContainerDefinition> CreateServiceDefinitions(
+        WorkflowJob job,
+        string projectRoot)
+    {
+        return job.Services
+            .Select(service => new ServiceContainerDefinition(
+                service.Key,
+                service.Value.Image,
+                service.Value.Env,
+                service.Value.Ports,
+                service.Value.Options,
+                CreateServiceVolumeMounts(service.Value, projectRoot)))
+            .ToArray();
+    }
+
+    private static IReadOnlyList<StepExecutionMount> CreateServiceVolumeMounts(
+        WorkflowJobService service,
+        string projectRoot)
+    {
+        if (service.Volumes.Count == 0)
+        {
+            return [];
+        }
+
+        return service.Volumes
+            .Select(volume => new StepExecutionMount(
+                Path.Combine(projectRoot, volume.Source),
+                volume.Target,
+                volume.ReadOnly))
+            .ToArray();
     }
 
     private static IReadOnlyDictionary<string, string> CreateStepContextEnvironment(

@@ -6,6 +6,9 @@ namespace Actio.Runner.Docker;
 
 public sealed class DockerRunnerProvider : IRunnerProvider
 {
+    private static readonly TimeSpan ServiceHealthTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan ServiceHealthPollInterval = TimeSpan.FromMilliseconds(500);
+
     private readonly DockerImageResolver _imageResolver;
 
     public DockerRunnerProvider()
@@ -21,6 +24,97 @@ public sealed class DockerRunnerProvider : IRunnerProvider
     public bool SupportsRunner(string runsOn)
     {
         return _imageResolver.TryResolveImage(runsOn, out _);
+    }
+
+    public async Task<ServiceContainerStartResult> StartServiceContainersAsync(
+        ServiceContainerStartRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (request.Services.Count == 0)
+        {
+            return ServiceContainerStartResult.Started(null);
+        }
+
+        var errors = new List<string>();
+        var containerNames = new List<string>();
+        var networkName = CreateNetworkName(request.JobName);
+
+        try
+        {
+            var networkResult = await RunDockerCommandAsync(
+                CreateNetworkCreateStartInfo(request.JobName, networkName),
+                cancellationToken);
+
+            if (!networkResult.Success)
+            {
+                return ServiceContainerStartResult.Failed(
+                    [FormatDockerCommandError($"creating service network for job '{request.JobName}'", networkResult)]);
+            }
+
+            foreach (var service in request.Services)
+            {
+                var containerName = CreateServiceContainerName(request.JobName, service.Name);
+                containerNames.Add(containerName);
+                var startResult = await RunDockerCommandAsync(
+                    CreateServiceContainerStartInfo(request, service, networkName, containerName),
+                    cancellationToken);
+
+                if (!startResult.Success)
+                {
+                    errors.Add(FormatDockerCommandError($"starting service '{service.Name}'", startResult));
+                    break;
+                }
+
+                errors.AddRange(await WaitForServiceHealthAsync(service.Name, containerName, cancellationToken));
+                if (errors.Count > 0)
+                {
+                    break;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            await StopServiceContainersAsync(new JobServiceNetwork(networkName, containerNames), CancellationToken.None);
+            throw;
+        }
+
+        if (errors.Count > 0)
+        {
+            var stopResult = await StopServiceContainersAsync(
+                new JobServiceNetwork(networkName, containerNames),
+                CancellationToken.None);
+            errors.AddRange(stopResult.Errors);
+            return ServiceContainerStartResult.Failed(errors);
+        }
+
+        return ServiceContainerStartResult.Started(new JobServiceNetwork(networkName, containerNames));
+    }
+
+    public async Task<ServiceContainerStopResult> StopServiceContainersAsync(
+        JobServiceNetwork network,
+        CancellationToken cancellationToken = default)
+    {
+        var errors = new List<string>();
+        foreach (var containerName in network.ContainerNames)
+        {
+            var removeResult = await RunDockerCommandAsync(
+                CreateContainerRemoveStartInfo(containerName),
+                cancellationToken);
+            if (!removeResult.Success)
+            {
+                errors.Add(FormatDockerCommandError($"removing service container '{containerName}'", removeResult));
+            }
+        }
+
+        var networkRemoveResult = await RunDockerCommandAsync(
+            CreateNetworkRemoveStartInfo(network.NetworkName),
+            cancellationToken);
+        if (!networkRemoveResult.Success)
+        {
+            errors.Add(FormatDockerCommandError($"removing service network '{network.NetworkName}'", networkRemoveResult));
+        }
+
+        return new ServiceContainerStopResult(errors);
     }
 
     public async Task<StepExecutionResult> ExecuteStepAsync(
@@ -121,7 +215,8 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             containerName,
             request.WorkingDirectory,
             request.AdditionalMounts,
-            request.Container);
+            request.Container,
+            request.Services);
         startInfo.ArgumentList.Add(image);
         startInfo.ArgumentList.Add(NormalizeShell(request.Shell));
         startInfo.ArgumentList.Add("-lc");
@@ -142,8 +237,58 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             containerName,
             null,
             request.AdditionalMounts,
-            null);
+            null,
+            request.Services);
         startInfo.ArgumentList.Add(request.Image);
+        return startInfo;
+    }
+
+    internal static ProcessStartInfo CreateServiceContainerStartInfo(
+        ServiceContainerStartRequest request,
+        ServiceContainerDefinition service,
+        string networkName,
+        string containerName)
+    {
+        var startInfo = CreateDockerStartInfo();
+
+        startInfo.ArgumentList.Add("run");
+        startInfo.ArgumentList.Add("-d");
+        startInfo.ArgumentList.Add("--name");
+        startInfo.ArgumentList.Add(containerName);
+        startInfo.ArgumentList.Add("--label");
+        startInfo.ArgumentList.Add("actio=true");
+        startInfo.ArgumentList.Add("--label");
+        startInfo.ArgumentList.Add($"actio.job={request.JobName}");
+        startInfo.ArgumentList.Add("--label");
+        startInfo.ArgumentList.Add($"actio.service={service.Name}");
+        startInfo.ArgumentList.Add("--network");
+        startInfo.ArgumentList.Add(networkName);
+        startInfo.ArgumentList.Add("--network-alias");
+        startInfo.ArgumentList.Add(service.Name);
+
+        foreach (var port in service.Ports)
+        {
+            startInfo.ArgumentList.Add("-p");
+            startInfo.ArgumentList.Add(port);
+        }
+
+        foreach (var option in service.Options)
+        {
+            startInfo.ArgumentList.Add(option);
+        }
+
+        foreach (var mount in service.Volumes)
+        {
+            AddMount(startInfo, mount);
+        }
+
+        foreach (var (key, value) in service.Environment.OrderBy(item => item.Key, StringComparer.Ordinal))
+        {
+            startInfo.ArgumentList.Add("-e");
+            startInfo.ArgumentList.Add($"{key}={value}");
+        }
+
+        startInfo.ArgumentList.Add(service.Image);
         return startInfo;
     }
 
@@ -155,15 +300,10 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         string containerName,
         string? workingDirectory,
         IReadOnlyList<StepExecutionMount>? additionalMounts,
-        JobContainerExecutionOptions? container)
+        JobContainerExecutionOptions? container,
+        JobServiceNetwork? services)
     {
-        var startInfo = new ProcessStartInfo("docker")
-        {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
+        var startInfo = CreateDockerStartInfo();
 
         startInfo.ArgumentList.Add("run");
         startInfo.ArgumentList.Add("--rm");
@@ -176,6 +316,12 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         startInfo.ArgumentList.Add($"actio.job={jobName}");
         startInfo.ArgumentList.Add("--label");
         startInfo.ArgumentList.Add($"actio.step={stepName}");
+
+        if (services is not null)
+        {
+            startInfo.ArgumentList.Add("--network");
+            startInfo.ArgumentList.Add(services.NetworkName);
+        }
 
         foreach (var port in container?.Ports ?? [])
         {
@@ -212,6 +358,17 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         return startInfo;
     }
 
+    private static ProcessStartInfo CreateDockerStartInfo()
+    {
+        return new ProcessStartInfo("docker")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+    }
+
     private static void AddMount(ProcessStartInfo startInfo, StepExecutionMount mount)
     {
         var suffix = mount.ReadOnly ? ":ro" : string.Empty;
@@ -246,6 +403,185 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             """;
     }
 
+    private static ProcessStartInfo CreateNetworkCreateStartInfo(string jobName, string networkName)
+    {
+        var startInfo = CreateDockerStartInfo();
+        startInfo.ArgumentList.Add("network");
+        startInfo.ArgumentList.Add("create");
+        startInfo.ArgumentList.Add("--label");
+        startInfo.ArgumentList.Add("actio=true");
+        startInfo.ArgumentList.Add("--label");
+        startInfo.ArgumentList.Add($"actio.job={jobName}");
+        startInfo.ArgumentList.Add(networkName);
+        return startInfo;
+    }
+
+    private static ProcessStartInfo CreateNetworkRemoveStartInfo(string networkName)
+    {
+        var startInfo = CreateDockerStartInfo();
+        startInfo.ArgumentList.Add("network");
+        startInfo.ArgumentList.Add("rm");
+        startInfo.ArgumentList.Add(networkName);
+        return startInfo;
+    }
+
+    private static ProcessStartInfo CreateContainerRemoveStartInfo(string containerName)
+    {
+        var startInfo = CreateDockerStartInfo();
+        startInfo.ArgumentList.Add("rm");
+        startInfo.ArgumentList.Add("-f");
+        startInfo.ArgumentList.Add(containerName);
+        return startInfo;
+    }
+
+    private static ProcessStartInfo CreateContainerHealthInspectStartInfo(string containerName)
+    {
+        var startInfo = CreateDockerStartInfo();
+        startInfo.ArgumentList.Add("inspect");
+        startInfo.ArgumentList.Add("--format");
+        startInfo.ArgumentList.Add("{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}");
+        startInfo.ArgumentList.Add(containerName);
+        return startInfo;
+    }
+
+    private static ProcessStartInfo CreateContainerLogsStartInfo(string containerName)
+    {
+        var startInfo = CreateDockerStartInfo();
+        startInfo.ArgumentList.Add("logs");
+        startInfo.ArgumentList.Add("--tail");
+        startInfo.ArgumentList.Add("50");
+        startInfo.ArgumentList.Add(containerName);
+        return startInfo;
+    }
+
+    private static async Task<IReadOnlyList<string>> WaitForServiceHealthAsync(
+        string serviceName,
+        string containerName,
+        CancellationToken cancellationToken)
+    {
+        var deadline = DateTimeOffset.UtcNow + ServiceHealthTimeout;
+        while (true)
+        {
+            var healthResult = await RunDockerCommandAsync(
+                CreateContainerHealthInspectStartInfo(containerName),
+                cancellationToken);
+            if (!healthResult.Success)
+            {
+                return [FormatDockerCommandError($"checking health for service '{serviceName}'", healthResult)];
+            }
+
+            var status = healthResult.StandardOutput.Trim();
+            if (string.Equals(status, "none", StringComparison.Ordinal) ||
+                string.Equals(status, "healthy", StringComparison.Ordinal))
+            {
+                return [];
+            }
+
+            if (string.Equals(status, "unhealthy", StringComparison.Ordinal))
+            {
+                return await CreateServiceHealthErrorsAsync(
+                    serviceName,
+                    containerName,
+                    $"Service '{serviceName}' became unhealthy.",
+                    cancellationToken);
+            }
+
+            if (DateTimeOffset.UtcNow >= deadline)
+            {
+                return await CreateServiceHealthErrorsAsync(
+                    serviceName,
+                    containerName,
+                    $"Service '{serviceName}' did not become healthy within {ServiceHealthTimeout.TotalSeconds:0} second(s).",
+                    cancellationToken);
+            }
+
+            await Task.Delay(ServiceHealthPollInterval, cancellationToken);
+        }
+    }
+
+    private static async Task<IReadOnlyList<string>> CreateServiceHealthErrorsAsync(
+        string serviceName,
+        string containerName,
+        string message,
+        CancellationToken cancellationToken)
+    {
+        var errors = new List<string> { message };
+        var logsResult = await RunDockerCommandAsync(CreateContainerLogsStartInfo(containerName), cancellationToken);
+        if (logsResult.Success)
+        {
+            AddDockerOutput(errors, $"Service '{serviceName}' logs", logsResult);
+        }
+        else
+        {
+            errors.Add(FormatDockerCommandError($"reading logs for service '{serviceName}'", logsResult));
+        }
+
+        return errors;
+    }
+
+    private static async Task<DockerCommandResult> RunDockerCommandAsync(
+        ProcessStartInfo startInfo,
+        CancellationToken cancellationToken)
+    {
+        using var process = new Process
+        {
+            StartInfo = startInfo,
+            EnableRaisingEvents = true
+        };
+
+        try
+        {
+            if (!process.Start())
+            {
+                return new DockerCommandResult(1, string.Empty, "Docker process could not be started.");
+            }
+        }
+        catch (Win32Exception ex)
+        {
+            return new DockerCommandResult(1, string.Empty, $"Docker could not be started: {ex.Message}");
+        }
+
+        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            TryKillProcess(process);
+            throw;
+        }
+
+        return new DockerCommandResult(
+            process.ExitCode,
+            await outputTask,
+            await errorTask);
+    }
+
+    private static string FormatDockerCommandError(string action, DockerCommandResult result)
+    {
+        var errors = new List<string> { $"Docker failed while {action} with exit code {result.ExitCode}." };
+        AddDockerOutput(errors, "stdout", result.StandardOutput);
+        AddDockerOutput(errors, "stderr", result.StandardError);
+        return string.Join(Environment.NewLine, errors);
+    }
+
+    private static void AddDockerOutput(List<string> errors, string label, DockerCommandResult result)
+    {
+        AddDockerOutput(errors, label, result.StandardOutput);
+        AddDockerOutput(errors, label, result.StandardError);
+    }
+
+    private static void AddDockerOutput(List<string> errors, string label, string output)
+    {
+        var trimmed = output.Trim();
+        if (trimmed.Length > 0)
+        {
+            errors.Add($"{label}: {trimmed}");
+        }
+    }
+
     private static async Task RedirectOutputLinesAsync(
         TextReader reader,
         IStepOutputSink output,
@@ -271,6 +607,18 @@ public sealed class DockerRunnerProvider : IRunnerProvider
     private static string CreateContainerName(string jobName, string stepName)
     {
         var name = $"actio-{SanitizeName(jobName)}-{SanitizeName(stepName)}-{Guid.NewGuid():N}";
+        return name.Length <= 63 ? name : name[..63].TrimEnd('-');
+    }
+
+    private static string CreateServiceContainerName(string jobName, string serviceName)
+    {
+        var name = $"actio-{SanitizeName(jobName)}-{SanitizeName(serviceName)}-{Guid.NewGuid():N}";
+        return name.Length <= 63 ? name : name[..63].TrimEnd('-');
+    }
+
+    private static string CreateNetworkName(string jobName)
+    {
+        var name = $"actio-{SanitizeName(jobName)}-net-{Guid.NewGuid():N}";
         return name.Length <= 63 ? name : name[..63].TrimEnd('-');
     }
 
@@ -305,19 +653,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
     {
         try
         {
-            using var cleanup = Process.Start(new ProcessStartInfo("docker")
-            {
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                ArgumentList =
-                {
-                    "rm",
-                    "-f",
-                    containerName
-                }
-            });
+            using var cleanup = Process.Start(CreateContainerRemoveStartInfo(containerName));
 
             cleanup?.WaitForExit(5000);
         }
@@ -327,5 +663,13 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         catch (Win32Exception)
         {
         }
+    }
+
+    private sealed record DockerCommandResult(
+        int ExitCode,
+        string StandardOutput,
+        string StandardError)
+    {
+        public bool Success => ExitCode == 0;
     }
 }

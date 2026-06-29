@@ -6,7 +6,8 @@ public sealed record DockerActionExecutionRequest(
     string Image,
     string ProjectRoot,
     IReadOnlyDictionary<string, string> Environment,
-    IReadOnlyList<StepExecutionMount>? AdditionalMounts = null)
+    IReadOnlyList<StepExecutionMount>? AdditionalMounts = null,
+    JobServiceNetwork? Services = null)
 {
     public IReadOnlyList<StepExecutionMount> AdditionalMounts { get; init; } = AdditionalMounts ?? [];
 }

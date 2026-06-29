@@ -117,6 +117,85 @@ public sealed class DockerRunnerProviderTests
     }
 
     [Fact]
+    public void CreateShellStepStartInfo_AttachesServiceNetwork()
+    {
+        var request = new StepExecutionRequest(
+            "test",
+            "Run tests",
+            "ubuntu-latest",
+            "dotnet test",
+            Directory.GetCurrentDirectory(),
+            new Dictionary<string, string>(),
+            Services: new JobServiceNetwork("actio-test-network", ["actio-postgres"]));
+
+        var startInfo = DockerRunnerProvider.CreateShellStepStartInfo(request, "ubuntu:24.04", "actio-test");
+        var args = startInfo.ArgumentList.ToArray();
+        var networkIndex = Array.IndexOf(args, "--network");
+
+        Assert.True(networkIndex >= 0);
+        Assert.Equal("actio-test-network", args[networkIndex + 1]);
+    }
+
+    [Fact]
+    public void CreateDockerActionStartInfo_AttachesServiceNetwork()
+    {
+        var request = new DockerActionExecutionRequest(
+            "test",
+            "Use image",
+            "alpine:3.20",
+            Directory.GetCurrentDirectory(),
+            new Dictionary<string, string>(),
+            Services: new JobServiceNetwork("actio-test-network", ["actio-postgres"]));
+
+        var startInfo = DockerRunnerProvider.CreateDockerActionStartInfo(request, "actio-test");
+        var args = startInfo.ArgumentList.ToArray();
+        var networkIndex = Array.IndexOf(args, "--network");
+
+        Assert.True(networkIndex >= 0);
+        Assert.Equal("actio-test-network", args[networkIndex + 1]);
+    }
+
+    [Fact]
+    public void CreateServiceContainerStartInfo_UsesServiceConfiguration()
+    {
+        var dbPath = Path.Combine(Directory.GetCurrentDirectory(), "db");
+        var service = new ServiceContainerDefinition(
+            "postgres",
+            "postgres:16",
+            new Dictionary<string, string>
+            {
+                ["POSTGRES_PASSWORD"] = "postgres"
+            },
+            ["5432:5432"],
+            ["--health-cmd=pg_isready", "--health-interval=5s"],
+            [new StepExecutionMount(dbPath, "/var/lib/postgresql/data", ReadOnly: false)]);
+        var request = new ServiceContainerStartRequest(
+            "test",
+            Directory.GetCurrentDirectory(),
+            [service]);
+
+        var startInfo = DockerRunnerProvider.CreateServiceContainerStartInfo(
+            request,
+            service,
+            "actio-test-network",
+            "actio-postgres");
+        var args = startInfo.ArgumentList.ToArray();
+        var imageIndex = Array.IndexOf(args, "postgres:16");
+
+        Assert.Equal("docker", startInfo.FileName);
+        Assert.Contains("-d", args);
+        Assert.Contains("actio-postgres", args);
+        Assert.Contains("actio-test-network", args);
+        Assert.Contains("postgres", args);
+        Assert.Contains("5432:5432", args);
+        Assert.Contains("--health-cmd=pg_isready", args);
+        Assert.Contains("--health-interval=5s", args);
+        Assert.Contains($"{Path.GetFullPath(dbPath)}:/var/lib/postgresql/data", args);
+        Assert.Contains("POSTGRES_PASSWORD=postgres", args);
+        Assert.Equal(args.Length - 1, imageIndex);
+    }
+
+    [Fact]
     public void CreateShellStepStartInfo_UsesConfiguredShellAndWorkingDirectory()
     {
         var request = new StepExecutionRequest(

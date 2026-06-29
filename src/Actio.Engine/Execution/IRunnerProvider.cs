@@ -4,6 +4,14 @@ public interface IRunnerProvider
 {
     bool SupportsRunner(string runsOn);
 
+    Task<ServiceContainerStartResult> StartServiceContainersAsync(
+        ServiceContainerStartRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<ServiceContainerStopResult> StopServiceContainersAsync(
+        JobServiceNetwork network,
+        CancellationToken cancellationToken = default);
+
     Task<StepExecutionResult> ExecuteStepAsync(
         StepExecutionRequest request,
         IStepOutputSink output,
