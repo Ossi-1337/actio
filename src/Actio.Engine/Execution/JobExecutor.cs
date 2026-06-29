@@ -139,6 +139,7 @@ internal sealed class JobExecutor
                 var stepStartedAt = DateTimeOffset.UtcNow;
                 currentStepStartedAt = stepStartedAt;
                 var stepResult = await ExecuteStepAsync(
+                    workflowName,
                     job,
                     step,
                     index,
@@ -147,6 +148,7 @@ internal sealed class JobExecutor
                     stepOutputs,
                     projectRoot,
                     runId,
+                    runTrigger,
                     output,
                     error,
                     jobCancellationToken);
@@ -333,6 +335,7 @@ internal sealed class JobExecutor
     }
 
     private async Task<StepExecutionOutcome> ExecuteStepAsync(
+        string workflowName,
         WorkflowJob job,
         WorkflowStep step,
         int stepIndex,
@@ -341,6 +344,7 @@ internal sealed class JobExecutor
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> stepOutputs,
         string projectRoot,
         string runId,
+        WorkflowRunTrigger runTrigger,
         TextWriter output,
         TextWriter error,
         CancellationToken cancellationToken)
@@ -380,7 +384,13 @@ internal sealed class JobExecutor
                 return StepExecutionOutcome.FailedWithoutExitCode(step.Uses ?? string.Empty, plan.Errors, collector.LogPath);
             }
 
-            var environment = CreateStepEnvironment(workflowEnv, job.Env, stepOutputs, step.Env, plan.Environment);
+            var environment = CreateStepEnvironment(
+                workflowEnv,
+                job.Env,
+                stepOutputs,
+                step.Env,
+                DefaultEnvironmentVariables.Create(workflowName, job, step, stepIndex, runId, runTrigger),
+                plan.Environment);
             var result = plan.Kind == StepExecutionKind.DockerImageAction
                 ? await _runnerProvider.ExecuteDockerActionAsync(
                     new DockerActionExecutionRequest(
@@ -573,12 +583,14 @@ internal sealed class JobExecutor
         IReadOnlyDictionary<string, string> jobEnv,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> stepOutputs,
         IReadOnlyDictionary<string, string> stepEnv,
+        IReadOnlyDictionary<string, string> defaultEnv,
         IReadOnlyDictionary<string, string> actionEnv)
     {
         var environment = new Dictionary<string, string>(workflowEnv, StringComparer.Ordinal);
         environment.Merge(jobEnv);
         environment.Merge(CreateStepOutputEnvironment(stepOutputs));
         environment.Merge(stepEnv);
+        environment.MergeDefaultEnvironment(defaultEnv);
         environment.Merge(actionEnv);
         return environment;
     }
@@ -748,6 +760,19 @@ file static class DictionaryExtensions
     {
         foreach (var item in source)
         {
+            target[item.Key] = item.Value;
+        }
+    }
+
+    public static void MergeDefaultEnvironment(this Dictionary<string, string> target, IReadOnlyDictionary<string, string> source)
+    {
+        foreach (var item in source)
+        {
+            if (string.Equals(item.Key, "CI", StringComparison.Ordinal) && target.ContainsKey(item.Key))
+            {
+                continue;
+            }
+
             target[item.Key] = item.Value;
         }
     }

@@ -1583,7 +1583,7 @@ public sealed partial class WorkflowParser
         ExpressionReference reference)
     {
         if (reference.Path.Count == 1 &&
-            reference.Path[0] is "event_name" or "workflow" or "workspace" or "run_id" or "job")
+            reference.Path[0] is "event_name" or "workflow" or "workspace" or "run_id" or "job" or "actor" or "triggering_actor")
         {
             return;
         }

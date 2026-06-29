@@ -202,6 +202,66 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_AddsDefaultEnvironmentVariablesToRunSteps()
+    {
+        var runner = new FakeRunnerProvider([0]);
+        var projectRoot = Environment.CurrentDirectory;
+        var workflow = new WorkflowDocument(
+            "CI",
+            new Dictionary<string, string>
+            {
+                ["CI"] = "custom",
+                ["GITHUB_RUN_ID"] = "wrong"
+            },
+            new Dictionary<string, WorkflowJob>
+            {
+                ["test"] = new WorkflowJob(
+                    "test",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>
+                    {
+                        ["RUNNER_OS"] = "Wrong"
+                    },
+                    [
+                        new WorkflowStep(
+                            "Run tests",
+                            "dotnet test",
+                            null,
+                            Id: "run_tests",
+                            Env: new Dictionary<string, string>
+                            {
+                                ["ACTIO_WORKSPACE"] = "wrong"
+                            })
+                    ])
+            });
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(
+                projectRoot,
+                RunId: "run-env",
+                RunTrigger: new WorkflowRunTrigger("workflow_dispatch", "CLI")),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var request = Assert.Single(runner.Requests);
+        Assert.Equal("custom", request.Environment["CI"]);
+        AssertDefaultEnvironment(
+            request.Environment,
+            "run-env",
+            "CI",
+            "test",
+            "run_tests",
+            "Run tests",
+            "workflow_dispatch",
+            "CLI",
+            expectedCi: "custom");
+    }
+
+    [Fact]
     public async Task ExecuteAsync_ExposesStepOutputsToLaterStepEnvironment()
     {
         var runner = new FakeRunnerProvider(
@@ -644,7 +704,7 @@ public sealed class WorkflowExecutorTests
                 ["test"] = new(
                     "test",
                     ["prepare"],
-                    "${{ env.RUN_TESTS == 'true' && github.workflow == 'CI' && github.run_id == 'run-context' && github.event_name == 'workflow_dispatch' && github.event.source == 'CLI' && runner.os == 'Linux' && needs.prepare.result == 'success' && needs.prepare.outputs.changed == 'true' }}",
+                    "${{ env.RUN_TESTS == 'true' && github.workflow == 'CI' && github.run_id == 'run-context' && github.actor != '' && github.triggering_actor != '' && github.event_name == 'workflow_dispatch' && github.event.source == 'CLI' && runner.os == 'Linux' && needs.prepare.result == 'success' && needs.prepare.outputs.changed == 'true' }}",
                     "ubuntu-latest",
                     new Dictionary<string, string>(),
                     [new WorkflowStep("Test", "dotnet test", null)])
@@ -1287,7 +1347,7 @@ public sealed class WorkflowExecutorTests
 
         var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
             workflow,
-            new WorkflowExecutionOptions(Environment.CurrentDirectory),
+            new WorkflowExecutionOptions(Environment.CurrentDirectory, RunId: "run-docker-env"),
             TextWriter.Null,
             TextWriter.Null);
 
@@ -1297,6 +1357,16 @@ public sealed class WorkflowExecutorTests
         Assert.Equal("alpine:3.20", request.Image);
         Assert.Equal("true", request.Environment["DOTNET_NOLOGO"]);
         Assert.Equal("22", request.Environment["INPUT_NODE_VERSION"]);
+        AssertDefaultEnvironment(
+            request.Environment,
+            "run-docker-env",
+            "CI",
+            "test",
+            "step_1",
+            "Use image",
+            "workflow_dispatch",
+            "CLI",
+            expectedCi: "true");
         Assert.Equal("alpine:3.20", Assert.Single(cache.DockerImageRequests).Image);
     }
 
@@ -1596,6 +1666,47 @@ public sealed class WorkflowExecutorTests
                 ["DOTNET_NOLOGO"] = "true"
             },
             jobs.ToDictionary(job => job.Name, StringComparer.Ordinal));
+    }
+
+    private static void AssertDefaultEnvironment(
+        IReadOnlyDictionary<string, string> environment,
+        string runId,
+        string workflowName,
+        string jobName,
+        string stepIdentity,
+        string stepName,
+        string eventName,
+        string eventSource,
+        string expectedCi)
+    {
+        var actor = string.IsNullOrWhiteSpace(Environment.UserName)
+            ? "local"
+            : Environment.UserName;
+
+        Assert.Equal("true", environment["ACTIO"]);
+        Assert.Equal(eventName, environment["ACTIO_EVENT_NAME"]);
+        Assert.Equal(eventSource, environment["ACTIO_EVENT_SOURCE"]);
+        Assert.Equal(jobName, environment["ACTIO_JOB"]);
+        Assert.Equal(runId, environment["ACTIO_RUN_ID"]);
+        Assert.Equal(stepIdentity, environment["ACTIO_STEP"]);
+        Assert.Equal(stepName, environment["ACTIO_STEP_NAME"]);
+        Assert.Equal(workflowName, environment["ACTIO_WORKFLOW"]);
+        Assert.Equal("/workspace", environment["ACTIO_WORKSPACE"]);
+        Assert.Equal(expectedCi, environment["CI"]);
+        Assert.Equal(stepIdentity, environment["GITHUB_ACTION"]);
+        Assert.Equal("true", environment["GITHUB_ACTIONS"]);
+        Assert.Equal(actor, environment["GITHUB_ACTOR"]);
+        Assert.Equal(eventName, environment["GITHUB_EVENT_NAME"]);
+        Assert.Equal(jobName, environment["GITHUB_JOB"]);
+        Assert.Equal("1", environment["GITHUB_RUN_ATTEMPT"]);
+        Assert.Equal(runId, environment["GITHUB_RUN_ID"]);
+        Assert.Equal(actor, environment["GITHUB_TRIGGERING_ACTOR"]);
+        Assert.Equal(workflowName, environment["GITHUB_WORKFLOW"]);
+        Assert.Equal("/workspace", environment["GITHUB_WORKSPACE"]);
+        Assert.False(string.IsNullOrWhiteSpace(environment["RUNNER_ARCH"]));
+        Assert.Equal("docker", environment["RUNNER_ENVIRONMENT"]);
+        Assert.Equal("ubuntu-latest", environment["RUNNER_NAME"]);
+        Assert.Equal("Linux", environment["RUNNER_OS"]);
     }
 
     private sealed class FakeRunnerProvider : IRunnerProvider

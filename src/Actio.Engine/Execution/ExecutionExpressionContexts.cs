@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using System.Text.Json.Nodes;
 using Actio.Core.Expressions;
 using Actio.Core.Workflows;
@@ -116,6 +115,8 @@ internal static class ExecutionExpressionContexts
         WorkflowRunTrigger runTrigger,
         string jobName)
     {
+        var actor = DefaultEnvironmentVariables.GetLocalActor();
+
         return new JsonObject
         {
             ["event_name"] = runTrigger.EventName,
@@ -123,6 +124,8 @@ internal static class ExecutionExpressionContexts
             ["workspace"] = Path.GetFullPath(projectRoot),
             ["run_id"] = runId,
             ["job"] = jobName,
+            ["actor"] = actor,
+            ["triggering_actor"] = actor,
             ["event"] = CreateEventContext(runTrigger.EventPayload)
         };
     }
@@ -175,9 +178,9 @@ internal static class ExecutionExpressionContexts
         return new JsonObject
         {
             ["name"] = runsOn,
-            ["os"] = "Linux",
-            ["environment"] = "docker",
-            ["arch"] = RuntimeInformation.ProcessArchitecture.ToString()
+            ["os"] = DefaultEnvironmentVariables.RunnerOs,
+            ["environment"] = DefaultEnvironmentVariables.RunnerEnvironment,
+            ["arch"] = DefaultEnvironmentVariables.CreateRunnerArchitecture()
         };
     }
 

@@ -1030,7 +1030,7 @@ public sealed class WorkflowParserTests
                     run: dotnet restore
               test:
                 needs: prepare
-                if: "${{ env.RUN_TESTS == 'true' && github.workflow == 'CI' && github.run_id != '' && runner.os == 'Linux' && needs.prepare.result == 'success' }}"
+                if: "${{ env.RUN_TESTS == 'true' && github.workflow == 'CI' && github.run_id != '' && github.actor != '' && github.triggering_actor != '' && runner.os == 'Linux' && needs.prepare.result == 'success' }}"
                 runs-on: ubuntu-latest
                 steps:
                   - id: detect
