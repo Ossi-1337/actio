@@ -120,7 +120,9 @@ public sealed partial class WorkflowParser
 
     private static readonly HashSet<string> JobStrategyKeys = new(StringComparer.Ordinal)
     {
-        "matrix"
+        "matrix",
+        "fail-fast",
+        "max-parallel"
     };
 
     private static readonly IReadOnlyDictionary<string, IReadOnlySet<string>> KnownActivityTypes =
@@ -1345,13 +1347,18 @@ public sealed partial class WorkflowParser
         }
 
         AddUnknownKeyErrors(errors, strategyMap, JobStrategyKeys, path);
+        var failFast = ReadOptionalBoolean(errors, strategyMap, "fail-fast", $"{path}.fail-fast") ?? true;
+        var maxParallel = ReadOptionalPositiveInt(errors, strategyMap, "max-parallel", $"{path}.max-parallel");
         if (!TryGet(strategyMap, "matrix", out _))
         {
             errors.Add($"{path}.matrix is required.");
             return WorkflowJobStrategy.Empty;
         }
 
-        return new WorkflowJobStrategy(ReadJobMatrix(errors, strategyMap, $"{path}.matrix"));
+        return new WorkflowJobStrategy(
+            ReadJobMatrix(errors, strategyMap, $"{path}.matrix"),
+            failFast,
+            maxParallel);
     }
 
     private static WorkflowJobMatrix ReadJobMatrix(
@@ -1370,13 +1377,10 @@ public sealed partial class WorkflowParser
             return WorkflowJobMatrix.Empty;
         }
 
-        if (matrixMap.Children.Count == 0)
-        {
-            errors.Add($"{path} must contain at least one axis.");
-            return WorkflowJobMatrix.Empty;
-        }
-
         var axes = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+        var include = ReadMatrixEntries(errors, matrixMap, "include", $"{path}.include");
+        var exclude = ReadMatrixEntries(errors, matrixMap, "exclude", $"{path}.exclude");
+
         foreach (var (keyNode, valueNode) in matrixMap.Children)
         {
             var axisName = ReadMapKey(errors, keyNode, path);
@@ -1387,7 +1391,6 @@ public sealed partial class WorkflowParser
 
             if (axisName is "include" or "exclude")
             {
-                errors.Add($"{path}.{axisName} is not supported until matrix include/exclude support is implemented.");
                 continue;
             }
 
@@ -1398,7 +1401,81 @@ public sealed partial class WorkflowParser
             }
         }
 
-        return new WorkflowJobMatrix(axes);
+        if (axes.Count == 0 && include.Count == 0)
+        {
+            errors.Add($"{path} must contain at least one axis or include entry.");
+        }
+
+        return new WorkflowJobMatrix(axes, include, exclude);
+    }
+
+    private static IReadOnlyList<IReadOnlyDictionary<string, string>> ReadMatrixEntries(
+        List<string> errors,
+        YamlMappingNode matrixMap,
+        string key,
+        string path)
+    {
+        if (!TryGet(matrixMap, key, out var node))
+        {
+            return [];
+        }
+
+        if (node is not YamlSequenceNode sequence)
+        {
+            errors.Add($"{path} must be a list of mappings.");
+            return [];
+        }
+
+        var entries = new List<IReadOnlyDictionary<string, string>>();
+        for (var index = 0; index < sequence.Children.Count; index++)
+        {
+            var itemPath = $"{path}[{index}]";
+            if (sequence.Children[index] is not YamlMappingNode map)
+            {
+                errors.Add($"{itemPath} must be a mapping.");
+                continue;
+            }
+
+            if (map.Children.Count == 0)
+            {
+                errors.Add($"{itemPath} must contain at least one value.");
+                continue;
+            }
+
+            entries.Add(ReadMatrixEntry(errors, map, itemPath));
+        }
+
+        return entries;
+    }
+
+    private static IReadOnlyDictionary<string, string> ReadMatrixEntry(
+        List<string> errors,
+        YamlMappingNode map,
+        string path)
+    {
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (keyNode, valueNode) in map.Children)
+        {
+            var name = ReadMapKey(errors, keyNode, path);
+            if (name is null)
+            {
+                continue;
+            }
+
+            if (valueNode is not YamlScalarNode scalar)
+            {
+                errors.Add($"{path}.{name} must be a scalar value.");
+                continue;
+            }
+
+            var value = ReadScalarValue(errors, scalar, $"{path}.{name}");
+            if (value is not null)
+            {
+                values[name] = value;
+            }
+        }
+
+        return values;
     }
 
     private static IReadOnlyList<string> ReadMatrixAxisValues(
@@ -1853,7 +1930,8 @@ public sealed partial class WorkflowParser
         }
 
         var axisName = reference.Path[0];
-        if (job.Strategy.Matrix.Axes.ContainsKey(axisName))
+        if (job.Strategy.Matrix.Axes.ContainsKey(axisName) ||
+            job.Strategy.Matrix.Include.Any(entry => entry.ContainsKey(axisName)))
         {
             return;
         }

@@ -40,6 +40,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         TextWriter error,
         CancellationToken cancellationToken = default)
     {
+        var synchronizedOutput = TextWriter.Synchronized(output);
+        var synchronizedError = TextWriter.Synchronized(error);
         var runId = options.RunId ?? _runStore.CreateRunId();
         var expansion = MatrixJobExpander.Expand(workflow.Jobs);
         var totalSteps = expansion.Jobs.Values.Sum(job => job.Steps.Count);
@@ -107,59 +109,86 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         }
         else
         {
-            foreach (var job in plan.Jobs)
+            var stopExecution = false;
+            for (var index = 0; index < plan.Jobs.Count;)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-
-                var outcome = await ExecuteOrSkipJobAsync(
-                    workflow,
-                    job,
-                    options,
-                    runId,
-                    jobStatuses,
-                    actualJobStatuses,
-                    jobOutputs,
-                    expansion.JobNamesByBaseName,
-                    output,
-                    error,
-                    cancellationToken);
-
-                successfulSteps += outcome.SuccessfulSteps;
-                failedSteps += outcome.FailedSteps;
-                skippedSteps += outcome.SkippedSteps;
-                continuedSteps += outcome.ContinuedSteps;
-                jobRecords.Add(outcome.Job);
-                var toleratedFailure = job.ContinueOnError && IsUnsuccessfulJobStatus(outcome.Job.Status);
-                jobStatuses[job.Name] = toleratedFailure ? SuccessStatus : outcome.Job.Status;
-                actualJobStatuses[job.Name] = outcome.Job.Status;
-                jobOutputs[job.Name] = outcome.Job.Outputs;
-                errors.AddRange(
-                    IsUnsuccessfulJobStatus(outcome.Job.Status) && !toleratedFailure
-                        ? outcome.Job.Errors
-                        : []);
-                runArtifacts.AddRange(outcome.Job.Artifacts);
-                runOutputs.AddRange(outcome.Job.Outputs.Select(item =>
-                    new WorkflowRunOutput(job.Name, item.Key, item.Value)));
-
-                var progressSaveError = await TrySaveRunRecordAsync(
-                    CreateRunRecord(
-                        runId,
+                var jobGroup = GetMatrixJobGroup(plan.Jobs, index);
+                var outcomes = jobGroup.Count == 1
+                    ? [new PlannedJobOutcome(
+                        jobGroup[0],
+                        await ExecuteOrSkipJobAsync(
+                            workflow,
+                            jobGroup[0],
+                            options,
+                            runId,
+                            jobStatuses,
+                            actualJobStatuses,
+                            jobOutputs,
+                            expansion.JobNamesByBaseName,
+                            synchronizedOutput,
+                            synchronizedError,
+                            cancellationToken))]
+                    : await ExecuteMatrixJobGroupAsync(
                         workflow,
+                        jobGroup,
                         options,
-                        RunningStatus,
-                        startedAt,
-                        DateTimeOffset.UtcNow,
-                        jobRecords,
-                        runOutputs,
-                        runArtifacts,
-                        errors),
-                    cancellationToken);
+                        runId,
+                        jobStatuses,
+                        actualJobStatuses,
+                        jobOutputs,
+                        expansion.JobNamesByBaseName,
+                        synchronizedOutput,
+                        synchronizedError,
+                        cancellationToken);
 
-                if (progressSaveError is not null)
+                foreach (var outcome in outcomes)
                 {
-                    errors.Add(progressSaveError);
+                    successfulSteps += outcome.Outcome.SuccessfulSteps;
+                    failedSteps += outcome.Outcome.FailedSteps;
+                    skippedSteps += outcome.Outcome.SkippedSteps;
+                    continuedSteps += outcome.Outcome.ContinuedSteps;
+                    jobRecords.Add(outcome.Outcome.Job);
+                    var toleratedFailure = outcome.Job.ContinueOnError && IsUnsuccessfulJobStatus(outcome.Outcome.Job.Status);
+                    jobStatuses[outcome.Job.Name] = toleratedFailure ? SuccessStatus : outcome.Outcome.Job.Status;
+                    actualJobStatuses[outcome.Job.Name] = outcome.Outcome.Job.Status;
+                    jobOutputs[outcome.Job.Name] = outcome.Outcome.Job.Outputs;
+                    errors.AddRange(
+                        IsUnsuccessfulJobStatus(outcome.Outcome.Job.Status) && !toleratedFailure
+                            ? outcome.Outcome.Job.Errors
+                            : []);
+                    runArtifacts.AddRange(outcome.Outcome.Job.Artifacts);
+                    runOutputs.AddRange(outcome.Outcome.Job.Outputs.Select(item =>
+                        new WorkflowRunOutput(outcome.Job.Name, item.Key, item.Value)));
+
+                    var progressSaveError = await TrySaveRunRecordAsync(
+                        CreateRunRecord(
+                            runId,
+                            workflow,
+                            options,
+                            RunningStatus,
+                            startedAt,
+                            DateTimeOffset.UtcNow,
+                            jobRecords,
+                            runOutputs,
+                            runArtifacts,
+                            errors),
+                        cancellationToken);
+
+                    if (progressSaveError is not null)
+                    {
+                        errors.Add(progressSaveError);
+                        stopExecution = true;
+                        break;
+                    }
+                }
+
+                if (stopExecution)
+                {
                     break;
                 }
+
+                index += jobGroup.Count;
             }
         }
 
@@ -214,6 +243,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         CancellationToken cancellationToken)
     {
         var skipReason = GetDependencySkipReason(job, jobStatuses);
+        var contextJobOutputs = CreateContextJobOutputs(job, jobNamesByBaseName, jobOutputs);
+        var contextJobStatuses = CreateContextJobStatuses(job, jobNamesByBaseName, actualJobStatuses);
         if (skipReason is null || CanRunAfterDependencyFailure(job.If))
         {
             var condition = _conditionEvaluator.EvaluateJob(
@@ -224,9 +255,9 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                     options,
                     runId,
                     MergeEnvironment(workflow.Env, job.Env),
-                    CreateContextJobOutputs(job, jobNamesByBaseName, jobOutputs),
-                    CreateContextJobStatuses(job, jobNamesByBaseName, actualJobStatuses)),
-                CreateContextJobStatuses(job, jobNamesByBaseName, actualJobStatuses),
+                    contextJobOutputs,
+                    contextJobStatuses),
+                contextJobStatuses,
                 job.Needs);
 
             if (!condition.Success)
@@ -251,8 +282,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 job,
                 workflow.Env,
                 workflow.Defaults,
-                CreateContextJobOutputs(job, jobNamesByBaseName, jobOutputs),
-                CreateContextJobStatuses(job, jobNamesByBaseName, actualJobStatuses),
+                contextJobOutputs,
+                contextJobStatuses,
                 options.RunTrigger,
                 options.ProjectRoot,
                 runId,
@@ -260,6 +291,69 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 error,
                 cancellationToken)
             : CreateSkippedJobOutcome(job, skipReason);
+    }
+
+    private async Task<IReadOnlyList<PlannedJobOutcome>> ExecuteMatrixJobGroupAsync(
+        WorkflowDocument workflow,
+        IReadOnlyList<WorkflowJob> jobs,
+        WorkflowExecutionOptions options,
+        string runId,
+        IReadOnlyDictionary<string, string> jobStatuses,
+        IReadOnlyDictionary<string, string> actualJobStatuses,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> jobNamesByBaseName,
+        TextWriter output,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        var outcomes = new List<PlannedJobOutcome>();
+        var maxParallel = Math.Max(1, jobs[0].Strategy.MaxParallel ?? 1);
+        var failFast = jobs[0].Strategy.FailFast;
+
+        for (var index = 0; index < jobs.Count; index += maxParallel)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var batch = jobs.Skip(index).Take(maxParallel).ToArray();
+            var batchOutcomes = await Task.WhenAll(batch.Select(async job =>
+                new PlannedJobOutcome(
+                    job,
+                    await ExecuteOrSkipJobAsync(
+                        workflow,
+                        job,
+                        options,
+                        runId,
+                        jobStatuses,
+                        actualJobStatuses,
+                        jobOutputs,
+                        jobNamesByBaseName,
+                        output,
+                        error,
+                        cancellationToken))));
+
+            outcomes.AddRange(batchOutcomes);
+
+            if (!failFast || !batchOutcomes.Any(IsFailFastFailure))
+            {
+                continue;
+            }
+
+            var remainingJobs = jobs.Skip(index + batch.Length);
+            outcomes.AddRange(remainingJobs.Select(job =>
+                new PlannedJobOutcome(
+                    job,
+                    CreateSkippedJobOutcome(
+                        job,
+                        "Matrix fail-fast skipped this job because another matrix job failed."))));
+            break;
+        }
+
+        return outcomes;
+    }
+
+    private static bool IsFailFastFailure(PlannedJobOutcome outcome)
+    {
+        return !outcome.Job.ContinueOnError &&
+            IsUnsuccessfulJobStatus(outcome.Outcome.Job.Status);
     }
 
     private static WorkflowRunRecord CreateRunRecord(
@@ -410,6 +504,37 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         return environment;
     }
 
+    private static IReadOnlyList<WorkflowJob> GetMatrixJobGroup(
+        IReadOnlyList<WorkflowJob> jobs,
+        int startIndex)
+    {
+        var first = jobs[startIndex];
+        if (!IsMatrixJob(first))
+        {
+            return [first];
+        }
+
+        var group = new List<WorkflowJob> { first };
+        for (var index = startIndex + 1; index < jobs.Count; index++)
+        {
+            var next = jobs[index];
+            if (!IsMatrixJob(next) ||
+                !string.Equals(next.BaseName, first.BaseName, StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            group.Add(next);
+        }
+
+        return group;
+    }
+
+    private static bool IsMatrixJob(WorkflowJob job)
+    {
+        return job.Matrix.Count > 0;
+    }
+
     private static IReadOnlyDictionary<string, string> CreateContextJobStatuses(
         WorkflowJob job,
         IReadOnlyDictionary<string, IReadOnlyList<string>> jobNamesByBaseName,
@@ -498,4 +623,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
 
         return mergedOutputs;
     }
+
+    private sealed record PlannedJobOutcome(
+        WorkflowJob Job,
+        JobExecutionOutcome Outcome);
 }

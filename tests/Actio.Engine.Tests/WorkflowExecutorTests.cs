@@ -921,6 +921,143 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_AppliesMatrixIncludeAndExclude()
+    {
+        var runner = new FakeRunnerProvider([0, 0, 0, 0, 0]);
+        var workflow = CreateWorkflow(CreateMatrixJob(
+            "test",
+            [],
+            "${{ matrix.os }}",
+            [new WorkflowStep("Test", "dotnet test", null)],
+            new WorkflowJobStrategy(
+                new WorkflowJobMatrix(
+                    new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+                    {
+                        ["os"] = ["ubuntu-latest", "debian-latest"],
+                        ["dotnet"] = ["10.0", "9.0"]
+                    },
+                    Include:
+                    [
+                        new Dictionary<string, string>(StringComparer.Ordinal)
+                        {
+                            ["os"] = "ubuntu-latest",
+                            ["configuration"] = "Debug"
+                        },
+                        new Dictionary<string, string>(StringComparer.Ordinal)
+                        {
+                            ["os"] = "alpine-latest",
+                            ["dotnet"] = "10.0"
+                        },
+                        new Dictionary<string, string>(StringComparer.Ordinal)
+                        {
+                            ["os"] = "debian-latest",
+                            ["dotnet"] = "9.0",
+                            ["configuration"] = "Release"
+                        }
+                    ],
+                    Exclude:
+                    [
+                        new Dictionary<string, string>(StringComparer.Ordinal)
+                        {
+                            ["os"] = "debian-latest",
+                            ["dotnet"] = "9.0"
+                        }
+                    ]))));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal(5, result.SuccessfulSteps);
+        Assert.Equal(5, result.TotalSteps);
+        Assert.Equal(
+            [
+                "test[configuration=Debug,dotnet=10.0,os=ubuntu-latest]",
+                "test[dotnet=10.0,os=debian-latest]",
+                "test[configuration=Debug,dotnet=9.0,os=ubuntu-latest]",
+                "test[dotnet=10.0,os=alpine-latest]",
+                "test[configuration=Release,dotnet=9.0,os=debian-latest]"
+            ],
+            runner.Requests.Select(request => request.JobName));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_SkipsRemainingMatrixJobsWhenFailFastIsEnabled()
+    {
+        var runner = new FakeRunnerProvider([42]);
+        var store = new RecordingRunStore();
+        var workflow = CreateWorkflow(CreateMatrixJob(
+            "test",
+            [],
+            "${{ matrix.os }}",
+            [new WorkflowStep("Test", "exit 42", null)],
+            CreateMatrixStrategy(["ubuntu-latest", "debian-latest", "alpine-latest"])));
+
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Equal(3, result.TotalSteps);
+        Assert.Equal(1, result.FailedSteps);
+        Assert.Equal(2, result.SkippedSteps);
+        Assert.Single(runner.Requests);
+
+        var jobs = store.SavedRecords.Last().Jobs;
+        Assert.Equal(["Failed", "Skipped", "Skipped"], jobs.Select(job => job.Status));
+        Assert.Contains(jobs.Skip(1), job =>
+            job.Errors.Contains("Matrix fail-fast skipped this job because another matrix job failed."));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_RespectsMatrixMaxParallel()
+    {
+        var currentConcurrency = 0;
+        var maxConcurrency = 0;
+        var runner = new FakeRunnerProvider(Enumerable.Range(0, 4).Select(_ => new FakeRunnerStep(
+            0,
+            delay: TimeSpan.FromMilliseconds(50),
+            onExecute: (_, _) =>
+            {
+                var current = Interlocked.Increment(ref currentConcurrency);
+                int observed;
+                do
+                {
+                    observed = maxConcurrency;
+                    if (current <= observed)
+                    {
+                        break;
+                    }
+                }
+                while (Interlocked.CompareExchange(ref maxConcurrency, current, observed) != observed);
+            },
+            onComplete: () => Interlocked.Decrement(ref currentConcurrency))));
+        var workflow = CreateWorkflow(CreateMatrixJob(
+            "test",
+            [],
+            "${{ matrix.os }}",
+            [new WorkflowStep("Test", "dotnet test", null)],
+            CreateMatrixStrategy(["ubuntu-latest", "debian-latest", "alpine-latest", "ubuntu-22.04"], maxParallel: 2)));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal(4, result.SuccessfulSteps);
+        Assert.Equal(4, result.TotalSteps);
+        Assert.Equal(4, runner.Requests.Count);
+        Assert.Equal(2, maxConcurrency);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_SkipsJobWhenConditionIsFalse()
     {
         var runner = new FakeRunnerProvider(
@@ -2004,7 +2141,8 @@ public sealed class WorkflowExecutorTests
         string name,
         IReadOnlyList<string> needs,
         string runsOn,
-        IReadOnlyList<WorkflowStep> steps)
+        IReadOnlyList<WorkflowStep> steps,
+        WorkflowJobStrategy? strategy = null)
     {
         return new WorkflowJob(
             name,
@@ -2017,16 +2155,26 @@ public sealed class WorkflowExecutorTests
             null,
             false,
             null,
-            new WorkflowJobStrategy(
-                new WorkflowJobMatrix(
-                    new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
-                    {
-                        ["os"] = ["ubuntu-latest", "debian-latest"],
-                        ["dotnet"] = ["10.0"]
-                    })),
+            strategy ?? CreateMatrixStrategy(["ubuntu-latest", "debian-latest"]),
             new Dictionary<string, string>(),
             [],
             steps);
+    }
+
+    private static WorkflowJobStrategy CreateMatrixStrategy(
+        IReadOnlyList<string> osValues,
+        bool failFast = true,
+        int? maxParallel = null)
+    {
+        return new WorkflowJobStrategy(
+            new WorkflowJobMatrix(
+                new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+                {
+                    ["os"] = osValues,
+                    ["dotnet"] = ["10.0"]
+                }),
+            failFast,
+            maxParallel);
     }
 
     private static void AssertDefaultEnvironment(
@@ -2091,6 +2239,7 @@ public sealed class WorkflowExecutorTests
 
     private sealed class FakeRunnerProvider : IRunnerProvider
     {
+        private readonly object _gate = new();
         private readonly Queue<FakeRunnerStep> _steps;
         private readonly bool _supportsRunner;
 
@@ -2119,8 +2268,13 @@ public sealed class WorkflowExecutorTests
             IStepOutputSink output,
             CancellationToken cancellationToken = default)
         {
-            var step = _steps.Dequeue();
-            Requests.Add(request);
+            FakeRunnerStep step;
+            lock (_gate)
+            {
+                step = _steps.Dequeue();
+                Requests.Add(request);
+            }
+
             return ExecuteStepAsync(step, request.Environment, request.AdditionalMounts, output, cancellationToken);
         }
 
@@ -2129,8 +2283,13 @@ public sealed class WorkflowExecutorTests
             IStepOutputSink output,
             CancellationToken cancellationToken = default)
         {
-            var step = _steps.Dequeue();
-            DockerActionRequests.Add(request);
+            FakeRunnerStep step;
+            lock (_gate)
+            {
+                step = _steps.Dequeue();
+                DockerActionRequests.Add(request);
+            }
+
             return ExecuteStepAsync(step, request.Environment, request.AdditionalMounts, output, cancellationToken);
         }
 
@@ -2143,22 +2302,29 @@ public sealed class WorkflowExecutorTests
         {
             step.OnExecute?.Invoke(environment, mounts);
 
-            if (step.Delay > TimeSpan.Zero)
+            try
             {
-                await Task.Delay(step.Delay, cancellationToken);
-            }
+                if (step.Delay > TimeSpan.Zero)
+                {
+                    await Task.Delay(step.Delay, cancellationToken);
+                }
 
-            foreach (var line in step.OutputLines)
+                foreach (var line in step.OutputLines)
+                {
+                    await output.WriteOutputLineAsync(line, cancellationToken);
+                }
+
+                foreach (var line in step.ErrorLines)
+                {
+                    await output.WriteErrorLineAsync(line, cancellationToken);
+                }
+
+                return new StepExecutionResult(step.ExitCode);
+            }
+            finally
             {
-                await output.WriteOutputLineAsync(line, cancellationToken);
+                step.OnComplete?.Invoke();
             }
-
-            foreach (var line in step.ErrorLines)
-            {
-                await output.WriteErrorLineAsync(line, cancellationToken);
-            }
-
-            return new StepExecutionResult(step.ExitCode);
         }
     }
 
@@ -2384,13 +2550,15 @@ public sealed class WorkflowExecutorTests
             IReadOnlyList<string>? outputLines = null,
             IReadOnlyList<string>? errorLines = null,
             TimeSpan? delay = null,
-            Action<IReadOnlyDictionary<string, string>, IReadOnlyList<StepExecutionMount>>? onExecute = null)
+            Action<IReadOnlyDictionary<string, string>, IReadOnlyList<StepExecutionMount>>? onExecute = null,
+            Action? onComplete = null)
         {
             ExitCode = exitCode;
             OutputLines = outputLines ?? [];
             ErrorLines = errorLines ?? [];
             Delay = delay ?? TimeSpan.Zero;
             OnExecute = onExecute;
+            OnComplete = onComplete;
         }
 
         public int ExitCode { get; }
@@ -2402,6 +2570,8 @@ public sealed class WorkflowExecutorTests
         public TimeSpan Delay { get; }
 
         public Action<IReadOnlyDictionary<string, string>, IReadOnlyList<StepExecutionMount>>? OnExecute { get; }
+
+        public Action? OnComplete { get; }
     }
 
     private static StepEnvironmentFiles CreateStepEnvironmentFiles(

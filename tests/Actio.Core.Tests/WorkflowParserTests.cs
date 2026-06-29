@@ -225,12 +225,20 @@ public sealed class WorkflowParserTests
             jobs:
               test:
                 strategy:
+                  fail-fast: false
+                  max-parallel: 2
                   matrix:
                     os:
                       - ubuntu-latest
                       - debian-latest
                     dotnet:
                       - "10.0"
+                    include:
+                      - os: ubuntu-latest
+                        configuration: Debug
+                    exclude:
+                      - os: debian-latest
+                        dotnet: "10.0"
                 runs-on: ${{ matrix.os }}
                 steps:
                   - name: Test
@@ -239,9 +247,15 @@ public sealed class WorkflowParserTests
             """);
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
-        var matrix = result.Workflow!.Jobs["test"].Strategy.Matrix;
+        var strategy = result.Workflow!.Jobs["test"].Strategy;
+        Assert.False(strategy.FailFast);
+        Assert.Equal(2, strategy.MaxParallel);
+
+        var matrix = strategy.Matrix;
         Assert.Equal(["ubuntu-latest", "debian-latest"], matrix.Axes["os"]);
         Assert.Equal(["10.0"], matrix.Axes["dotnet"]);
+        Assert.Equal("Debug", Assert.Single(matrix.Include)["configuration"]);
+        Assert.Equal("debian-latest", Assert.Single(matrix.Exclude)["os"]);
     }
 
     [Fact]
@@ -253,11 +267,15 @@ public sealed class WorkflowParserTests
             jobs:
               test:
                 strategy:
-                  fail-fast: false
+                  fail-fast: sometimes
+                  max-parallel: 0
                   matrix:
                     os: ubuntu-latest
                     include:
-                      - os: ubuntu-latest
+                      - os:
+                          nested: value
+                    exclude:
+                      - ubuntu-latest
                 runs-on: ubuntu-latest
                 steps:
                   - name: Test
@@ -271,9 +289,11 @@ public sealed class WorkflowParserTests
             """);
 
         Assert.False(result.Success);
-        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.strategy.fail-fast is not supported.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.strategy.fail-fast must be true or false.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.strategy.max-parallel must be a positive integer.");
         Assert.Contains(result.Errors, error => error == "workflow.jobs.test.strategy.matrix.os must be a list of scalar values.");
-        Assert.Contains(result.Errors, error => error.Contains("matrix.include is not supported", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.strategy.matrix.include[0].os must be a scalar value.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.strategy.matrix.exclude[0] must be a mapping.");
         Assert.Contains(result.Errors, error => error == "workflow.jobs.empty_strategy.strategy.matrix is required.");
     }
 

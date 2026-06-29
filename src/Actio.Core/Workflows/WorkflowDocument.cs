@@ -71,14 +71,24 @@ public sealed record WorkflowJobConcurrency(
     string Group,
     bool CancelInProgress);
 
-public sealed record WorkflowJobStrategy(WorkflowJobMatrix Matrix)
+public sealed record WorkflowJobStrategy(
+    WorkflowJobMatrix Matrix,
+    bool FailFast = true,
+    int? MaxParallel = null)
 {
     public static WorkflowJobStrategy Empty { get; } = new(WorkflowJobMatrix.Empty);
 }
 
-public sealed record WorkflowJobMatrix(IReadOnlyDictionary<string, IReadOnlyList<string>> Axes)
+public sealed record WorkflowJobMatrix(
+    IReadOnlyDictionary<string, IReadOnlyList<string>> Axes,
+    IReadOnlyList<IReadOnlyDictionary<string, string>>? Include = null,
+    IReadOnlyList<IReadOnlyDictionary<string, string>>? Exclude = null)
 {
     public static WorkflowJobMatrix Empty { get; } = new(new Dictionary<string, IReadOnlyList<string>>());
+
+    public IReadOnlyList<IReadOnlyDictionary<string, string>> Include { get; init; } = Include ?? [];
+
+    public IReadOnlyList<IReadOnlyDictionary<string, string>> Exclude { get; init; } = Exclude ?? [];
 }
 
 public sealed record WorkflowTriggerValue(

@@ -39,7 +39,7 @@ internal static class MatrixJobExpander
 
     private static List<WorkflowJob> ExpandJob(WorkflowJob job, List<string> errors)
     {
-        var combinations = CreateCombinations(job.Strategy.Matrix.Axes);
+        var combinations = CreateCombinations(job.Strategy.Matrix);
         if (combinations.Count == 0)
         {
             return
@@ -94,7 +94,18 @@ internal static class MatrixJobExpander
         return needs;
     }
 
-    private static IReadOnlyList<IReadOnlyDictionary<string, string>> CreateCombinations(
+    private static IReadOnlyList<IReadOnlyDictionary<string, string>> CreateCombinations(WorkflowJobMatrix matrix)
+    {
+        var axisNames = matrix.Axes.Keys.ToHashSet(StringComparer.Ordinal);
+        var combinations = CreateAxisCombinations(matrix.Axes);
+
+        ApplyExcludeEntries(combinations, matrix.Exclude);
+        ApplyIncludeEntries(combinations, axisNames, matrix.Include);
+
+        return combinations.Select(combination => combination.Values).ToArray();
+    }
+
+    private static List<MatrixCombination> CreateAxisCombinations(
         IReadOnlyDictionary<string, IReadOnlyList<string>> axes)
     {
         if (axes.Count == 0)
@@ -102,9 +113,9 @@ internal static class MatrixJobExpander
             return [];
         }
 
-        var combinations = new List<Dictionary<string, string>>
+        var combinations = new List<MatrixCombination>
         {
-            new(StringComparer.Ordinal)
+            MatrixCombination.FromAxisValues(new Dictionary<string, string>(StringComparer.Ordinal))
         };
 
         foreach (var axis in axes.OrderBy(item => item.Key, StringComparer.Ordinal))
@@ -112,16 +123,84 @@ internal static class MatrixJobExpander
             combinations = combinations
                 .SelectMany(existing => axis.Value.Select(value =>
                 {
-                    var next = new Dictionary<string, string>(existing, StringComparer.Ordinal)
+                    var next = new Dictionary<string, string>(existing.Values, StringComparer.Ordinal)
                     {
                         [axis.Key] = value
                     };
-                    return next;
+                    return MatrixCombination.FromAxisValues(next);
                 }))
                 .ToList();
         }
 
         return combinations;
+    }
+
+    private static void ApplyIncludeEntries(
+        List<MatrixCombination> combinations,
+        IReadOnlySet<string> axisNames,
+        IReadOnlyList<IReadOnlyDictionary<string, string>> includeEntries)
+    {
+        foreach (var includeEntry in includeEntries)
+        {
+            var matches = combinations
+                .Where(combination => combination.HasAxisValues && CanApplyInclude(combination, axisNames, includeEntry))
+                .ToArray();
+
+            if (matches.Length == 0)
+            {
+                combinations.Add(MatrixCombination.FromIncludeValues(includeEntry));
+                continue;
+            }
+
+            foreach (var match in matches)
+            {
+                match.Merge(includeEntry);
+            }
+        }
+    }
+
+    private static bool CanApplyInclude(
+        MatrixCombination combination,
+        IReadOnlySet<string> axisNames,
+        IReadOnlyDictionary<string, string> includeEntry)
+    {
+        foreach (var item in includeEntry)
+        {
+            if (!axisNames.Contains(item.Key))
+            {
+                continue;
+            }
+
+            if (!combination.AxisValues.TryGetValue(item.Key, out var axisValue) ||
+                !string.Equals(axisValue, item.Value, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void ApplyExcludeEntries(
+        List<MatrixCombination> combinations,
+        IReadOnlyList<IReadOnlyDictionary<string, string>> excludeEntries)
+    {
+        if (excludeEntries.Count == 0)
+        {
+            return;
+        }
+
+        combinations.RemoveAll(combination =>
+            excludeEntries.Any(excludeEntry => IsMatch(combination.Values, excludeEntry)));
+    }
+
+    private static bool IsMatch(
+        IReadOnlyDictionary<string, string> values,
+        IReadOnlyDictionary<string, string> match)
+    {
+        return match.All(item =>
+            values.TryGetValue(item.Key, out var value) &&
+            string.Equals(value, item.Value, StringComparison.Ordinal));
     }
 
     private static string ResolveRunsOn(
@@ -185,6 +264,45 @@ internal static class MatrixJobExpander
             .ToArray();
         var sanitized = new string(characters);
         return string.IsNullOrWhiteSpace(sanitized) ? "value" : sanitized;
+    }
+
+    private sealed class MatrixCombination
+    {
+        private MatrixCombination(
+            IReadOnlyDictionary<string, string> axisValues,
+            IReadOnlyDictionary<string, string> values)
+        {
+            AxisValues = axisValues;
+            Values = new Dictionary<string, string>(values, StringComparer.Ordinal);
+        }
+
+        public IReadOnlyDictionary<string, string> AxisValues { get; }
+
+        public Dictionary<string, string> Values { get; }
+
+        public bool HasAxisValues => AxisValues.Count > 0;
+
+        public static MatrixCombination FromAxisValues(IReadOnlyDictionary<string, string> values)
+        {
+            return new MatrixCombination(
+                new Dictionary<string, string>(values, StringComparer.Ordinal),
+                values);
+        }
+
+        public static MatrixCombination FromIncludeValues(IReadOnlyDictionary<string, string> values)
+        {
+            return new MatrixCombination(
+                new Dictionary<string, string>(),
+                values);
+        }
+
+        public void Merge(IReadOnlyDictionary<string, string> values)
+        {
+            foreach (var item in values)
+            {
+                Values[item.Key] = item.Value;
+            }
+        }
     }
 }
 
