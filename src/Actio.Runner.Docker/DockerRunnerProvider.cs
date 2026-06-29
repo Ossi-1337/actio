@@ -28,7 +28,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         IStepOutputSink output,
         CancellationToken cancellationToken = default)
     {
-        if (!_imageResolver.TryResolveImage(request.RunsOn, out var image))
+        if (!TryResolveStepImage(request, out var image))
         {
             var message = $"Runner '{request.RunsOn}' is not mapped to a Docker image.";
             await output.WriteErrorLineAsync(message, cancellationToken);
@@ -43,6 +43,17 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         };
 
         return await ExecuteDockerProcessAsync(process, containerName, output, cancellationToken);
+    }
+
+    private bool TryResolveStepImage(StepExecutionRequest request, out string image)
+    {
+        if (request.Container is not null)
+        {
+            image = request.Container.Image;
+            return true;
+        }
+
+        return _imageResolver.TryResolveImage(request.RunsOn, out image!);
     }
 
     public async Task<StepExecutionResult> ExecuteDockerActionAsync(
@@ -109,7 +120,8 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             request.Environment,
             containerName,
             request.WorkingDirectory,
-            request.AdditionalMounts);
+            request.AdditionalMounts,
+            request.Container);
         startInfo.ArgumentList.Add(image);
         startInfo.ArgumentList.Add(NormalizeShell(request.Shell));
         startInfo.ArgumentList.Add("-lc");
@@ -129,7 +141,8 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             request.Environment,
             containerName,
             null,
-            request.AdditionalMounts);
+            request.AdditionalMounts,
+            null);
         startInfo.ArgumentList.Add(request.Image);
         return startInfo;
     }
@@ -141,7 +154,8 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         IReadOnlyDictionary<string, string> environment,
         string containerName,
         string? workingDirectory,
-        IReadOnlyList<StepExecutionMount>? additionalMounts)
+        IReadOnlyList<StepExecutionMount>? additionalMounts,
+        JobContainerExecutionOptions? container)
     {
         var startInfo = new ProcessStartInfo("docker")
         {
@@ -162,16 +176,31 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         startInfo.ArgumentList.Add($"actio.job={jobName}");
         startInfo.ArgumentList.Add("--label");
         startInfo.ArgumentList.Add($"actio.step={stepName}");
+
+        foreach (var port in container?.Ports ?? [])
+        {
+            startInfo.ArgumentList.Add("-p");
+            startInfo.ArgumentList.Add(port);
+        }
+
+        foreach (var option in container?.Options ?? [])
+        {
+            startInfo.ArgumentList.Add(option);
+        }
+
         startInfo.ArgumentList.Add("-v");
         startInfo.ArgumentList.Add($"{Path.GetFullPath(projectRoot)}:/workspace");
         startInfo.ArgumentList.Add("-w");
         startInfo.ArgumentList.Add(ToContainerWorkingDirectory(workingDirectory));
 
+        foreach (var mount in container?.Volumes ?? [])
+        {
+            AddMount(startInfo, mount);
+        }
+
         foreach (var mount in additionalMounts ?? [])
         {
-            var suffix = mount.ReadOnly ? ":ro" : string.Empty;
-            startInfo.ArgumentList.Add("-v");
-            startInfo.ArgumentList.Add($"{Path.GetFullPath(mount.HostPath)}:{mount.ContainerPath}{suffix}");
+            AddMount(startInfo, mount);
         }
 
         foreach (var (key, value) in environment.OrderBy(item => item.Key, StringComparer.Ordinal))
@@ -181,6 +210,13 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         }
 
         return startInfo;
+    }
+
+    private static void AddMount(ProcessStartInfo startInfo, StepExecutionMount mount)
+    {
+        var suffix = mount.ReadOnly ? ":ro" : string.Empty;
+        startInfo.ArgumentList.Add("-v");
+        startInfo.ArgumentList.Add($"{Path.GetFullPath(mount.HostPath)}:{mount.ContainerPath}{suffix}");
     }
 
     private static string NormalizeShell(string? shell)

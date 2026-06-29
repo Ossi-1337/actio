@@ -91,6 +91,27 @@ public sealed record WorkflowJobMatrix(
     public IReadOnlyList<IReadOnlyDictionary<string, string>> Exclude { get; init; } = Exclude ?? [];
 }
 
+public sealed record WorkflowJobContainer(
+    string Image,
+    IReadOnlyDictionary<string, string>? Env = null,
+    IReadOnlyList<string>? Ports = null,
+    IReadOnlyList<WorkflowJobContainerVolume>? Volumes = null,
+    IReadOnlyList<string>? Options = null)
+{
+    public IReadOnlyDictionary<string, string> Env { get; init; } = Env ?? new Dictionary<string, string>();
+
+    public IReadOnlyList<string> Ports { get; init; } = Ports ?? [];
+
+    public IReadOnlyList<WorkflowJobContainerVolume> Volumes { get; init; } = Volumes ?? [];
+
+    public IReadOnlyList<string> Options { get; init; } = Options ?? [];
+}
+
+public sealed record WorkflowJobContainerVolume(
+    string Source,
+    string Target,
+    bool ReadOnly);
+
 public sealed record WorkflowTriggerValue(
     string Kind,
     string? Value,
@@ -221,7 +242,8 @@ public sealed record WorkflowJob
         WorkflowJobStrategy? strategy,
         IReadOnlyDictionary<string, string> outputs,
         IReadOnlyList<WorkflowArtifact> artifacts,
-        IReadOnlyList<WorkflowStep> steps)
+        IReadOnlyList<WorkflowStep> steps,
+        WorkflowJobContainer? container = null)
     {
         Name = name;
         BaseName = name;
@@ -236,6 +258,7 @@ public sealed record WorkflowJob
         ContinueOnError = continueOnError;
         Concurrency = concurrency;
         Strategy = strategy ?? WorkflowJobStrategy.Empty;
+        Container = container;
         Matrix = new Dictionary<string, string>();
         Outputs = outputs;
         Artifacts = artifacts;
@@ -267,6 +290,8 @@ public sealed record WorkflowJob
     public WorkflowJobConcurrency? Concurrency { get; init; }
 
     public WorkflowJobStrategy Strategy { get; init; }
+
+    public WorkflowJobContainer? Container { get; init; }
 
     public IReadOnlyDictionary<string, string> Matrix { get; init; }
 

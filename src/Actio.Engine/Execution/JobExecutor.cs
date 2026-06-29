@@ -425,6 +425,7 @@ internal sealed class JobExecutor
             }
 
             var environment = CreateStepEnvironment(
+                job.Container?.Env ?? new Dictionary<string, string>(),
                 workflowEnv,
                 job.Env,
                 stepOutputs,
@@ -458,7 +459,8 @@ internal sealed class JobExecutor
                         environment,
                         effectiveRunDefaults.Shell,
                         effectiveRunDefaults.WorkingDirectory,
-                        additionalMounts),
+                        additionalMounts,
+                        CreateContainerExecutionOptions(job.Container, projectRoot)),
                     collector,
                     stepCancellationToken);
             var resultShell = plan.Kind == StepExecutionKind.DockerImageAction ? null : effectiveRunDefaults.Shell;
@@ -655,6 +657,7 @@ internal sealed class JobExecutor
     }
 
     private static IReadOnlyDictionary<string, string> CreateStepEnvironment(
+        IReadOnlyDictionary<string, string> containerEnv,
         IReadOnlyDictionary<string, string> workflowEnv,
         IReadOnlyDictionary<string, string> jobEnv,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> stepOutputs,
@@ -665,7 +668,8 @@ internal sealed class JobExecutor
         IReadOnlyDictionary<string, string> environmentFileEnv,
         IReadOnlyDictionary<string, string> actionEnv)
     {
-        var environment = new Dictionary<string, string>(workflowEnv, StringComparer.Ordinal);
+        var environment = new Dictionary<string, string>(containerEnv, StringComparer.Ordinal);
+        environment.Merge(workflowEnv);
         environment.Merge(jobEnv);
         environment.Merge(environmentUpdates);
         environment.Merge(CreateStepOutputEnvironment(stepOutputs));
@@ -675,6 +679,36 @@ internal sealed class JobExecutor
         environment.Merge(environmentFileEnv);
         environment.Merge(actionEnv);
         return environment;
+    }
+
+    private static IReadOnlyList<StepExecutionMount> CreateContainerVolumeMounts(
+        WorkflowJobContainer? container,
+        string projectRoot)
+    {
+        if (container is null || container.Volumes.Count == 0)
+        {
+            return [];
+        }
+
+        return container.Volumes
+            .Select(volume => new StepExecutionMount(
+                Path.Combine(projectRoot, volume.Source),
+                volume.Target,
+                volume.ReadOnly))
+            .ToArray();
+    }
+
+    private static JobContainerExecutionOptions? CreateContainerExecutionOptions(
+        WorkflowJobContainer? container,
+        string projectRoot)
+    {
+        return container is null
+            ? null
+            : new JobContainerExecutionOptions(
+                container.Image,
+                container.Ports,
+                container.Options,
+                CreateContainerVolumeMounts(container, projectRoot));
     }
 
     private static IReadOnlyDictionary<string, string> CreateStepContextEnvironment(

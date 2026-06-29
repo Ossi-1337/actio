@@ -9,7 +9,21 @@ public sealed record StepExecutionRequest(
     IReadOnlyDictionary<string, string> Environment,
     string? Shell = null,
     string? WorkingDirectory = null,
-    IReadOnlyList<StepExecutionMount>? AdditionalMounts = null)
+    IReadOnlyList<StepExecutionMount>? AdditionalMounts = null,
+    JobContainerExecutionOptions? Container = null)
 {
     public IReadOnlyList<StepExecutionMount> AdditionalMounts { get; init; } = AdditionalMounts ?? [];
+}
+
+public sealed record JobContainerExecutionOptions(
+    string Image,
+    IReadOnlyList<string>? Ports = null,
+    IReadOnlyList<string>? Options = null,
+    IReadOnlyList<StepExecutionMount>? Volumes = null)
+{
+    public IReadOnlyList<string> Ports { get; init; } = Ports ?? [];
+
+    public IReadOnlyList<string> Options { get; init; } = Options ?? [];
+
+    public IReadOnlyList<StepExecutionMount> Volumes { get; init; } = Volumes ?? [];
 }

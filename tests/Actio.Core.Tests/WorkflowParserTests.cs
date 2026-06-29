@@ -217,6 +217,100 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
+    public void Parse_AcceptsJobContainer()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                container:
+                  image: node:22
+                  env:
+                    NODE_ENV: test
+                  ports:
+                    - 3000:3000
+                  volumes:
+                    - ./.actio/cache:/cache:ro
+                  options: --cpus 1 --memory=512m --init
+                steps:
+                  - name: Test
+                    run: npm test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var container = result.Workflow!.Jobs["test"].Container;
+        Assert.NotNull(container);
+        Assert.Equal("node:22", container.Image);
+        Assert.Equal("test", container.Env["NODE_ENV"]);
+        Assert.Equal(["3000:3000"], container.Ports);
+        var volume = Assert.Single(container.Volumes);
+        Assert.Equal("./.actio/cache", volume.Source);
+        Assert.Equal("/cache", volume.Target);
+        Assert.True(volume.ReadOnly);
+        Assert.Equal(["--cpus", "1", "--memory=512m", "--init"], container.Options);
+    }
+
+    [Fact]
+    public void Parse_AcceptsScalarJobContainer()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                container: node:22
+                steps:
+                  - name: Test
+                    run: npm test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal("node:22", result.Workflow!.Jobs["test"].Container?.Image);
+    }
+
+    [Fact]
+    public void Parse_RejectsUnsafeJobContainerValues()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                container:
+                  env: not-a-map
+                  ports:
+                    - "--privileged"
+                  volumes:
+                    - ../outside:/cache
+                    - ./cache:cache
+                    - ./state:/actio/env
+                    - ./cache:/cache:shared
+                  options: --privileged --cpus --memory=
+                  credentials:
+                    username: oskar
+                steps:
+                  - name: Test
+                    run: npm test
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.container.image is required.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.container.env must be a mapping.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.container.credentials is not supported.");
+        Assert.Contains(result.Errors, error => error.Contains("invalid Docker port mapping", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("source must be a relative path inside the workspace", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("target must be an absolute container path outside /actio/env", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("mode must be ro or rw", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("unsupported Docker option '--privileged'", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("option '--cpus' requires a value", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("option '--memory' requires a value", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void Parse_AcceptsMatrixStrategy()
     {
         var result = Parse(

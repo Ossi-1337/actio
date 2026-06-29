@@ -82,6 +82,41 @@ public sealed class DockerRunnerProviderTests
     }
 
     [Fact]
+    public void CreateShellStepStartInfo_UsesJobContainerConfiguration()
+    {
+        var cachePath = Path.Combine(Directory.GetCurrentDirectory(), ".actio", "cache");
+        var request = new StepExecutionRequest(
+            "test",
+            "Run npm",
+            "ubuntu-latest",
+            "npm test",
+            Directory.GetCurrentDirectory(),
+            new Dictionary<string, string>
+            {
+                ["NODE_ENV"] = "test"
+            },
+            Container: new JobContainerExecutionOptions(
+                "node:22",
+                ["3000:3000"],
+                ["--cpus", "1", "--init"],
+                [new StepExecutionMount(cachePath, "/cache", ReadOnly: true)]));
+
+        var startInfo = DockerRunnerProvider.CreateShellStepStartInfo(request, "node:22", "actio-test");
+        var args = startInfo.ArgumentList.ToArray();
+        var imageIndex = Array.IndexOf(args, "node:22");
+
+        Assert.Contains("3000:3000", args);
+        Assert.Contains("--cpus", args);
+        Assert.Contains("1", args);
+        Assert.Contains("--init", args);
+        Assert.Contains($"{Path.GetFullPath(cachePath)}:/cache:ro", args);
+        Assert.Contains("NODE_ENV=test", args);
+        Assert.True(imageIndex >= 0);
+        Assert.Equal("sh", args[imageIndex + 1]);
+        Assert.Equal("-lc", args[imageIndex + 2]);
+    }
+
+    [Fact]
     public void CreateShellStepStartInfo_UsesConfiguredShellAndWorkingDirectory()
     {
         var request = new StepExecutionRequest(

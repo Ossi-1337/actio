@@ -26,6 +26,7 @@ public sealed partial class WorkflowParser
         "runs-on",
         "env",
         "defaults",
+        "container",
         "timeout-minutes",
         "continue-on-error",
         "concurrency",
@@ -104,6 +105,34 @@ public sealed partial class WorkflowParser
     {
         "shell",
         "working-directory"
+    };
+
+    private static readonly HashSet<string> JobContainerKeys = new(StringComparer.Ordinal)
+    {
+        "image",
+        "env",
+        "ports",
+        "volumes",
+        "options"
+    };
+
+    private static readonly HashSet<string> SupportedContainerOptionsWithValues = new(StringComparer.Ordinal)
+    {
+        "--add-host",
+        "--cpus",
+        "--dns",
+        "--dns-search",
+        "--hostname",
+        "--memory",
+        "--memory-reservation",
+        "--memory-swap",
+        "--shm-size",
+        "--ulimit"
+    };
+
+    private static readonly HashSet<string> SupportedContainerOptionsWithoutValues = new(StringComparer.Ordinal)
+    {
+        "--init"
     };
 
     private static readonly HashSet<string> SupportedDefaultShells = new(StringComparer.Ordinal)
@@ -255,6 +284,7 @@ public sealed partial class WorkflowParser
             var runsOn = ReadRequiredScalar(errors, jobMap, "runs-on", $"workflow.jobs.{jobName}.runs-on");
             var env = ReadOptionalStringMap(errors, jobMap, "env", $"workflow.jobs.{jobName}.env");
             var defaults = ReadRunDefaults(errors, jobMap, "defaults", $"workflow.jobs.{jobName}.defaults");
+            var container = ReadJobContainer(errors, jobMap, jobName);
             var timeoutMinutes = ReadOptionalPositiveInt(errors, jobMap, "timeout-minutes", $"workflow.jobs.{jobName}.timeout-minutes");
             var continueOnError = ReadOptionalBoolean(errors, jobMap, "continue-on-error", $"workflow.jobs.{jobName}.continue-on-error") ?? false;
             var concurrency = ReadJobConcurrency(errors, jobMap, jobName);
@@ -279,7 +309,8 @@ public sealed partial class WorkflowParser
                     strategy,
                     outputs,
                     artifacts,
-                    steps);
+                    steps,
+                    container);
             }
         }
 
@@ -1228,6 +1259,177 @@ public sealed partial class WorkflowParser
         return null;
     }
 
+    private static WorkflowJobContainer? ReadJobContainer(
+        List<string> errors,
+        YamlMappingNode jobMap,
+        string jobName)
+    {
+        var path = $"workflow.jobs.{jobName}.container";
+        if (!TryGet(jobMap, "container", out var node))
+        {
+            return null;
+        }
+
+        if (node is YamlScalarNode scalar)
+        {
+            var image = ReadScalarValue(errors, scalar, path);
+            return image is null ? null : new WorkflowJobContainer(image);
+        }
+
+        if (node is not YamlMappingNode containerMap)
+        {
+            errors.Add($"{path} must be a string or a mapping.");
+            return null;
+        }
+
+        AddUnknownKeyErrors(errors, containerMap, JobContainerKeys, path);
+        var containerImage = ReadRequiredScalar(errors, containerMap, "image", $"{path}.image");
+        var containerEnv = ReadOptionalStringMap(errors, containerMap, "env", $"{path}.env");
+        var ports = ReadContainerPorts(errors, containerMap, path);
+        var volumes = ReadContainerVolumes(errors, containerMap, path);
+        var options = ReadContainerOptions(errors, containerMap, path);
+
+        return containerImage is null
+            ? null
+            : new WorkflowJobContainer(containerImage, containerEnv, ports, volumes, options);
+    }
+
+    private static IReadOnlyList<string> ReadContainerPorts(
+        List<string> errors,
+        YamlMappingNode containerMap,
+        string path)
+    {
+        var ports = ReadOptionalStringList(errors, containerMap, "ports", $"{path}.ports");
+        foreach (var port in ports)
+        {
+            if (ContainsWhitespace(port) || port.StartsWith("-", StringComparison.Ordinal))
+            {
+                errors.Add($"{path}.ports contains invalid Docker port mapping '{port}'.");
+            }
+        }
+
+        return ports;
+    }
+
+    private static IReadOnlyList<WorkflowJobContainerVolume> ReadContainerVolumes(
+        List<string> errors,
+        YamlMappingNode containerMap,
+        string path)
+    {
+        var volumes = ReadOptionalStringList(errors, containerMap, "volumes", $"{path}.volumes");
+        var parsedVolumes = new List<WorkflowJobContainerVolume>();
+
+        for (var index = 0; index < volumes.Count; index++)
+        {
+            var volume = ReadContainerVolume(errors, volumes[index], $"{path}.volumes[{index}]");
+            if (volume is not null)
+            {
+                parsedVolumes.Add(volume);
+            }
+        }
+
+        return parsedVolumes;
+    }
+
+    private static WorkflowJobContainerVolume? ReadContainerVolume(
+        List<string> errors,
+        string value,
+        string path)
+    {
+        var segments = value.Split(':', StringSplitOptions.TrimEntries);
+        if (segments.Length is < 2 or > 3)
+        {
+            errors.Add($"{path} must use '<workspace-relative-source>:<absolute-container-path>[:ro|rw]'.");
+            return null;
+        }
+
+        var source = segments[0];
+        var target = segments[1];
+        var mode = segments.Length == 3 ? segments[2] : "rw";
+
+        if (!IsSafeRelativePath(source))
+        {
+            errors.Add($"{path} source must be a relative path inside the workspace.");
+            return null;
+        }
+
+        if (!IsSafeContainerPath(target))
+        {
+            errors.Add($"{path} target must be an absolute container path outside /actio/env.");
+            return null;
+        }
+
+        if (mode is not ("ro" or "rw"))
+        {
+            errors.Add($"{path} mode must be ro or rw.");
+            return null;
+        }
+
+        return new WorkflowJobContainerVolume(source, target, string.Equals(mode, "ro", StringComparison.Ordinal));
+    }
+
+    private static IReadOnlyList<string> ReadContainerOptions(
+        List<string> errors,
+        YamlMappingNode containerMap,
+        string path)
+    {
+        var options = ReadOptionalScalar(errors, containerMap, "options", $"{path}.options");
+        if (options is null)
+        {
+            return [];
+        }
+
+        var tokens = options.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var parsedOptions = new List<string>();
+        for (var index = 0; index < tokens.Length; index++)
+        {
+            var token = tokens[index];
+            if (token.Contains('='))
+            {
+                var separatorIndex = token.IndexOf('=', StringComparison.Ordinal);
+                var optionName = token[..separatorIndex];
+                var optionValue = token[(separatorIndex + 1)..];
+                if (!SupportedContainerOptionsWithValues.Contains(optionName))
+                {
+                    errors.Add($"{path}.options contains unsupported Docker option '{optionName}'.");
+                    continue;
+                }
+
+                if (string.IsNullOrWhiteSpace(optionValue))
+                {
+                    errors.Add($"{path}.options option '{optionName}' requires a value.");
+                    continue;
+                }
+
+                parsedOptions.Add(token);
+                continue;
+            }
+
+            if (SupportedContainerOptionsWithoutValues.Contains(token))
+            {
+                parsedOptions.Add(token);
+                continue;
+            }
+
+            if (!SupportedContainerOptionsWithValues.Contains(token))
+            {
+                errors.Add($"{path}.options contains unsupported Docker option '{token}'.");
+                continue;
+            }
+
+            if (index + 1 >= tokens.Length || tokens[index + 1].StartsWith("-", StringComparison.Ordinal))
+            {
+                errors.Add($"{path}.options option '{token}' requires a value.");
+                continue;
+            }
+
+            parsedOptions.Add(token);
+            parsedOptions.Add(tokens[++index]);
+        }
+
+        return parsedOptions;
+    }
+
     private static WorkflowRunDefaults ReadRunDefaults(
         List<string> errors,
         YamlMappingNode map,
@@ -2000,6 +2202,35 @@ public sealed partial class WorkflowParser
         return !path
             .Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
             .Any(segment => string.Equals(segment, "..", StringComparison.Ordinal));
+    }
+
+    private static bool IsSafeContainerPath(string path)
+    {
+        if (!path.StartsWith("/", StringComparison.Ordinal) || ContainsWhitespace(path))
+        {
+            return false;
+        }
+
+        var normalized = path.TrimEnd('/');
+        if (string.IsNullOrEmpty(normalized))
+        {
+            return false;
+        }
+
+        if (string.Equals(normalized, "/actio/env", StringComparison.Ordinal) ||
+            normalized.StartsWith("/actio/env/", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return !normalized
+            .Split('/', StringSplitOptions.RemoveEmptyEntries)
+            .Any(segment => string.Equals(segment, "..", StringComparison.Ordinal));
+    }
+
+    private static bool ContainsWhitespace(string value)
+    {
+        return value.Any(char.IsWhiteSpace);
     }
 
     private static IReadOnlySet<string> CreatePullRequestActivityTypes()

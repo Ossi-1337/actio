@@ -202,6 +202,79 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_PassesJobContainerToRunSteps()
+    {
+        var runner = new FakeRunnerProvider([0]);
+        var projectRoot = Environment.CurrentDirectory;
+        var workflow = new WorkflowDocument(
+            "CI",
+            new Dictionary<string, string>
+            {
+                ["DOTNET_NOLOGO"] = "workflow"
+            },
+            new Dictionary<string, WorkflowJob>
+            {
+                ["test"] = new WorkflowJob(
+                    "test",
+                    null,
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>
+                    {
+                        ["DOTNET_NOLOGO"] = "job"
+                    },
+                    WorkflowRunDefaults.Empty,
+                    null,
+                    false,
+                    null,
+                    WorkflowJobStrategy.Empty,
+                    new Dictionary<string, string>(),
+                    [],
+                    [
+                        new WorkflowStep(
+                            "Test",
+                            "npm test",
+                            null,
+                            Env: new Dictionary<string, string>
+                            {
+                                ["DOTNET_NOLOGO"] = "step"
+                            })
+                    ],
+                    new WorkflowJobContainer(
+                        "node:22",
+                        new Dictionary<string, string>
+                        {
+                            ["CONTAINER_ONLY"] = "container",
+                            ["DOTNET_NOLOGO"] = "container"
+                        },
+                        ["3000:3000"],
+                        [new WorkflowJobContainerVolume("./.actio/cache", "/cache", ReadOnly: true)],
+                        ["--cpus", "1"]))
+            });
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(projectRoot),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var request = Assert.Single(runner.Requests);
+        Assert.Equal("step", request.Environment["DOTNET_NOLOGO"]);
+        Assert.Equal("container", request.Environment["CONTAINER_ONLY"]);
+        Assert.NotNull(request.Container);
+        Assert.Equal("node:22", request.Container.Image);
+        Assert.Equal(["3000:3000"], request.Container.Ports);
+        Assert.Equal(["--cpus", "1"], request.Container.Options);
+        var volume = Assert.Single(request.Container.Volumes);
+        Assert.Equal(Path.Combine(projectRoot, "./.actio/cache"), volume.HostPath);
+        Assert.Equal("/cache", volume.ContainerPath);
+        Assert.True(volume.ReadOnly);
+        Assert.DoesNotContain(request.AdditionalMounts, mount => string.Equals(mount.ContainerPath, "/cache", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task ExecuteAsync_AddsDefaultEnvironmentVariablesToRunSteps()
     {
         var runner = new FakeRunnerProvider([0]);
