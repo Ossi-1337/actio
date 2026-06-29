@@ -1,4 +1,5 @@
 using Actio.Core.Actions;
+using Actio.Core.Expressions;
 using Actio.Core.Workflows;
 using Actio.Engine.Actions;
 using Actio.Engine.Runs;
@@ -67,6 +68,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         var runOutputs = new List<WorkflowRunOutput>();
         var runArtifacts = new List<WorkflowRunArtifact>();
         var jobStatuses = new Dictionary<string, string>(StringComparer.Ordinal);
+        var actualJobStatuses = new Dictionary<string, string>(StringComparer.Ordinal);
         var jobOutputs = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal);
         var plan = JobGraphPlanner.Plan(workflow.Jobs);
         var initialSaveError = await TrySaveRunRecordAsync(
@@ -113,6 +115,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                     options.RunTrigger.EventPayload,
                     runId,
                     jobStatuses,
+                    actualJobStatuses,
                     jobOutputs,
                     output,
                     error,
@@ -125,6 +128,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 jobRecords.Add(outcome.Job);
                 var toleratedFailure = job.ContinueOnError && IsUnsuccessfulJobStatus(outcome.Job.Status);
                 jobStatuses[job.Name] = toleratedFailure ? SuccessStatus : outcome.Job.Status;
+                actualJobStatuses[job.Name] = outcome.Job.Status;
                 jobOutputs[job.Name] = outcome.Job.Outputs;
                 errors.AddRange(
                     IsUnsuccessfulJobStatus(outcome.Job.Status) && !toleratedFailure
@@ -202,15 +206,23 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         WorkflowEventPayload eventPayload,
         string runId,
         IReadOnlyDictionary<string, string> jobStatuses,
+        IReadOnlyDictionary<string, string> actualJobStatuses,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
         TextWriter output,
         TextWriter error,
         CancellationToken cancellationToken)
     {
         var skipReason = GetDependencySkipReason(job, jobStatuses);
-        if (skipReason is null)
+        if (skipReason is null || CanRunAfterDependencyFailure(job.If))
         {
-            var condition = _conditionEvaluator.Evaluate(job.If, jobOutputs, inputs, eventPayload);
+            var condition = _conditionEvaluator.EvaluateJob(
+                job.If,
+                jobOutputs,
+                inputs,
+                eventPayload,
+                actualJobStatuses,
+                job.Needs,
+                projectRoot);
 
             if (!condition.Success)
             {
@@ -221,6 +233,10 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             else if (!condition.ShouldRun)
             {
                 skipReason = "if condition evaluated to false.";
+            }
+            else
+            {
+                skipReason = null;
             }
         }
 
@@ -346,6 +362,20 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         }
 
         return null;
+    }
+
+    private static bool CanRunAfterDependencyFailure(string? expression)
+    {
+        if (expression is null)
+        {
+            return false;
+        }
+
+        var parseResult = ExpressionParser.ParseTemplateExpression(expression);
+        return parseResult.Success &&
+            ExpressionAnalysis
+                .CollectFunctionCalls(parseResult.Expression!)
+                .Any(function => ExpressionBuiltIns.IsStatusFunction(function.Name));
     }
 
     private static long ToDurationMilliseconds(DateTimeOffset startedAt, DateTimeOffset finishedAt)

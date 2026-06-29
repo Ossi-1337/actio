@@ -430,6 +430,68 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_RunsJobWithAlwaysConditionAfterFailedDependency()
+    {
+        var runner = new FakeRunnerProvider([42, 0]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "prepare",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Prepare", "exit 42", null)]),
+            new WorkflowJob(
+                "cleanup",
+                ["prepare"],
+                "${{ always() }}",
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Cleanup", "echo cleanup", null)]));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Equal(["prepare", "cleanup"], runner.Requests.Select(request => request.JobName));
+        Assert.Equal(1, result.SuccessfulSteps);
+        Assert.Equal(1, result.FailedSteps);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_RunsJobWithFailureConditionAfterFailedDependency()
+    {
+        var runner = new FakeRunnerProvider([42, 0]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "prepare",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Prepare", "exit 42", null)]),
+            new WorkflowJob(
+                "report",
+                ["prepare"],
+                "${{ failure() }}",
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Report", "echo failed", null)]));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Equal(["prepare", "report"], runner.Requests.Select(request => request.JobName));
+    }
+
+    [Fact]
     public async Task ExecuteAsync_EvaluatesIfConditionFromCapturedOutputs()
     {
         var runner = new FakeRunnerProvider(
@@ -554,6 +616,41 @@ public sealed class WorkflowExecutorTests
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
         Assert.Equal(["prepare", "test"], runner.Requests.Select(request => request.JobName));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_EvaluatesHashFilesCondition()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-hashfiles-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(projectRoot, "src"));
+        await File.WriteAllTextAsync(Path.Combine(projectRoot, "src", "app.cs"), "class App {}");
+
+        try
+        {
+            var runner = new FakeRunnerProvider([0]);
+            var workflow = CreateWorkflow(
+                new WorkflowJob(
+                    "test",
+                    [],
+                    "${{ hashFiles('**/*.cs') != '' }}",
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Test", "dotnet test", null)]));
+
+            var result = await new WorkflowExecutor(runner).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+            var request = Assert.Single(runner.Requests);
+            Assert.Equal("test", request.JobName);
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
     }
 
     [Fact]
@@ -932,7 +1029,7 @@ public sealed class WorkflowExecutorTests
               using: composite
               steps:
                 - name: Greet
-                  run: echo "${{ inputs.name }}${{ inputs.punctuation }}"
+                  run: echo "${{ format('{0}{1}', inputs.name, inputs.punctuation) }}"
             """);
 
         try

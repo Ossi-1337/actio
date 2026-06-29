@@ -53,11 +53,14 @@ internal static class ActionInputBinder
 
     public static ActionInputInterpolationResult InterpolateInputExpressions(
         string command,
-        IReadOnlyDictionary<string, string> inputs)
+        IReadOnlyDictionary<string, string> inputs,
+        string workspaceRoot)
     {
         var interpolation = ExpressionTemplate.Interpolate(
             command,
-            new ExpressionEvaluationContext(reference => ResolveInputReference(reference, inputs)));
+            new ExpressionEvaluationContext(
+                reference => ResolveInputReference(reference, inputs),
+                workspaceRoot: workspaceRoot));
 
         return interpolation.Success
             ? ActionInputInterpolationResult.Resolved(interpolation.Value)

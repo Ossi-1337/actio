@@ -6,7 +6,9 @@ public sealed record LiteralExpressionNode(ExpressionValue Value) : ExpressionNo
 
 public sealed record ReferenceExpressionNode(ExpressionReference Reference) : ExpressionNode;
 
-public sealed record FunctionCallExpressionNode(string Name) : ExpressionNode;
+public sealed record FunctionCallExpressionNode(
+    string Name,
+    IReadOnlyList<ExpressionNode> Arguments) : ExpressionNode;
 
 public sealed record UnaryExpressionNode(
     ExpressionUnaryOperator Operator,

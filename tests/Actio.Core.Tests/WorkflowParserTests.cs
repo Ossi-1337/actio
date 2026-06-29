@@ -908,7 +908,7 @@ public sealed class WorkflowParserTests
             name: CI
             jobs:
               test:
-                if: "${{ always() }}"
+                if: "${{ unknownFunction() }}"
                 runs-on: ubuntu-latest
                 steps:
                   - name: Test
@@ -917,6 +917,30 @@ public sealed class WorkflowParserTests
 
         Assert.False(result.Success);
         Assert.Contains(result.Errors, error => error.Contains("unsupported expression", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Parse_AcceptsJobStatusAndHelperFunctions()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              prepare:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Prepare
+                    run: dotnet restore
+              test:
+                needs: prepare
+                if: ${{ always() && contains(fromJSON('["push","workflow_dispatch"]'), github.event.event_name) && hashFiles('**/*.cs') != '' }}
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
     }
 
     [Fact]

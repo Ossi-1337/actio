@@ -10,11 +10,33 @@ public static class ExpressionEvaluator
         {
             LiteralExpressionNode literal => ExpressionEvaluationResult.Resolved(literal.Value),
             ReferenceExpressionNode reference => ResolveReference(reference.Reference, context),
-            FunctionCallExpressionNode function => context.EvaluateFunction(function.Name),
+            FunctionCallExpressionNode function => EvaluateFunction(function, context),
             UnaryExpressionNode unary => EvaluateUnary(unary, context),
             BinaryExpressionNode binary => EvaluateBinary(binary, context),
             _ => ExpressionEvaluationResult.Failed(["Unsupported expression node."])
         };
+    }
+
+    private static ExpressionEvaluationResult EvaluateFunction(
+        FunctionCallExpressionNode function,
+        ExpressionEvaluationContext context)
+    {
+        var arguments = new List<ExpressionValue>();
+        foreach (var argument in function.Arguments)
+        {
+            var evaluation = Evaluate(argument, context);
+            if (!evaluation.Success)
+            {
+                return evaluation;
+            }
+
+            arguments.Add(evaluation.Value);
+        }
+
+        var functionCall = new ExpressionFunctionCall(function.Name);
+        return ExpressionBuiltInFunctions.TryEvaluate(functionCall, arguments, context, out var builtInResult)
+            ? builtInResult
+            : context.EvaluateFunction(functionCall, arguments);
     }
 
     private static ExpressionEvaluationResult ResolveReference(

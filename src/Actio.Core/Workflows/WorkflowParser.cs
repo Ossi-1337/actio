@@ -1419,7 +1419,7 @@ public sealed partial class WorkflowParser
                 continue;
             }
 
-            var expression = ValidateConditionExpression(errors, $"workflow.jobs.{job.Name}.if", job.If, allowStatusFunctions: false);
+            var expression = ValidateConditionExpression(errors, $"workflow.jobs.{job.Name}.if", job.If);
             if (expression is null)
             {
                 continue;
@@ -1447,7 +1447,7 @@ public sealed partial class WorkflowParser
                 }
 
                 var path = $"workflow.jobs.{job.Name}.steps[{index}].if";
-                var expression = ValidateConditionExpression(errors, path, step.If, allowStatusFunctions: true);
+                var expression = ValidateConditionExpression(errors, path, step.If);
                 if (expression is null)
                 {
                     continue;
@@ -1461,8 +1461,7 @@ public sealed partial class WorkflowParser
     private static ExpressionNode? ValidateConditionExpression(
         List<string> errors,
         string path,
-        string expression,
-        bool allowStatusFunctions)
+        string expression)
     {
         var parseResult = ExpressionParser.ParseTemplateExpression(expression);
         if (!parseResult.Success)
@@ -1473,15 +1472,12 @@ public sealed partial class WorkflowParser
 
         foreach (var function in ExpressionAnalysis.CollectFunctionCalls(parseResult.Expression!))
         {
-            if (ExpressionBuiltIns.IsStatusFunction(function.Name) && allowStatusFunctions)
+            if (ExpressionBuiltIns.IsSupportedFunction(function.Name))
             {
                 continue;
             }
 
-            var reason = ExpressionBuiltIns.IsStatusFunction(function.Name)
-                ? $"status function '{function.Name}' is not supported here"
-                : $"function '{function.Name}' is not supported";
-            errors.Add($"{path} uses an unsupported expression: {reason}.");
+            errors.Add($"{path} uses an unsupported expression: function '{function.Name}' is not supported.");
             return null;
         }
 

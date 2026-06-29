@@ -43,7 +43,7 @@ internal sealed class ActionResolver
         {
             ActionReferenceKind.Local => await ResolveLocalActionAsync(step, projectRoot, cancellationToken),
             ActionReferenceKind.DockerImage => await ResolveDockerImageActionAsync(step, reference, cancellationToken),
-            ActionReferenceKind.GitHubRepository => await ResolveGitHubActionAsync(step, reference, cancellationToken),
+            ActionReferenceKind.GitHubRepository => await ResolveGitHubActionAsync(step, reference, projectRoot, cancellationToken),
             _ => ActionResolutionResult.Failed([$"uses '{step.Uses}' is not supported."])
         };
     }
@@ -72,7 +72,7 @@ internal sealed class ActionResolver
             return ActionResolutionResult.Failed(inputBinding.Errors);
         }
 
-        var command = BuildCommand(parseResult.Action!, inputBinding.Inputs);
+        var command = BuildCommand(parseResult.Action!, inputBinding.Inputs, projectRoot);
         if (!command.Success)
         {
             return ActionResolutionResult.Failed(command.Errors);
@@ -125,6 +125,7 @@ internal sealed class ActionResolver
     private async Task<ActionResolutionResult> ResolveGitHubActionAsync(
         WorkflowStep step,
         ActionReference reference,
+        string projectRoot,
         CancellationToken cancellationToken)
     {
         var uses = step.Uses!;
@@ -171,7 +172,7 @@ internal sealed class ActionResolver
             return ActionResolutionResult.Failed(inputBinding.Errors);
         }
 
-        var command = BuildCommand(parseResult.Action!, inputBinding.Inputs);
+        var command = BuildCommand(parseResult.Action!, inputBinding.Inputs, projectRoot);
         if (!command.Success)
         {
             return ActionResolutionResult.Failed(command.Errors);
@@ -235,14 +236,15 @@ internal sealed class ActionResolver
 
     private static ActionInputInterpolationResult BuildCommand(
         ActionDocument action,
-        IReadOnlyDictionary<string, string> inputs)
+        IReadOnlyDictionary<string, string> inputs,
+        string projectRoot)
     {
         var commands = new List<string>();
         var errors = new List<string>();
 
         foreach (var step in action.Steps)
         {
-            var interpolation = ActionInputBinder.InterpolateInputExpressions(step.Run, inputs);
+            var interpolation = ActionInputBinder.InterpolateInputExpressions(step.Run, inputs, projectRoot);
             if (interpolation.Success)
             {
                 commands.Add(interpolation.Value);

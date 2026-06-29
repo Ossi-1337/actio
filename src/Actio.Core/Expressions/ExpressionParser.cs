@@ -172,18 +172,7 @@ public sealed class ExpressionParser
 
             if (Match(TokenKind.LeftParen))
             {
-                if (!Match(TokenKind.RightParen))
-                {
-                    AddError($"Function '{name}' does not support arguments yet.");
-                    while (_current.Kind is not TokenKind.RightParen and not TokenKind.End)
-                    {
-                        Advance();
-                    }
-
-                    Match(TokenKind.RightParen);
-                }
-
-                return new FunctionCallExpressionNode(name);
+                return ParseFunctionCall(name);
             }
 
             var path = new List<string>();
@@ -200,6 +189,47 @@ public sealed class ExpressionParser
             }
 
             return new ReferenceExpressionNode(new ExpressionReference(name, path));
+        }
+
+        private FunctionCallExpressionNode? ParseFunctionCall(string name)
+        {
+            var arguments = new List<ExpressionNode>();
+            var closed = false;
+
+            if (Match(TokenKind.RightParen))
+            {
+                closed = true;
+            }
+            else
+            {
+                while (_current.Kind != TokenKind.End)
+                {
+                    var argument = ParseOr();
+                    if (argument is not null)
+                    {
+                        arguments.Add(argument);
+                    }
+
+                    if (Match(TokenKind.RightParen))
+                    {
+                        closed = true;
+                        break;
+                    }
+
+                    if (!Match(TokenKind.Comma))
+                    {
+                        AddError($"Expected ',' or ')' at position {_current.Position}.");
+                        break;
+                    }
+                }
+
+                if (!closed)
+                {
+                    AddError($"Expected ')' at position {_current.Position}.");
+                }
+            }
+
+            return new FunctionCallExpressionNode(name, arguments);
         }
 
         private BinaryExpressionNode? CreateBinary(
@@ -294,6 +324,7 @@ public sealed class ExpressionParser
             return current switch
             {
                 '.' => new Token(TokenKind.Dot, ".", start),
+                ',' => new Token(TokenKind.Comma, ",", start),
                 '(' => new Token(TokenKind.LeftParen, "(", start),
                 ')' => new Token(TokenKind.RightParen, ")", start),
                 '!' when MatchNext('=') => new Token(TokenKind.BangEquals, "!=", start),
@@ -419,6 +450,7 @@ public sealed class ExpressionParser
         False,
         Null,
         Dot,
+        Comma,
         LeftParen,
         RightParen,
         EqualsEquals,

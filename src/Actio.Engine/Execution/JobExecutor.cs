@@ -96,7 +96,8 @@ internal sealed class JobExecutor
                     jobOutputs,
                     inputs,
                     eventPayload,
-                    previousStepStatuses);
+                    previousStepStatuses,
+                    projectRoot);
 
                 if (!condition.Success)
                 {

@@ -5,18 +5,27 @@ namespace Actio.Engine.Execution;
 
 internal sealed class ConditionEvaluator
 {
-    public ConditionEvaluationResult Evaluate(
+    public ConditionEvaluationResult EvaluateJob(
         string? expression,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
         IReadOnlyDictionary<string, string> inputs,
-        WorkflowEventPayload eventPayload)
+        WorkflowEventPayload eventPayload,
+        IReadOnlyDictionary<string, string> jobStatuses,
+        IReadOnlyList<string> neededJobs,
+        string projectRoot)
     {
         if (expression is null)
         {
             return ConditionEvaluationResult.Run();
         }
 
-        return EvaluateExpression(expression, jobOutputs, inputs, eventPayload, []);
+        return EvaluateExpression(
+            expression,
+            jobOutputs,
+            inputs,
+            eventPayload,
+            projectRoot,
+            (function, arguments) => EvaluateJobStatusFunctionExpression(function, arguments, jobStatuses, neededJobs));
     }
 
     public ConditionEvaluationResult EvaluateStep(
@@ -24,14 +33,21 @@ internal sealed class ConditionEvaluator
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
         IReadOnlyDictionary<string, string> inputs,
         WorkflowEventPayload eventPayload,
-        IReadOnlyList<string> previousStepStatuses)
+        IReadOnlyList<string> previousStepStatuses,
+        string projectRoot)
     {
         if (expression is null)
         {
             return ConditionEvaluationResult.Run();
         }
 
-        return EvaluateExpression(expression, jobOutputs, inputs, eventPayload, previousStepStatuses);
+        return EvaluateExpression(
+            expression,
+            jobOutputs,
+            inputs,
+            eventPayload,
+            projectRoot,
+            (function, arguments) => EvaluateStepStatusFunctionExpression(function, arguments, previousStepStatuses));
     }
 
     private static ConditionEvaluationResult EvaluateExpression(
@@ -39,7 +55,8 @@ internal sealed class ConditionEvaluator
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
         IReadOnlyDictionary<string, string> inputs,
         WorkflowEventPayload eventPayload,
-        IReadOnlyList<string> previousStepStatuses)
+        string projectRoot,
+        Func<ExpressionFunctionCall, IReadOnlyList<ExpressionValue>, ExpressionEvaluationResult> evaluateFunction)
     {
         var parseResult = ExpressionParser.ParseTemplateExpression(expression);
         if (!parseResult.Success)
@@ -49,7 +66,7 @@ internal sealed class ConditionEvaluator
 
         var evaluation = ExpressionEvaluator.Evaluate(
             parseResult.Expression!,
-            CreateContext(jobOutputs, inputs, eventPayload, previousStepStatuses));
+            CreateContext(jobOutputs, inputs, eventPayload, projectRoot, evaluateFunction));
         if (!evaluation.Success)
         {
             return ConditionEvaluationResult.Failed(string.Join(" ", evaluation.Errors));
@@ -64,11 +81,13 @@ internal sealed class ConditionEvaluator
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
         IReadOnlyDictionary<string, string> inputs,
         WorkflowEventPayload eventPayload,
-        IReadOnlyList<string> previousStepStatuses)
+        string projectRoot,
+        Func<ExpressionFunctionCall, IReadOnlyList<ExpressionValue>, ExpressionEvaluationResult> evaluateFunction)
     {
         return new ExpressionEvaluationContext(
             reference => ResolveReference(reference, jobOutputs, inputs, eventPayload),
-            function => EvaluateStatusFunctionExpression(function, previousStepStatuses));
+            evaluateFunction,
+            projectRoot);
     }
 
     private static ExpressionReferenceResolution ResolveReference(
@@ -110,11 +129,30 @@ internal sealed class ConditionEvaluator
         return ExpressionReferenceResolution.Failed($"Unsupported expression reference '{reference}'.");
     }
 
-    private static ExpressionEvaluationResult EvaluateStatusFunctionExpression(
-        string function,
+    private static ExpressionEvaluationResult EvaluateStepStatusFunctionExpression(
+        ExpressionFunctionCall function,
+        IReadOnlyList<ExpressionValue> arguments,
         IReadOnlyList<string> previousStepStatuses)
     {
-        var condition = EvaluateStatusFunction(function, previousStepStatuses);
+        var condition = EvaluateStatusFunction(function, arguments, previousStepStatuses, StatusFunctionScope.Step);
+        if (!condition.Success)
+        {
+            return ExpressionEvaluationResult.Failed([condition.Error ?? "Unsupported status function."]);
+        }
+
+        return ExpressionEvaluationResult.Resolved(ExpressionValue.FromBoolean(condition.ShouldRun));
+    }
+
+    private static ExpressionEvaluationResult EvaluateJobStatusFunctionExpression(
+        ExpressionFunctionCall function,
+        IReadOnlyList<ExpressionValue> arguments,
+        IReadOnlyDictionary<string, string> jobStatuses,
+        IReadOnlyList<string> neededJobs)
+    {
+        var dependencyStatuses = neededJobs
+            .Select(neededJob => jobStatuses.TryGetValue(neededJob, out var status) ? status : "Skipped")
+            .ToArray();
+        var condition = EvaluateStatusFunction(function, arguments, dependencyStatuses, StatusFunctionScope.Job);
         if (!condition.Success)
         {
             return ExpressionEvaluationResult.Failed([condition.Error ?? "Unsupported status function."]);
@@ -124,26 +162,61 @@ internal sealed class ConditionEvaluator
     }
 
     private static ConditionEvaluationResult EvaluateStatusFunction(
-        string function,
-        IReadOnlyList<string> previousStepStatuses)
+        ExpressionFunctionCall function,
+        IReadOnlyList<ExpressionValue> arguments,
+        IReadOnlyList<string> statuses,
+        StatusFunctionScope scope)
     {
-        return function switch
+        if (arguments.Count != 0)
         {
-            "always" => ConditionEvaluationResult.Run(),
-            "success" => previousStepStatuses.Any(IsFailureStatus)
-                ? ConditionEvaluationResult.Skip()
-                : ConditionEvaluationResult.Run(),
-            "failure" => previousStepStatuses.Any(IsFailureStatus)
+            return ConditionEvaluationResult.Failed($"{function.Name}() does not accept arguments.");
+        }
+
+        if (string.Equals(function.Name, "always", StringComparison.OrdinalIgnoreCase))
+        {
+            return ConditionEvaluationResult.Run();
+        }
+
+        if (string.Equals(function.Name, "success", StringComparison.OrdinalIgnoreCase))
+        {
+            return IsSuccessStatusFunction(statuses, scope)
                 ? ConditionEvaluationResult.Run()
-                : ConditionEvaluationResult.Skip(),
-            "cancelled" => ConditionEvaluationResult.Skip(),
-            _ => ConditionEvaluationResult.Failed("Unsupported status function.")
-        };
+                : ConditionEvaluationResult.Skip();
+        }
+
+        if (string.Equals(function.Name, "failure", StringComparison.OrdinalIgnoreCase))
+        {
+            return statuses.Any(IsFailureStatus)
+                ? ConditionEvaluationResult.Run()
+                : ConditionEvaluationResult.Skip();
+        }
+
+        if (string.Equals(function.Name, "cancelled", StringComparison.OrdinalIgnoreCase))
+        {
+            return ConditionEvaluationResult.Skip();
+        }
+
+        return ConditionEvaluationResult.Failed("Unsupported status function.");
+    }
+
+    private static bool IsSuccessStatusFunction(
+        IReadOnlyList<string> statuses,
+        StatusFunctionScope scope)
+    {
+        return scope == StatusFunctionScope.Job
+            ? statuses.All(status => string.Equals(status, "Success", StringComparison.Ordinal))
+            : !statuses.Any(IsFailureStatus);
     }
 
     private static bool IsFailureStatus(string status)
     {
         return string.Equals(status, "Failed", StringComparison.Ordinal) ||
             string.Equals(status, "TimedOut", StringComparison.Ordinal);
+    }
+
+    private enum StatusFunctionScope
+    {
+        Job,
+        Step
     }
 }

@@ -23,6 +23,13 @@ public static class ExpressionAnalysis
             case ReferenceExpressionNode reference:
                 references.Add(reference.Reference);
                 break;
+            case FunctionCallExpressionNode function:
+                foreach (var argument in function.Arguments)
+                {
+                    CollectReferences(argument, references);
+                }
+
+                break;
             case UnaryExpressionNode unary:
                 CollectReferences(unary.Operand, references);
                 break;
@@ -39,6 +46,11 @@ public static class ExpressionAnalysis
         {
             case FunctionCallExpressionNode function:
                 functions.Add(new ExpressionFunctionCall(function.Name));
+                foreach (var argument in function.Arguments)
+                {
+                    CollectFunctionCalls(argument, functions);
+                }
+
                 break;
             case UnaryExpressionNode unary:
                 CollectFunctionCalls(unary.Operand, functions);
@@ -55,9 +67,26 @@ public static class ExpressionBuiltIns
 {
     public static bool IsStatusFunction(string name)
     {
-        return string.Equals(name, "success", StringComparison.Ordinal) ||
-            string.Equals(name, "failure", StringComparison.Ordinal) ||
-            string.Equals(name, "cancelled", StringComparison.Ordinal) ||
-            string.Equals(name, "always", StringComparison.Ordinal);
+        return string.Equals(name, "success", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(name, "failure", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(name, "cancelled", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(name, "always", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool IsDeterministicFunction(string name)
+    {
+        return string.Equals(name, "contains", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(name, "startsWith", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(name, "endsWith", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(name, "format", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(name, "join", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(name, "toJSON", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(name, "fromJSON", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(name, "hashFiles", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool IsSupportedFunction(string name)
+    {
+        return IsStatusFunction(name) || IsDeterministicFunction(name);
     }
 }

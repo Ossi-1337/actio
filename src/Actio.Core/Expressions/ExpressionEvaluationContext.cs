@@ -4,15 +4,19 @@ public sealed class ExpressionEvaluationContext
 {
     public ExpressionEvaluationContext(
         Func<ExpressionReference, ExpressionReferenceResolution>? resolveReference = null,
-        Func<string, ExpressionEvaluationResult>? evaluateFunction = null)
+        Func<ExpressionFunctionCall, IReadOnlyList<ExpressionValue>, ExpressionEvaluationResult>? evaluateFunction = null,
+        string? workspaceRoot = null)
     {
         ResolveReference = resolveReference ?? (reference => ExpressionReferenceResolution.Failed($"Unsupported expression reference '{reference}'."));
-        EvaluateFunction = evaluateFunction ?? (name => ExpressionEvaluationResult.Failed([$"Unsupported expression function '{name}'."]));
+        EvaluateFunction = evaluateFunction ?? ((function, _) => ExpressionEvaluationResult.Failed([$"Unsupported expression function '{function.Name}'."]));
+        WorkspaceRoot = workspaceRoot;
     }
 
     public Func<ExpressionReference, ExpressionReferenceResolution> ResolveReference { get; }
 
-    public Func<string, ExpressionEvaluationResult> EvaluateFunction { get; }
+    public Func<ExpressionFunctionCall, IReadOnlyList<ExpressionValue>, ExpressionEvaluationResult> EvaluateFunction { get; }
+
+    public string? WorkspaceRoot { get; }
 }
 
 public sealed record ExpressionReferenceResolution(
