@@ -6,6 +6,8 @@ namespace Actio.Engine.Execution;
 
 internal sealed class JobExecutor
 {
+    private const string StepEnvironmentFileContainerDirectory = "/actio/env";
+    internal const string DefaultContainerPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
     private const string SuccessStatus = "Success";
     private const string FailedStatus = "Failed";
     private const string SkippedStatus = "Skipped";
@@ -14,6 +16,7 @@ internal sealed class JobExecutor
     private readonly IRunnerProvider _runnerProvider;
     private readonly IRunStore _runStore;
     private readonly OutputMarkerParser _outputMarkerParser;
+    private readonly StepEnvironmentFileReader _environmentFileReader;
     private readonly ActionResolver _actionResolver;
     private readonly ConditionEvaluator _conditionEvaluator;
     private readonly Func<int, TimeSpan> _createTimeout;
@@ -28,6 +31,7 @@ internal sealed class JobExecutor
         _runnerProvider = runnerProvider;
         _runStore = runStore;
         _outputMarkerParser = outputMarkerParser;
+        _environmentFileReader = new StepEnvironmentFileReader();
         _actionResolver = actionResolver;
         _conditionEvaluator = new ConditionEvaluator();
         _createTimeout = createJobTimeout ?? (minutes => TimeSpan.FromMinutes(minutes));
@@ -56,6 +60,8 @@ internal sealed class JobExecutor
         var stepRecords = new List<StepRunRecord>();
         var outputs = new Dictionary<string, string>(job.Outputs, StringComparer.Ordinal);
         var stepOutputs = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal);
+        var environmentUpdates = new Dictionary<string, string>(StringComparer.Ordinal);
+        var pathEntries = new List<string>();
         var previousStepStatuses = new List<string>();
         var stepStatuses = new Dictionary<string, string>(StringComparer.Ordinal);
         var hardFailureSeen = false;
@@ -103,7 +109,7 @@ internal sealed class JobExecutor
                         projectRoot,
                         runId,
                         runTrigger,
-                        CreateStepContextEnvironment(workflowEnv, job.Env, step.Env),
+                        CreateStepContextEnvironment(workflowEnv, job.Env, environmentUpdates, step.Env),
                         jobOutputs,
                         jobStatuses,
                         stepOutputs,
@@ -146,6 +152,8 @@ internal sealed class JobExecutor
                     workflowEnv,
                     runDefaults,
                     stepOutputs,
+                    environmentUpdates,
+                    pathEntries,
                     projectRoot,
                     runId,
                     runTrigger,
@@ -155,6 +163,8 @@ internal sealed class JobExecutor
                 var stepFinishedAt = DateTimeOffset.UtcNow;
 
                 outputs.Merge(stepResult.Outputs);
+                environmentUpdates.Merge(stepResult.EnvironmentUpdates);
+                pathEntries.AddRange(stepResult.PathEntries);
                 if (step.Id is not null && stepResult.Outputs.Count > 0)
                 {
                     stepOutputs[step.Id] = new Dictionary<string, string>(stepResult.Outputs, StringComparer.Ordinal);
@@ -182,7 +192,9 @@ internal sealed class JobExecutor
                     stepResult.WorkingDirectory,
                     step.If,
                     step.TimeoutMinutes,
-                    step.ContinueOnError));
+                    step.ContinueOnError,
+                    stepResult.SummaryPath,
+                    stepResult.Summary));
                 previousStepStatuses.Add(stepResult.Status);
                 AddStepStatus(stepStatuses, step, stepResult.Status);
 
@@ -342,6 +354,8 @@ internal sealed class JobExecutor
         IReadOnlyDictionary<string, string> workflowEnv,
         WorkflowRunDefaults runDefaults,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> stepOutputs,
+        IReadOnlyDictionary<string, string> environmentUpdates,
+        IReadOnlyList<string> pathEntries,
         string projectRoot,
         string runId,
         WorkflowRunTrigger runTrigger,
@@ -375,6 +389,28 @@ internal sealed class JobExecutor
         await using var collector = new StepOutputCollector(output, error, stepLog, _outputMarkerParser);
         var effectiveRunDefaults = runDefaults.Merge(new WorkflowRunDefaults(step.Shell, step.WorkingDirectory));
         StepExecutionPlan? plan = null;
+        StepEnvironmentFiles environmentFiles;
+
+        try
+        {
+            environmentFiles = await _runStore.CreateStepEnvironmentFilesAsync(runId, job.Name, stepIndex, step.Name, stepCancellationToken);
+        }
+        catch (OperationCanceledException) when (IsStepTimeout(timeoutTokenSource, cancellationToken))
+        {
+            return StepExecutionOutcome.TimedOut(
+                step.Run ?? step.Uses ?? string.Empty,
+                collector.LogPath,
+                new Dictionary<string, string>(),
+                null,
+                null,
+                FormatStepTimeoutError(job.Name, step.Name, step.TimeoutMinutes!.Value));
+        }
+        catch (Exception ex) when (StorageError.IsRecoverable(ex))
+        {
+            return StepExecutionOutcome.StorageFailed(
+                StorageError.Format($"creating workflow environment files for job '{job.Name}' step '{step.Name}'", ex),
+                collector.LogPath);
+        }
 
         try
         {
@@ -388,9 +424,15 @@ internal sealed class JobExecutor
                 workflowEnv,
                 job.Env,
                 stepOutputs,
+                environmentUpdates,
+                pathEntries,
                 step.Env,
                 DefaultEnvironmentVariables.Create(workflowName, job, step, stepIndex, runId, runTrigger),
+                CreateEnvironmentFileVariables(),
                 plan.Environment);
+            var additionalMounts = plan.AdditionalMounts
+                .Concat([new StepExecutionMount(environmentFiles.DirectoryPath, StepEnvironmentFileContainerDirectory, ReadOnly: false)])
+                .ToArray();
             var result = plan.Kind == StepExecutionKind.DockerImageAction
                 ? await _runnerProvider.ExecuteDockerActionAsync(
                     new DockerActionExecutionRequest(
@@ -398,7 +440,8 @@ internal sealed class JobExecutor
                         step.Name,
                         plan.DockerImage!,
                         projectRoot,
-                        environment),
+                        environment,
+                        additionalMounts),
                     collector,
                     stepCancellationToken)
                 : await _runnerProvider.ExecuteStepAsync(
@@ -411,11 +454,26 @@ internal sealed class JobExecutor
                         environment,
                         effectiveRunDefaults.Shell,
                         effectiveRunDefaults.WorkingDirectory,
-                        plan.AdditionalMounts),
+                        additionalMounts),
                     collector,
                     stepCancellationToken);
             var resultShell = plan.Kind == StepExecutionKind.DockerImageAction ? null : effectiveRunDefaults.Shell;
             var resultWorkingDirectory = plan.Kind == StepExecutionKind.DockerImageAction ? null : effectiveRunDefaults.WorkingDirectory;
+            var environmentFileResult = await _environmentFileReader.ReadAsync(environmentFiles, stepCancellationToken);
+            var outputs = MergeOutputs(collector.CapturedOutputs, environmentFileResult.Outputs);
+
+            if (environmentFileResult.Errors.Count > 0)
+            {
+                return StepExecutionOutcome.FailedWithoutExitCode(
+                    plan.Command!,
+                    environmentFileResult.Errors,
+                    collector.LogPath,
+                    outputs,
+                    environmentFileResult.Environment,
+                    environmentFileResult.PathEntries,
+                    environmentFileResult.SummaryPath,
+                    environmentFileResult.Summary);
+            }
 
             if (!result.Success)
             {
@@ -423,19 +481,27 @@ internal sealed class JobExecutor
                     plan.Command!,
                     result.ExitCode,
                     collector.LogPath,
-                    collector.CapturedOutputs,
+                    outputs,
                     resultShell,
                     resultWorkingDirectory,
-                    $"workflow.jobs.{job.Name}.steps.{step.Name} failed with exit code {result.ExitCode}.");
+                    $"workflow.jobs.{job.Name}.steps.{step.Name} failed with exit code {result.ExitCode}.",
+                    environmentFileResult.Environment,
+                    environmentFileResult.PathEntries,
+                    environmentFileResult.SummaryPath,
+                    environmentFileResult.Summary);
             }
 
             return StepExecutionOutcome.Succeeded(
                 plan.Command!,
                 result.ExitCode,
                 collector.LogPath,
-                collector.CapturedOutputs,
+                outputs,
                 resultShell,
-                resultWorkingDirectory);
+                resultWorkingDirectory,
+                environmentFileResult.Environment,
+                environmentFileResult.PathEntries,
+                environmentFileResult.SummaryPath,
+                environmentFileResult.Summary);
         }
         catch (Exception ex) when (StorageError.IsRecoverable(ex))
         {
@@ -582,15 +648,21 @@ internal sealed class JobExecutor
         IReadOnlyDictionary<string, string> workflowEnv,
         IReadOnlyDictionary<string, string> jobEnv,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> stepOutputs,
+        IReadOnlyDictionary<string, string> environmentUpdates,
+        IReadOnlyList<string> pathEntries,
         IReadOnlyDictionary<string, string> stepEnv,
         IReadOnlyDictionary<string, string> defaultEnv,
+        IReadOnlyDictionary<string, string> environmentFileEnv,
         IReadOnlyDictionary<string, string> actionEnv)
     {
         var environment = new Dictionary<string, string>(workflowEnv, StringComparer.Ordinal);
         environment.Merge(jobEnv);
+        environment.Merge(environmentUpdates);
         environment.Merge(CreateStepOutputEnvironment(stepOutputs));
         environment.Merge(stepEnv);
+        environment.ApplyPathEntries(pathEntries);
         environment.MergeDefaultEnvironment(defaultEnv);
+        environment.Merge(environmentFileEnv);
         environment.Merge(actionEnv);
         return environment;
     }
@@ -598,10 +670,12 @@ internal sealed class JobExecutor
     private static IReadOnlyDictionary<string, string> CreateStepContextEnvironment(
         IReadOnlyDictionary<string, string> workflowEnv,
         IReadOnlyDictionary<string, string> jobEnv,
+        IReadOnlyDictionary<string, string> environmentUpdates,
         IReadOnlyDictionary<string, string> stepEnv)
     {
         var environment = new Dictionary<string, string>(workflowEnv, StringComparer.Ordinal);
         environment.Merge(jobEnv);
+        environment.Merge(environmentUpdates);
         environment.Merge(stepEnv);
         return environment;
     }
@@ -652,6 +726,32 @@ internal sealed class JobExecutor
         return Math.Max(0, (long)(finishedAt - startedAt).TotalMilliseconds);
     }
 
+    private static IReadOnlyDictionary<string, string> CreateEnvironmentFileVariables()
+    {
+        return new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["GITHUB_ENV"] = ToEnvironmentFileContainerPath(StepEnvironmentFiles.EnvironmentFileName),
+            ["GITHUB_OUTPUT"] = ToEnvironmentFileContainerPath(StepEnvironmentFiles.OutputFileName),
+            ["GITHUB_PATH"] = ToEnvironmentFileContainerPath(StepEnvironmentFiles.PathFileName),
+            ["GITHUB_STEP_SUMMARY"] = ToEnvironmentFileContainerPath(StepEnvironmentFiles.StepSummaryFileName),
+            ["GITHUB_STATE"] = ToEnvironmentFileContainerPath(StepEnvironmentFiles.StateFileName)
+        };
+    }
+
+    private static string ToEnvironmentFileContainerPath(string fileName)
+    {
+        return $"{StepEnvironmentFileContainerDirectory}/{fileName}";
+    }
+
+    private static IReadOnlyDictionary<string, string> MergeOutputs(
+        IReadOnlyDictionary<string, string> first,
+        IReadOnlyDictionary<string, string> second)
+    {
+        var outputs = new Dictionary<string, string>(first, StringComparer.Ordinal);
+        outputs.Merge(second);
+        return outputs;
+    }
+
     private sealed record StepExecutionOutcome(
         string Status,
         string Command,
@@ -661,6 +761,10 @@ internal sealed class JobExecutor
         string? WorkingDirectory,
         IReadOnlyDictionary<string, string> Outputs,
         IReadOnlyList<string> Errors,
+        IReadOnlyDictionary<string, string> EnvironmentUpdates,
+        IReadOnlyList<string> PathEntries,
+        string? SummaryPath,
+        string? Summary,
         bool CountsAsFailedStep)
     {
         public static StepExecutionOutcome Succeeded(
@@ -669,9 +773,13 @@ internal sealed class JobExecutor
             string? logPath,
             IReadOnlyDictionary<string, string> outputs,
             string? shell,
-            string? workingDirectory)
+            string? workingDirectory,
+            IReadOnlyDictionary<string, string>? environmentUpdates = null,
+            IReadOnlyList<string>? pathEntries = null,
+            string? summaryPath = null,
+            string? summary = null)
         {
-            return new StepExecutionOutcome(SuccessStatus, command, exitCode, logPath, shell, workingDirectory, outputs, [], false);
+            return new StepExecutionOutcome(SuccessStatus, command, exitCode, logPath, shell, workingDirectory, outputs, [], environmentUpdates ?? new Dictionary<string, string>(), pathEntries ?? [], summaryPath, summary, false);
         }
 
         public static StepExecutionOutcome Failed(
@@ -681,14 +789,18 @@ internal sealed class JobExecutor
             IReadOnlyDictionary<string, string> outputs,
             string? shell,
             string? workingDirectory,
-            string error)
+            string error,
+            IReadOnlyDictionary<string, string>? environmentUpdates = null,
+            IReadOnlyList<string>? pathEntries = null,
+            string? summaryPath = null,
+            string? summary = null)
         {
-            return new StepExecutionOutcome(FailedStatus, command, exitCode, logPath, shell, workingDirectory, outputs, [error], true);
+            return new StepExecutionOutcome(FailedStatus, command, exitCode, logPath, shell, workingDirectory, outputs, [error], environmentUpdates ?? new Dictionary<string, string>(), pathEntries ?? [], summaryPath, summary, true);
         }
 
         public static StepExecutionOutcome StorageFailed(string error, string? logPath = null)
         {
-            return new StepExecutionOutcome(FailedStatus, string.Empty, null, logPath, null, null, new Dictionary<string, string>(), [error], false);
+            return new StepExecutionOutcome(FailedStatus, string.Empty, null, logPath, null, null, new Dictionary<string, string>(), [error], new Dictionary<string, string>(), [], null, null, false);
         }
 
         public static StepExecutionOutcome TimedOut(
@@ -699,15 +811,20 @@ internal sealed class JobExecutor
             string? workingDirectory,
             string error)
         {
-            return new StepExecutionOutcome(TimedOutStatus, command, null, logPath, shell, workingDirectory, outputs, [error], true);
+            return new StepExecutionOutcome(TimedOutStatus, command, null, logPath, shell, workingDirectory, outputs, [error], new Dictionary<string, string>(), [], null, null, true);
         }
 
         public static StepExecutionOutcome FailedWithoutExitCode(
             string command,
             IReadOnlyList<string> errors,
-            string? logPath)
+            string? logPath,
+            IReadOnlyDictionary<string, string>? outputs = null,
+            IReadOnlyDictionary<string, string>? environmentUpdates = null,
+            IReadOnlyList<string>? pathEntries = null,
+            string? summaryPath = null,
+            string? summary = null)
         {
-            return new StepExecutionOutcome(FailedStatus, command, null, logPath, null, null, new Dictionary<string, string>(), errors, true);
+            return new StepExecutionOutcome(FailedStatus, command, null, logPath, null, null, outputs ?? new Dictionary<string, string>(), errors, environmentUpdates ?? new Dictionary<string, string>(), pathEntries ?? [], summaryPath, summary, true);
         }
     }
 
@@ -775,5 +892,18 @@ file static class DictionaryExtensions
 
             target[item.Key] = item.Value;
         }
+    }
+
+    public static void ApplyPathEntries(this Dictionary<string, string> target, IReadOnlyList<string> pathEntries)
+    {
+        if (pathEntries.Count == 0)
+        {
+            return;
+        }
+
+        var basePath = target.TryGetValue("PATH", out var path) && !string.IsNullOrWhiteSpace(path)
+            ? path
+            : JobExecutor.DefaultContainerPath;
+        target["PATH"] = string.Join(":", pathEntries.Concat([basePath]));
     }
 }

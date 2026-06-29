@@ -372,6 +372,7 @@ function renderStep(run, job, step) {
       </span>
       ${step.logPath ? `<button class="log-button" data-log-key="${escapeHtml(key)}" data-job="${escapeHtml(jobId)}" data-step="${escapeHtml(stepId)}">Log</button>` : `<span class="muted">No log</span>`}
     </div>
+    ${step.summary ? `<pre class="step-summary">${escapeHtml(step.summary)}</pre>` : ""}
     <pre class="log-view" ${isOpen ? "" : "hidden"} data-log-key="${escapeHtml(key)}" data-job="${escapeHtml(jobId)}" data-step="${escapeHtml(stepId)}">${escapeHtml(content)}</pre>
   `;
 }

@@ -194,6 +194,19 @@ public sealed class ActioWebDataServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task GetRunAsync_ReturnsStepSummary()
+    {
+        var workflowPath = WriteWorkflow("ci.yml", "CI");
+        await SaveRunAsync(CreateRun("run-1", "CI", workflowPath, stepSummary: "### Summary\nAll good\n"));
+
+        var run = await CreateService().GetRunAsync("run-1");
+
+        Assert.NotNull(run);
+        var step = Assert.Single(Assert.Single(run.Jobs).Steps);
+        Assert.Equal("### Summary\nAll good\n", step.Summary);
+    }
+
+    [Fact]
     public async Task GetArtifactAsync_ReturnsFileArtifact()
     {
         var workflowPath = WriteWorkflow("ci.yml", "CI");
@@ -423,7 +436,8 @@ public sealed class ActioWebDataServiceTests : IDisposable
         WorkflowRunTrigger? runTrigger = null,
         string jobName = "test",
         string? jobId = null,
-        string? stepId = null)
+        string? stepId = null,
+        string? stepSummary = null)
     {
         var start = startedAt ?? DateTimeOffset.UtcNow;
         var finish = finishedAt ?? start;
@@ -451,7 +465,7 @@ public sealed class ActioWebDataServiceTests : IDisposable
                     finish,
                     durationMilliseconds,
                     new Dictionary<string, string>(),
-                    [new StepRunRecord("Test", status, "dotnet test", 0, logPath, start, finish, durationMilliseconds, stepId)],
+                    [new StepRunRecord("Test", status, "dotnet test", 0, logPath, start, finish, durationMilliseconds, stepId, Summary: stepSummary)],
                     artifact,
                     [],
                     jobId)

@@ -129,7 +129,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             request.Environment,
             containerName,
             null,
-            []);
+            request.AdditionalMounts);
         startInfo.ArgumentList.Add(request.Image);
         return startInfo;
     }

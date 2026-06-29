@@ -292,6 +292,147 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_ReadsGitHubOutputFileAndExposesStepOutputs()
+    {
+        var runner = new FakeRunnerProvider(
+            [
+                new FakeRunnerStep(
+                    0,
+                    onExecute: (environment, mounts) => WriteEnvironmentFile(
+                        environment,
+                        mounts,
+                        "GITHUB_OUTPUT",
+                        """
+                        changed=true
+                        message<<EOF
+                        hello
+                        world
+                        EOF
+
+                        """)),
+                new FakeRunnerStep(0)
+            ]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep("Detect", "echo detect", null, Id: "detect"),
+                    new WorkflowStep(
+                        "Use output",
+                        "echo later",
+                        null,
+                        If: "${{ steps.detect.outputs.changed == 'true' }}")
+                ]));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal(2, runner.Requests.Count);
+        Assert.Equal("true", runner.Requests[1].Environment["ACTIO_STEP_DETECT_OUTPUT_CHANGED"]);
+        Assert.Contains(result.Outputs, output => output.JobName == "test" && output.Name == "changed" && output.Value == "true");
+        Assert.Contains(result.Outputs, output => output.JobName == "test" && output.Name == "message" && output.Value == "hello\nworld");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_AppliesGitHubEnvAndPathFilesToFollowingStepsOnly()
+    {
+        var runner = new FakeRunnerProvider(
+            [
+                new FakeRunnerStep(
+                    0,
+                    onExecute: (environment, mounts) =>
+                    {
+                        WriteEnvironmentFile(
+                            environment,
+                            mounts,
+                            "GITHUB_ENV",
+                            """
+                            FROM_FILE=hello
+                            MULTILINE<<EOF
+                            one
+                            two
+                            EOF
+
+                            """);
+                        WriteEnvironmentFile(environment, mounts, "GITHUB_PATH", "/tools/bin\n");
+                        WriteEnvironmentFile(environment, mounts, "GITHUB_STATE", "state=value\n");
+                    }),
+                new FakeRunnerStep(0)
+            ]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep("Prepare env", "echo env", null),
+                    new WorkflowStep("Use env", "echo later", null)
+                ]));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal("/actio/env/GITHUB_ENV", runner.Requests[0].Environment["GITHUB_ENV"]);
+        Assert.Equal("/actio/env/GITHUB_OUTPUT", runner.Requests[0].Environment["GITHUB_OUTPUT"]);
+        Assert.Equal("/actio/env/GITHUB_PATH", runner.Requests[0].Environment["GITHUB_PATH"]);
+        Assert.Equal("/actio/env/GITHUB_STEP_SUMMARY", runner.Requests[0].Environment["GITHUB_STEP_SUMMARY"]);
+        Assert.Equal("/actio/env/GITHUB_STATE", runner.Requests[0].Environment["GITHUB_STATE"]);
+        Assert.False(runner.Requests[0].Environment.ContainsKey("FROM_FILE"));
+        Assert.Equal("hello", runner.Requests[1].Environment["FROM_FILE"]);
+        Assert.Equal("one\ntwo", runner.Requests[1].Environment["MULTILINE"]);
+        Assert.StartsWith("/tools/bin:", runner.Requests[1].Environment["PATH"], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_StoresGitHubStepSummaryInRunRecord()
+    {
+        var runner = new FakeRunnerProvider(
+            [
+                new FakeRunnerStep(
+                    0,
+                    onExecute: (environment, mounts) => WriteEnvironmentFile(
+                        environment,
+                        mounts,
+                        "GITHUB_STEP_SUMMARY",
+                        "### Test summary\nAll good\n"))
+            ]);
+        var store = new RecordingRunStore();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Summarize", "echo summary", null)]));
+
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var step = Assert.Single(Assert.Single(store.SavedRecords.Last().Jobs).Steps);
+        Assert.NotNull(step.SummaryPath);
+        Assert.Equal("### Test summary\nAll good\n", step.Summary);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_StopsAfterFailedStep()
     {
         var runner = new FakeRunnerProvider([0, 42]);
@@ -1495,10 +1636,11 @@ public sealed class WorkflowExecutorTests
             Assert.Equal("Remote", request.Environment["INPUT_NAME"]);
             Assert.Equal("!", request.Environment["INPUT_PUNCTUATION"]);
             Assert.Equal("/actio/action", request.Environment["GITHUB_ACTION_PATH"]);
-            var mount = Assert.Single(request.AdditionalMounts);
-            Assert.Equal(actionRoot, mount.HostPath);
-            Assert.Equal("/actio/action", mount.ContainerPath);
-            Assert.True(mount.ReadOnly);
+            var actionMount = Assert.Single(request.AdditionalMounts, mount => mount.ContainerPath == "/actio/action");
+            Assert.Equal(actionRoot, actionMount.HostPath);
+            Assert.True(actionMount.ReadOnly);
+            var environmentFileMount = Assert.Single(request.AdditionalMounts, mount => mount.ContainerPath == "/actio/env");
+            Assert.False(environmentFileMount.ReadOnly);
         }
         finally
         {
@@ -1709,6 +1851,25 @@ public sealed class WorkflowExecutorTests
         Assert.Equal("Linux", environment["RUNNER_OS"]);
     }
 
+    private static void WriteEnvironmentFile(
+        IReadOnlyDictionary<string, string> environment,
+        IReadOnlyList<StepExecutionMount> mounts,
+        string variableName,
+        string content)
+    {
+        File.AppendAllText(ResolveMountedPath(environment[variableName], mounts), content);
+    }
+
+    private static string ResolveMountedPath(string containerPath, IReadOnlyList<StepExecutionMount> mounts)
+    {
+        var normalizedContainerPath = containerPath.Replace('\\', '/');
+        var mount = mounts.First(item =>
+            normalizedContainerPath.StartsWith(item.ContainerPath.TrimEnd('/') + "/", StringComparison.Ordinal));
+        var relativePath = normalizedContainerPath[(mount.ContainerPath.TrimEnd('/').Length + 1)..]
+            .Replace('/', Path.DirectorySeparatorChar);
+        return Path.Combine(mount.HostPath, relativePath);
+    }
+
     private sealed class FakeRunnerProvider : IRunnerProvider
     {
         private readonly Queue<FakeRunnerStep> _steps;
@@ -1739,8 +1900,9 @@ public sealed class WorkflowExecutorTests
             IStepOutputSink output,
             CancellationToken cancellationToken = default)
         {
+            var step = _steps.Dequeue();
             Requests.Add(request);
-            return ExecuteStepAsync(_steps.Dequeue(), output, cancellationToken);
+            return ExecuteStepAsync(step, request.Environment, request.AdditionalMounts, output, cancellationToken);
         }
 
         public Task<StepExecutionResult> ExecuteDockerActionAsync(
@@ -1748,15 +1910,20 @@ public sealed class WorkflowExecutorTests
             IStepOutputSink output,
             CancellationToken cancellationToken = default)
         {
+            var step = _steps.Dequeue();
             DockerActionRequests.Add(request);
-            return ExecuteStepAsync(_steps.Dequeue(), output, cancellationToken);
+            return ExecuteStepAsync(step, request.Environment, request.AdditionalMounts, output, cancellationToken);
         }
 
         private static async Task<StepExecutionResult> ExecuteStepAsync(
             FakeRunnerStep step,
+            IReadOnlyDictionary<string, string> environment,
+            IReadOnlyList<StepExecutionMount> mounts,
             IStepOutputSink output,
             CancellationToken cancellationToken)
         {
+            step.OnExecute?.Invoke(environment, mounts);
+
             if (step.Delay > TimeSpan.Zero)
             {
                 await Task.Delay(step.Delay, cancellationToken);
@@ -1817,6 +1984,16 @@ public sealed class WorkflowExecutorTests
             return Task.FromResult<IStepLog>(NullStepLog.Instance);
         }
 
+        public Task<StepEnvironmentFiles> CreateStepEnvironmentFilesAsync(
+            string runId,
+            string jobName,
+            int stepIndex,
+            string stepName,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(CreateStepEnvironmentFiles(runId, jobName, stepIndex, stepName));
+        }
+
         public Task<ArtifactSaveResult> SaveArtifactsAsync(
             string runId,
             string jobName,
@@ -1855,6 +2032,16 @@ public sealed class WorkflowExecutorTests
             CancellationToken cancellationToken = default)
         {
             return Task.FromResult<IStepLog>(NullStepLog.Instance);
+        }
+
+        public Task<StepEnvironmentFiles> CreateStepEnvironmentFilesAsync(
+            string runId,
+            string jobName,
+            int stepIndex,
+            string stepName,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(CreateStepEnvironmentFiles(runId, jobName, stepIndex, stepName));
         }
 
         public Task<ArtifactSaveResult> SaveArtifactsAsync(
@@ -1946,12 +2133,14 @@ public sealed class WorkflowExecutorTests
             int exitCode,
             IReadOnlyList<string>? outputLines = null,
             IReadOnlyList<string>? errorLines = null,
-            TimeSpan? delay = null)
+            TimeSpan? delay = null,
+            Action<IReadOnlyDictionary<string, string>, IReadOnlyList<StepExecutionMount>>? onExecute = null)
         {
             ExitCode = exitCode;
             OutputLines = outputLines ?? [];
             ErrorLines = errorLines ?? [];
             Delay = delay ?? TimeSpan.Zero;
+            OnExecute = onExecute;
         }
 
         public int ExitCode { get; }
@@ -1961,5 +2150,47 @@ public sealed class WorkflowExecutorTests
         public IReadOnlyList<string> ErrorLines { get; }
 
         public TimeSpan Delay { get; }
+
+        public Action<IReadOnlyDictionary<string, string>, IReadOnlyList<StepExecutionMount>>? OnExecute { get; }
+    }
+
+    private static StepEnvironmentFiles CreateStepEnvironmentFiles(
+        string runId,
+        string jobName,
+        int stepIndex,
+        string stepName)
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(),
+            "actio-engine-tests",
+            SanitizePathSegment(runId),
+            SanitizePathSegment(jobName),
+            $"{stepIndex + 1:D3}-{SanitizePathSegment(stepName)}-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+
+        var files = new StepEnvironmentFiles(
+            directory,
+            Path.Combine(directory, StepEnvironmentFiles.EnvironmentFileName),
+            Path.Combine(directory, StepEnvironmentFiles.OutputFileName),
+            Path.Combine(directory, StepEnvironmentFiles.PathFileName),
+            Path.Combine(directory, StepEnvironmentFiles.StepSummaryFileName),
+            Path.Combine(directory, StepEnvironmentFiles.StateFileName));
+
+        File.WriteAllText(files.EnvironmentFilePath, string.Empty);
+        File.WriteAllText(files.OutputFilePath, string.Empty);
+        File.WriteAllText(files.PathFilePath, string.Empty);
+        File.WriteAllText(files.StepSummaryFilePath, string.Empty);
+        File.WriteAllText(files.StateFilePath, string.Empty);
+        return files;
+    }
+
+    private static string SanitizePathSegment(string value)
+    {
+        var invalidChars = Path.GetInvalidFileNameChars().ToHashSet();
+        var sanitized = new string(value
+            .Select(character => invalidChars.Contains(character) || char.IsWhiteSpace(character) ? '-' : character)
+            .ToArray());
+
+        return string.IsNullOrWhiteSpace(sanitized) ? "unnamed" : sanitized;
     }
 }

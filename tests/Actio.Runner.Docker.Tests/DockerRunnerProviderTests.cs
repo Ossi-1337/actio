@@ -43,6 +43,25 @@ public sealed class DockerRunnerProviderTests
     }
 
     [Fact]
+    public void CreateDockerActionStartInfo_AddsAdditionalWritableMounts()
+    {
+        var envFilePath = Path.Combine(Directory.GetCurrentDirectory(), "env-files");
+        var request = new DockerActionExecutionRequest(
+            "test",
+            "Use image",
+            "alpine:3.20",
+            Directory.GetCurrentDirectory(),
+            new Dictionary<string, string>(),
+            [new StepExecutionMount(envFilePath, "/actio/env", ReadOnly: false)]);
+
+        var startInfo = DockerRunnerProvider.CreateDockerActionStartInfo(request, "actio-test");
+        var args = startInfo.ArgumentList.ToArray();
+
+        Assert.Contains("-v", args);
+        Assert.Contains($"{Path.GetFullPath(envFilePath)}:/actio/env", args);
+    }
+
+    [Fact]
     public void CreateShellStepStartInfo_AddsAdditionalReadOnlyMounts()
     {
         var actionPath = Path.Combine(Directory.GetCurrentDirectory(), "cached-action");

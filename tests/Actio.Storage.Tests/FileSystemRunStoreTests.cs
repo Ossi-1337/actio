@@ -183,6 +183,27 @@ public sealed class FileSystemRunStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task CreateStepEnvironmentFilesAsync_CreatesFilesUnderRunDirectory()
+    {
+        var store = new FileSystemRunStore(_root);
+        var runId = "run-env";
+        await store.InitializeRunAsync(runId);
+
+        var files = await store.CreateStepEnvironmentFilesAsync(
+            runId,
+            "test",
+            0,
+            "Run tests");
+
+        Assert.Contains(Path.Combine("runs", runId, "env-files", "test"), files.DirectoryPath);
+        Assert.True(File.Exists(files.EnvironmentFilePath));
+        Assert.True(File.Exists(files.OutputFilePath));
+        Assert.True(File.Exists(files.PathFilePath));
+        Assert.True(File.Exists(files.StepSummaryFilePath));
+        Assert.True(File.Exists(files.StateFilePath));
+    }
+
+    [Fact]
     public async Task SaveArtifactsAsync_CopiesFilesUnderActioArtifacts()
     {
         var projectRoot = Path.Combine(_root, "repo");

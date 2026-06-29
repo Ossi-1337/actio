@@ -524,11 +524,16 @@ pre {
 }
 
 .log-view,
+.step-summary,
 .workflow-file pre {
   max-height: 360px;
   padding: 12px 14px;
   border-top: 1px solid var(--line-soft);
   background: var(--pre-bg);
+}
+
+.step-summary {
+  border-left: 3px solid var(--accent);
 }
 
 .link-list {

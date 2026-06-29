@@ -14,4 +14,6 @@ public sealed record StepRunRecord(
     string? WorkingDirectory = null,
     string? If = null,
     int? TimeoutMinutes = null,
-    bool ContinueOnError = false);
+    bool ContinueOnError = false,
+    string? SummaryPath = null,
+    string? Summary = null);

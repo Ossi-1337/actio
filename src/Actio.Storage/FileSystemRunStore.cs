@@ -79,6 +79,37 @@ public sealed class FileSystemRunStore : IRunStore
         return new FileSystemStepLog(logPath, writer);
     }
 
+    public Task<StepEnvironmentFiles> CreateStepEnvironmentFilesAsync(
+        string runId,
+        string jobName,
+        int stepIndex,
+        string stepName,
+        CancellationToken cancellationToken = default)
+    {
+        var directory = Path.Combine(
+            RunsPath,
+            SanitizePathSegment(runId),
+            "env-files",
+            SanitizePathSegment(jobName),
+            $"{stepIndex + 1:D3}-{SanitizePathSegment(stepName)}");
+        Directory.CreateDirectory(directory);
+
+        var files = new StepEnvironmentFiles(
+            directory,
+            Path.Combine(directory, StepEnvironmentFiles.EnvironmentFileName),
+            Path.Combine(directory, StepEnvironmentFiles.OutputFileName),
+            Path.Combine(directory, StepEnvironmentFiles.PathFileName),
+            Path.Combine(directory, StepEnvironmentFiles.StepSummaryFileName),
+            Path.Combine(directory, StepEnvironmentFiles.StateFileName));
+
+        File.WriteAllText(files.EnvironmentFilePath, string.Empty);
+        File.WriteAllText(files.OutputFilePath, string.Empty);
+        File.WriteAllText(files.PathFilePath, string.Empty);
+        File.WriteAllText(files.StepSummaryFilePath, string.Empty);
+        File.WriteAllText(files.StateFilePath, string.Empty);
+        return Task.FromResult(files);
+    }
+
     public Task<ArtifactSaveResult> SaveArtifactsAsync(
         string runId,
         string jobName,

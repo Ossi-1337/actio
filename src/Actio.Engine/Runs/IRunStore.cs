@@ -15,6 +15,13 @@ public interface IRunStore
         string stepName,
         CancellationToken cancellationToken = default);
 
+    Task<StepEnvironmentFiles> CreateStepEnvironmentFilesAsync(
+        string runId,
+        string jobName,
+        int stepIndex,
+        string stepName,
+        CancellationToken cancellationToken = default);
+
     Task<ArtifactSaveResult> SaveArtifactsAsync(
         string runId,
         string jobName,
