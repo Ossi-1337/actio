@@ -29,6 +29,7 @@ public sealed partial class WorkflowParser
         "timeout-minutes",
         "continue-on-error",
         "concurrency",
+        "strategy",
         "outputs",
         "artifacts",
         "steps"
@@ -115,6 +116,11 @@ public sealed partial class WorkflowParser
     {
         "group",
         "cancel-in-progress"
+    };
+
+    private static readonly HashSet<string> JobStrategyKeys = new(StringComparer.Ordinal)
+    {
+        "matrix"
     };
 
     private static readonly IReadOnlyDictionary<string, IReadOnlySet<string>> KnownActivityTypes =
@@ -250,6 +256,7 @@ public sealed partial class WorkflowParser
             var timeoutMinutes = ReadOptionalPositiveInt(errors, jobMap, "timeout-minutes", $"workflow.jobs.{jobName}.timeout-minutes");
             var continueOnError = ReadOptionalBoolean(errors, jobMap, "continue-on-error", $"workflow.jobs.{jobName}.continue-on-error") ?? false;
             var concurrency = ReadJobConcurrency(errors, jobMap, jobName);
+            var strategy = ReadJobStrategy(errors, jobMap, jobName);
             var outputs = ReadOptionalStringMap(errors, jobMap, "outputs", $"workflow.jobs.{jobName}.outputs");
             var artifacts = ReadArtifacts(errors, jobMap, jobName);
             var steps = ReadSteps(errors, warnings, jobMap, jobName);
@@ -267,6 +274,7 @@ public sealed partial class WorkflowParser
                     timeoutMinutes,
                     continueOnError,
                     concurrency,
+                    strategy,
                     outputs,
                     artifacts,
                     steps);
@@ -1319,6 +1327,116 @@ public sealed partial class WorkflowParser
             : new WorkflowJobConcurrency(groupValue, cancelInProgress);
     }
 
+    private static WorkflowJobStrategy ReadJobStrategy(
+        List<string> errors,
+        YamlMappingNode jobMap,
+        string jobName)
+    {
+        if (!TryGet(jobMap, "strategy", out var node))
+        {
+            return WorkflowJobStrategy.Empty;
+        }
+
+        var path = $"workflow.jobs.{jobName}.strategy";
+        if (node is not YamlMappingNode strategyMap)
+        {
+            errors.Add($"{path} must be a mapping.");
+            return WorkflowJobStrategy.Empty;
+        }
+
+        AddUnknownKeyErrors(errors, strategyMap, JobStrategyKeys, path);
+        if (!TryGet(strategyMap, "matrix", out _))
+        {
+            errors.Add($"{path}.matrix is required.");
+            return WorkflowJobStrategy.Empty;
+        }
+
+        return new WorkflowJobStrategy(ReadJobMatrix(errors, strategyMap, $"{path}.matrix"));
+    }
+
+    private static WorkflowJobMatrix ReadJobMatrix(
+        List<string> errors,
+        YamlMappingNode strategyMap,
+        string path)
+    {
+        if (!TryGet(strategyMap, "matrix", out var node))
+        {
+            return WorkflowJobMatrix.Empty;
+        }
+
+        if (node is not YamlMappingNode matrixMap)
+        {
+            errors.Add($"{path} must be a mapping.");
+            return WorkflowJobMatrix.Empty;
+        }
+
+        if (matrixMap.Children.Count == 0)
+        {
+            errors.Add($"{path} must contain at least one axis.");
+            return WorkflowJobMatrix.Empty;
+        }
+
+        var axes = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+        foreach (var (keyNode, valueNode) in matrixMap.Children)
+        {
+            var axisName = ReadMapKey(errors, keyNode, path);
+            if (axisName is null)
+            {
+                continue;
+            }
+
+            if (axisName is "include" or "exclude")
+            {
+                errors.Add($"{path}.{axisName} is not supported until matrix include/exclude support is implemented.");
+                continue;
+            }
+
+            var values = ReadMatrixAxisValues(errors, valueNode, $"{path}.{axisName}");
+            if (values.Count > 0)
+            {
+                axes[axisName] = values;
+            }
+        }
+
+        return new WorkflowJobMatrix(axes);
+    }
+
+    private static IReadOnlyList<string> ReadMatrixAxisValues(
+        List<string> errors,
+        YamlNode node,
+        string path)
+    {
+        if (node is not YamlSequenceNode sequence)
+        {
+            errors.Add($"{path} must be a list of scalar values.");
+            return [];
+        }
+
+        if (sequence.Children.Count == 0)
+        {
+            errors.Add($"{path} must contain at least one value.");
+            return [];
+        }
+
+        var values = new List<string>();
+        for (var index = 0; index < sequence.Children.Count; index++)
+        {
+            if (sequence.Children[index] is not YamlScalarNode scalar)
+            {
+                errors.Add($"{path}[{index}] must be a scalar value.");
+                continue;
+            }
+
+            var value = ReadScalarValue(errors, scalar, $"{path}[{index}]");
+            if (value is not null)
+            {
+                values.Add(value);
+            }
+        }
+
+        return values;
+    }
+
     private static IReadOnlyList<string> ReadOptionalStringList(
         List<string> errors,
         YamlMappingNode map,
@@ -1530,6 +1648,12 @@ public sealed partial class WorkflowParser
                 continue;
             }
 
+            if (string.Equals(reference.Root, "matrix", StringComparison.Ordinal))
+            {
+                ValidateMatrixReference(errors, path, reference, job);
+                continue;
+            }
+
             if (string.Equals(reference.Root, "env", StringComparison.Ordinal))
             {
                 ValidateSingleSegmentReference(errors, path, reference);
@@ -1713,7 +1837,34 @@ public sealed partial class WorkflowParser
 
     private static bool IsUnavailableContext(string root)
     {
-        return root is "vars" or "secrets" or "strategy" or "matrix";
+        return root is "vars" or "secrets" or "strategy";
+    }
+
+    private static void ValidateMatrixReference(
+        List<string> errors,
+        string path,
+        ExpressionReference reference,
+        WorkflowJob job)
+    {
+        if (reference.Path.Count != 1)
+        {
+            errors.Add($"{path} references unsupported expression context '{reference}'.");
+            return;
+        }
+
+        var axisName = reference.Path[0];
+        if (job.Strategy.Matrix.Axes.ContainsKey(axisName))
+        {
+            return;
+        }
+
+        if (job.Strategy.Matrix.Axes.Count == 0)
+        {
+            errors.Add($"{path} references matrix.{axisName}, but workflow.jobs.{job.Name}.strategy.matrix is not declared.");
+            return;
+        }
+
+        errors.Add($"{path} references matrix.{axisName}, but workflow.jobs.{job.Name}.strategy.matrix.{axisName} is not declared.");
     }
 
     private static void ValidateNeedsReference(

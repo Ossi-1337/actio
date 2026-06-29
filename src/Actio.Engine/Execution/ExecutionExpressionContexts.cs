@@ -26,7 +26,7 @@ internal static class ExecutionExpressionContexts
             options.RunTrigger.Inputs,
             jobOutputs,
             jobStatuses,
-            job.Needs,
+            job.LogicalNeeds,
             new Dictionary<string, IReadOnlyDictionary<string, string>>(),
             new Dictionary<string, string>(),
             "pending");
@@ -55,7 +55,7 @@ internal static class ExecutionExpressionContexts
             runTrigger.Inputs,
             jobOutputs,
             jobStatuses,
-            job.Needs,
+            job.LogicalNeeds,
             stepOutputs,
             stepStatuses,
             "running",
@@ -93,6 +93,7 @@ internal static class ExecutionExpressionContexts
             ExpressionContextRoot.AvailableRoot("github", CreateGitHubContext(workflowName, projectRoot, runId, runTrigger, job.Name), includeInSafeSnapshot: false),
             ExpressionContextRoot.AvailableRoot("env", ExpressionContextData.FromStrings(env), allowMissingProperties: true, includeInSafeSnapshot: false),
             ExpressionContextRoot.AvailableRoot("job", CreateJobContext(job, jobStatus), includeInSafeSnapshot: true),
+            ExpressionContextRoot.AvailableRoot("matrix", ExpressionContextData.FromStrings(job.Matrix), allowMissingProperties: true, includeInSafeSnapshot: true),
             ExpressionContextRoot.AvailableRoot("runner", CreateRunnerContext(job.RunsOn), includeInSafeSnapshot: true),
             ExpressionContextRoot.AvailableRoot("needs", CreateNeedsContext(neededJobs, jobOutputs, jobStatuses), allowMissingProperties: true, includeInSafeSnapshot: false),
             ExpressionContextRoot.AvailableRoot("steps", CreateStepsContext(stepOutputs, stepStatuses), allowMissingProperties: true, includeInSafeSnapshot: false),
@@ -239,8 +240,7 @@ internal static class ExecutionExpressionContexts
     {
         yield return ExpressionContextRoot.UnavailableRoot("vars", "Expression context 'vars' is not available until a local vars provider is implemented.");
         yield return ExpressionContextRoot.UnavailableRoot("secrets", "Expression context 'secrets' is not available until a local secrets provider is implemented.");
-        yield return ExpressionContextRoot.UnavailableRoot("strategy", "Expression context 'strategy' is not available until matrix strategy support is implemented.");
-        yield return ExpressionContextRoot.UnavailableRoot("matrix", "Expression context 'matrix' is not available until matrix strategy support is implemented.");
+        yield return ExpressionContextRoot.UnavailableRoot("strategy", "Expression context 'strategy' is not available until matrix strategy metadata support is implemented.");
     }
 
     private static string ToContextResult(string status)

@@ -217,6 +217,67 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
+    public void Parse_AcceptsMatrixStrategy()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                strategy:
+                  matrix:
+                    os:
+                      - ubuntu-latest
+                      - debian-latest
+                    dotnet:
+                      - "10.0"
+                runs-on: ${{ matrix.os }}
+                steps:
+                  - name: Test
+                    if: "${{ matrix.dotnet == '10.0' }}"
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var matrix = result.Workflow!.Jobs["test"].Strategy.Matrix;
+        Assert.Equal(["ubuntu-latest", "debian-latest"], matrix.Axes["os"]);
+        Assert.Equal(["10.0"], matrix.Axes["dotnet"]);
+    }
+
+    [Fact]
+    public void Parse_RejectsInvalidMatrixStrategy()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                strategy:
+                  fail-fast: false
+                  matrix:
+                    os: ubuntu-latest
+                    include:
+                      - os: ubuntu-latest
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+              empty_strategy:
+                strategy: {}
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.strategy.fail-fast is not supported.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.strategy.matrix.os must be a list of scalar values.");
+        Assert.Contains(result.Errors, error => error.Contains("matrix.include is not supported", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.empty_strategy.strategy.matrix is required.");
+    }
+
+    [Fact]
     public void Parse_AcceptsScalarJobConcurrency()
     {
         var result = Parse(

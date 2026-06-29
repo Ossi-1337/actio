@@ -851,6 +851,11 @@ function jobControlSummary(job) {
 
 function jobControlItems(job) {
   const items = [];
+  const matrix = Object.entries(job.matrix ?? {});
+
+  if (matrix.length > 0) {
+    items.push(`matrix ${matrix.map(([name, value]) => `${name}=${value}`).join(", ")}`);
+  }
 
   if (job.timeoutMinutes) {
     items.push(`timeout ${job.timeoutMinutes} min`);

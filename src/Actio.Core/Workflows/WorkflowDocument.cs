@@ -71,6 +71,16 @@ public sealed record WorkflowJobConcurrency(
     string Group,
     bool CancelInProgress);
 
+public sealed record WorkflowJobStrategy(WorkflowJobMatrix Matrix)
+{
+    public static WorkflowJobStrategy Empty { get; } = new(WorkflowJobMatrix.Empty);
+}
+
+public sealed record WorkflowJobMatrix(IReadOnlyDictionary<string, IReadOnlyList<string>> Axes)
+{
+    public static WorkflowJobMatrix Empty { get; } = new(new Dictionary<string, IReadOnlyList<string>>());
+}
+
 public sealed record WorkflowTriggerValue(
     string Kind,
     string? Value,
@@ -119,6 +129,7 @@ public sealed record WorkflowJob
             null,
             false,
             null,
+            WorkflowJobStrategy.Empty,
             outputs,
             artifacts,
             steps)
@@ -147,6 +158,7 @@ public sealed record WorkflowJob
             null,
             false,
             null,
+            WorkflowJobStrategy.Empty,
             outputs,
             artifacts,
             steps)
@@ -167,10 +179,45 @@ public sealed record WorkflowJob
         IReadOnlyDictionary<string, string> outputs,
         IReadOnlyList<WorkflowArtifact> artifacts,
         IReadOnlyList<WorkflowStep> steps)
+        : this(
+            name,
+            displayName,
+            needs,
+            ifExpression,
+            runsOn,
+            env,
+            defaults,
+            timeoutMinutes,
+            continueOnError,
+            concurrency,
+            WorkflowJobStrategy.Empty,
+            outputs,
+            artifacts,
+            steps)
+    {
+    }
+
+    public WorkflowJob(
+        string name,
+        string? displayName,
+        IReadOnlyList<string> needs,
+        string? ifExpression,
+        string runsOn,
+        IReadOnlyDictionary<string, string> env,
+        WorkflowRunDefaults? defaults,
+        int? timeoutMinutes,
+        bool continueOnError,
+        WorkflowJobConcurrency? concurrency,
+        WorkflowJobStrategy? strategy,
+        IReadOnlyDictionary<string, string> outputs,
+        IReadOnlyList<WorkflowArtifact> artifacts,
+        IReadOnlyList<WorkflowStep> steps)
     {
         Name = name;
+        BaseName = name;
         DisplayName = string.IsNullOrWhiteSpace(displayName) ? name : displayName;
         Needs = needs;
+        LogicalNeeds = needs;
         If = ifExpression;
         RunsOn = runsOn;
         Env = env;
@@ -178,6 +225,8 @@ public sealed record WorkflowJob
         TimeoutMinutes = timeoutMinutes;
         ContinueOnError = continueOnError;
         Concurrency = concurrency;
+        Strategy = strategy ?? WorkflowJobStrategy.Empty;
+        Matrix = new Dictionary<string, string>();
         Outputs = outputs;
         Artifacts = artifacts;
         Steps = steps;
@@ -185,9 +234,13 @@ public sealed record WorkflowJob
 
     public string Name { get; init; }
 
+    public string BaseName { get; init; }
+
     public string DisplayName { get; init; }
 
     public IReadOnlyList<string> Needs { get; init; }
+
+    public IReadOnlyList<string> LogicalNeeds { get; init; }
 
     public string? If { get; init; }
 
@@ -202,6 +255,10 @@ public sealed record WorkflowJob
     public bool ContinueOnError { get; init; }
 
     public WorkflowJobConcurrency? Concurrency { get; init; }
+
+    public WorkflowJobStrategy Strategy { get; init; }
+
+    public IReadOnlyDictionary<string, string> Matrix { get; init; }
 
     public IReadOnlyDictionary<string, string> Outputs { get; init; }
 

@@ -17,7 +17,8 @@ public sealed record JobRunRecord(
     int? TimeoutMinutes = null,
     bool ContinueOnError = false,
     string? ConcurrencyGroup = null,
-    bool ConcurrencyCancelInProgress = false)
+    bool ConcurrencyCancelInProgress = false,
+    IReadOnlyDictionary<string, string>? Matrix = null)
 {
     public string Id { get; init; } = Id ?? Name;
 
@@ -28,4 +29,6 @@ public sealed record JobRunRecord(
     public string? ConcurrencyGroup { get; init; } = ConcurrencyGroup;
 
     public bool ConcurrencyCancelInProgress { get; init; } = ConcurrencyCancelInProgress;
+
+    public IReadOnlyDictionary<string, string> Matrix { get; init; } = Matrix ?? new Dictionary<string, string>();
 }

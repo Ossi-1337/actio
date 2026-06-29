@@ -851,6 +851,76 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_ExpandsMatrixJobs()
+    {
+        var runner = new FakeRunnerProvider([0, 0]);
+        var store = new RecordingRunStore();
+        var workflow = CreateWorkflow(CreateMatrixJob(
+            "test",
+            [],
+            "${{ matrix.os }}",
+            [
+                new WorkflowStep(
+                    "Test",
+                    "dotnet test",
+                    null,
+                    If: "${{ matrix.dotnet == '10.0' }}")
+            ]));
+
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal(2, result.SuccessfulSteps);
+        Assert.Equal(2, result.TotalSteps);
+        Assert.Equal(
+            ["test[dotnet=10.0,os=ubuntu-latest]", "test[dotnet=10.0,os=debian-latest]"],
+            runner.Requests.Select(request => request.JobName));
+        Assert.Equal(["ubuntu-latest", "debian-latest"], runner.Requests.Select(request => request.RunsOn));
+        Assert.All(runner.Requests, request => Assert.Equal("10.0", request.Environment["ACTIO_MATRIX_DOTNET"]));
+        Assert.Equal(["ubuntu-latest", "debian-latest"], runner.Requests.Select(request => request.Environment["ACTIO_MATRIX_OS"]));
+
+        var jobs = store.SavedRecords.Last().Jobs;
+        Assert.Equal(2, jobs.Count);
+        Assert.All(jobs, job => Assert.Equal("10.0", job.Matrix["dotnet"]));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ExpandsMatrixNeedsForDependentJobs()
+    {
+        var runner = new FakeRunnerProvider([0, 0, 0]);
+        var workflow = CreateWorkflow(
+            CreateMatrixJob(
+                "test",
+                [],
+                "${{ matrix.os }}",
+                [new WorkflowStep("Test", "dotnet test", null)]),
+            new WorkflowJob(
+                "publish",
+                ["test"],
+                "${{ needs.test.result == 'success' }}",
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Publish", "dotnet publish", null)]));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal(3, result.SuccessfulSteps);
+        Assert.Equal(3, result.TotalSteps);
+        Assert.Equal(
+            ["test[dotnet=10.0,os=ubuntu-latest]", "test[dotnet=10.0,os=debian-latest]", "publish"],
+            runner.Requests.Select(request => request.JobName));
+    }
+
+    [Fact]
     public async Task ExecuteAsync_SkipsJobWhenConditionIsFalse()
     {
         var runner = new FakeRunnerProvider(
@@ -1928,6 +1998,35 @@ public sealed class WorkflowExecutorTests
                 ["DOTNET_NOLOGO"] = "true"
             },
             jobs.ToDictionary(job => job.Name, StringComparer.Ordinal));
+    }
+
+    private static WorkflowJob CreateMatrixJob(
+        string name,
+        IReadOnlyList<string> needs,
+        string runsOn,
+        IReadOnlyList<WorkflowStep> steps)
+    {
+        return new WorkflowJob(
+            name,
+            null,
+            needs,
+            null,
+            runsOn,
+            new Dictionary<string, string>(),
+            WorkflowRunDefaults.Empty,
+            null,
+            false,
+            null,
+            new WorkflowJobStrategy(
+                new WorkflowJobMatrix(
+                    new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal)
+                    {
+                        ["os"] = ["ubuntu-latest", "debian-latest"],
+                        ["dotnet"] = ["10.0"]
+                    })),
+            new Dictionary<string, string>(),
+            [],
+            steps);
     }
 
     private static void AssertDefaultEnvironment(

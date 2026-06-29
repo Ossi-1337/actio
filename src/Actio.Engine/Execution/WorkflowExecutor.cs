@@ -41,7 +41,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         CancellationToken cancellationToken = default)
     {
         var runId = options.RunId ?? _runStore.CreateRunId();
-        var totalSteps = workflow.StepCount;
+        var expansion = MatrixJobExpander.Expand(workflow.Jobs);
+        var totalSteps = expansion.Jobs.Values.Sum(job => job.Steps.Count);
         RunStoragePaths storagePaths;
 
         try
@@ -70,7 +71,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         var jobStatuses = new Dictionary<string, string>(StringComparer.Ordinal);
         var actualJobStatuses = new Dictionary<string, string>(StringComparer.Ordinal);
         var jobOutputs = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal);
-        var plan = JobGraphPlanner.Plan(workflow.Jobs);
+        var plan = JobGraphPlanner.Plan(expansion.Jobs);
         var initialSaveError = await TrySaveRunRecordAsync(
             CreateRunRecord(
                 runId,
@@ -96,7 +97,11 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 runRecordPath: null);
         }
 
-        if (plan.Errors.Count > 0)
+        if (expansion.Errors.Count > 0)
+        {
+            errors.AddRange(expansion.Errors);
+        }
+        else if (plan.Errors.Count > 0)
         {
             errors.AddRange(plan.Errors);
         }
@@ -114,6 +119,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                     jobStatuses,
                     actualJobStatuses,
                     jobOutputs,
+                    expansion.JobNamesByBaseName,
                     output,
                     error,
                     cancellationToken);
@@ -202,6 +208,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         IReadOnlyDictionary<string, string> jobStatuses,
         IReadOnlyDictionary<string, string> actualJobStatuses,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> jobNamesByBaseName,
         TextWriter output,
         TextWriter error,
         CancellationToken cancellationToken)
@@ -217,9 +224,9 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                     options,
                     runId,
                     MergeEnvironment(workflow.Env, job.Env),
-                    jobOutputs,
-                    actualJobStatuses),
-                actualJobStatuses,
+                    CreateContextJobOutputs(job, jobNamesByBaseName, jobOutputs),
+                    CreateContextJobStatuses(job, jobNamesByBaseName, actualJobStatuses)),
+                CreateContextJobStatuses(job, jobNamesByBaseName, actualJobStatuses),
                 job.Needs);
 
             if (!condition.Success)
@@ -244,8 +251,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 job,
                 workflow.Env,
                 workflow.Defaults,
-                jobOutputs,
-                actualJobStatuses,
+                CreateContextJobOutputs(job, jobNamesByBaseName, jobOutputs),
+                CreateContextJobStatuses(job, jobNamesByBaseName, actualJobStatuses),
                 options.RunTrigger,
                 options.ProjectRoot,
                 runId,
@@ -318,7 +325,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             job.TimeoutMinutes,
             job.ContinueOnError,
             job.Concurrency?.Group,
-            job.Concurrency?.CancelInProgress ?? false);
+            job.Concurrency?.CancelInProgress ?? false,
+            job.Matrix);
 
         return new JobExecutionOutcome(record, 0, 0, job.Steps.Count);
     }
@@ -342,7 +350,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             job.TimeoutMinutes,
             job.ContinueOnError,
             job.Concurrency?.Group,
-            job.Concurrency?.CancelInProgress ?? false);
+            job.Concurrency?.CancelInProgress ?? false,
+            job.Matrix);
 
         return new JobExecutionOutcome(record, 0, 0, job.Steps.Count);
     }
@@ -399,5 +408,94 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         }
 
         return environment;
+    }
+
+    private static IReadOnlyDictionary<string, string> CreateContextJobStatuses(
+        WorkflowJob job,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> jobNamesByBaseName,
+        IReadOnlyDictionary<string, string> jobStatuses)
+    {
+        var statuses = new Dictionary<string, string>(jobStatuses, StringComparer.Ordinal);
+        foreach (var logicalNeed in job.LogicalNeeds)
+        {
+            statuses[logicalNeed] = AggregateLogicalStatus(logicalNeed, jobNamesByBaseName, jobStatuses);
+        }
+
+        return statuses;
+    }
+
+    private static IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> CreateContextJobOutputs(
+        WorkflowJob job,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> jobNamesByBaseName,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs)
+    {
+        var outputs = new Dictionary<string, IReadOnlyDictionary<string, string>>(jobOutputs, StringComparer.Ordinal);
+        foreach (var logicalNeed in job.LogicalNeeds)
+        {
+            outputs[logicalNeed] = AggregateLogicalOutputs(logicalNeed, jobNamesByBaseName, jobOutputs);
+        }
+
+        return outputs;
+    }
+
+    private static string AggregateLogicalStatus(
+        string logicalNeed,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> jobNamesByBaseName,
+        IReadOnlyDictionary<string, string> jobStatuses)
+    {
+        if (!jobNamesByBaseName.TryGetValue(logicalNeed, out var expandedNames))
+        {
+            return jobStatuses.TryGetValue(logicalNeed, out var status) ? status : SkippedStatus;
+        }
+
+        var statuses = expandedNames
+            .Select(name => jobStatuses.TryGetValue(name, out var status) ? status : SkippedStatus)
+            .ToArray();
+
+        if (statuses.Any(IsUnsuccessfulJobStatus))
+        {
+            return FailedStatus;
+        }
+
+        if (statuses.Any(status => string.Equals(status, SkippedStatus, StringComparison.Ordinal)))
+        {
+            return SkippedStatus;
+        }
+
+        if (statuses.Any(status => string.Equals(status, RunningStatus, StringComparison.Ordinal)))
+        {
+            return RunningStatus;
+        }
+
+        return SuccessStatus;
+    }
+
+    private static IReadOnlyDictionary<string, string> AggregateLogicalOutputs(
+        string logicalNeed,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> jobNamesByBaseName,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs)
+    {
+        if (!jobNamesByBaseName.TryGetValue(logicalNeed, out var expandedNames))
+        {
+            return jobOutputs.TryGetValue(logicalNeed, out var logicalOutputs)
+                ? logicalOutputs
+                : new Dictionary<string, string>();
+        }
+
+        var mergedOutputs = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var expandedName in expandedNames)
+        {
+            if (!jobOutputs.TryGetValue(expandedName, out var expandedOutputs))
+            {
+                continue;
+            }
+
+            foreach (var output in expandedOutputs)
+            {
+                mergedOutputs[output.Key] = output.Value;
+            }
+        }
+
+        return mergedOutputs;
     }
 }

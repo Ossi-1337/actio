@@ -20,8 +20,7 @@ internal static class DefaultEnvironmentVariables
     {
         var actor = GetLocalActor();
         var stepIdentity = step.Id ?? $"step_{stepIndex + 1}";
-
-        return new Dictionary<string, string>(StringComparer.Ordinal)
+        var environment = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["ACTIO"] = "true",
             ["ACTIO_EVENT_NAME"] = runTrigger.EventName,
@@ -48,6 +47,13 @@ internal static class DefaultEnvironmentVariables
             ["RUNNER_NAME"] = job.RunsOn,
             ["RUNNER_OS"] = RunnerOs
         };
+
+        foreach (var item in job.Matrix)
+        {
+            environment[$"ACTIO_MATRIX_{ToEnvironmentSegment(item.Key)}"] = item.Value;
+        }
+
+        return environment;
     }
 
     public static string CreateRunnerArchitecture()
@@ -60,5 +66,14 @@ internal static class DefaultEnvironmentVariables
         return string.IsNullOrWhiteSpace(Environment.UserName)
             ? "local"
             : Environment.UserName;
+    }
+
+    private static string ToEnvironmentSegment(string value)
+    {
+        var characters = value
+            .Select(character => char.IsAsciiLetterOrDigit(character) ? char.ToUpperInvariant(character) : '_')
+            .ToArray();
+        var segment = new string(characters);
+        return string.IsNullOrEmpty(segment) ? "VALUE" : segment;
     }
 }
