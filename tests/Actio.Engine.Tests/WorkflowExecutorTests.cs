@@ -619,6 +619,101 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_EvaluatesJobContextReferences()
+    {
+        var runner = new FakeRunnerProvider(
+            [
+                new FakeRunnerStep(0, ["actio.output changed=true"]),
+                new FakeRunnerStep(0)
+            ]);
+        var workflow = new WorkflowDocument(
+            "CI",
+            new Dictionary<string, string>
+            {
+                ["RUN_TESTS"] = "true"
+            },
+            new Dictionary<string, WorkflowJob>
+            {
+                ["prepare"] = new(
+                    "prepare",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Detect changes", "echo actio.output changed=true", null)]),
+                ["test"] = new(
+                    "test",
+                    ["prepare"],
+                    "${{ env.RUN_TESTS == 'true' && github.workflow == 'CI' && github.run_id == 'run-context' && github.event_name == 'workflow_dispatch' && github.event.source == 'CLI' && runner.os == 'Linux' && needs.prepare.result == 'success' && needs.prepare.outputs.changed == 'true' }}",
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Test", "dotnet test", null)])
+            });
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo", RunId: "run-context"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal(["prepare", "test"], runner.Requests.Select(request => request.JobName));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_EvaluatesStepContextReferences()
+    {
+        var runner = new FakeRunnerProvider(
+            [
+                new FakeRunnerStep(0, ["actio.output changed=true"]),
+                new FakeRunnerStep(0)
+            ]);
+        var workflow = new WorkflowDocument(
+            "CI",
+            new Dictionary<string, string>
+            {
+                ["WORKFLOW_FLAG"] = "true"
+            },
+            new Dictionary<string, WorkflowJob>
+            {
+                ["test"] = new WorkflowJob(
+                    "test",
+                    null,
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>
+                    {
+                        ["JOB_FLAG"] = "true"
+                    },
+                    WorkflowRunDefaults.Empty,
+                    new Dictionary<string, string>(),
+                    [],
+                    [
+                        new WorkflowStep("Detect", "echo actio.output changed=true", null, Id: "detect"),
+                        new WorkflowStep(
+                            "Use context",
+                            "dotnet test",
+                            null,
+                            Env: new Dictionary<string, string>
+                            {
+                                ["STEP_FLAG"] = "true"
+                            },
+                            If: "${{ env.WORKFLOW_FLAG == 'true' && env.JOB_FLAG == 'true' && env.STEP_FLAG == 'true' && job.status == 'running' && step.name == 'Use context' && runner.name == 'ubuntu-latest' && steps.detect.outputs.changed == 'true' && steps.detect.outcome == 'success' }}")
+                    ])
+            });
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal(["Detect", "Use context"], runner.Requests.Select(request => request.StepName));
+    }
+
+    [Fact]
     public async Task ExecuteAsync_EvaluatesHashFilesCondition()
     {
         var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-hashfiles-tests-{Guid.NewGuid():N}");
@@ -1159,7 +1254,7 @@ public sealed class WorkflowExecutorTests
             Assert.False(result.Success);
             Assert.Empty(runner.Requests);
             Assert.Empty(cache.Requests);
-            Assert.Contains(result.Errors, error => error.Contains("Unsupported expression reference 'env.NAME'", StringComparison.OrdinalIgnoreCase));
+            Assert.Contains(result.Errors, error => error.Contains("Unsupported expression context 'env'", StringComparison.OrdinalIgnoreCase));
         }
         finally
         {

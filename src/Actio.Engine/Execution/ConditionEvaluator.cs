@@ -7,12 +7,9 @@ internal sealed class ConditionEvaluator
 {
     public ConditionEvaluationResult EvaluateJob(
         string? expression,
-        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
-        IReadOnlyDictionary<string, string> inputs,
-        WorkflowEventPayload eventPayload,
+        ExpressionContextData contextData,
         IReadOnlyDictionary<string, string> jobStatuses,
-        IReadOnlyList<string> neededJobs,
-        string projectRoot)
+        IReadOnlyList<string> neededJobs)
     {
         if (expression is null)
         {
@@ -21,20 +18,14 @@ internal sealed class ConditionEvaluator
 
         return EvaluateExpression(
             expression,
-            jobOutputs,
-            inputs,
-            eventPayload,
-            projectRoot,
+            contextData,
             (function, arguments) => EvaluateJobStatusFunctionExpression(function, arguments, jobStatuses, neededJobs));
     }
 
     public ConditionEvaluationResult EvaluateStep(
         string? expression,
-        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
-        IReadOnlyDictionary<string, string> inputs,
-        WorkflowEventPayload eventPayload,
-        IReadOnlyList<string> previousStepStatuses,
-        string projectRoot)
+        ExpressionContextData contextData,
+        IReadOnlyList<string> previousStepStatuses)
     {
         if (expression is null)
         {
@@ -43,19 +34,13 @@ internal sealed class ConditionEvaluator
 
         return EvaluateExpression(
             expression,
-            jobOutputs,
-            inputs,
-            eventPayload,
-            projectRoot,
+            contextData,
             (function, arguments) => EvaluateStepStatusFunctionExpression(function, arguments, previousStepStatuses));
     }
 
     private static ConditionEvaluationResult EvaluateExpression(
         string expression,
-        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
-        IReadOnlyDictionary<string, string> inputs,
-        WorkflowEventPayload eventPayload,
-        string projectRoot,
+        ExpressionContextData contextData,
         Func<ExpressionFunctionCall, IReadOnlyList<ExpressionValue>, ExpressionEvaluationResult> evaluateFunction)
     {
         var parseResult = ExpressionParser.ParseTemplateExpression(expression);
@@ -66,7 +51,10 @@ internal sealed class ConditionEvaluator
 
         var evaluation = ExpressionEvaluator.Evaluate(
             parseResult.Expression!,
-            CreateContext(jobOutputs, inputs, eventPayload, projectRoot, evaluateFunction));
+            new ExpressionEvaluationContext(
+                contextData.Resolve,
+                evaluateFunction,
+                contextData.WorkspaceRoot));
         if (!evaluation.Success)
         {
             return ConditionEvaluationResult.Failed(string.Join(" ", evaluation.Errors));
@@ -75,58 +63,6 @@ internal sealed class ConditionEvaluator
         return evaluation.Value.AsBoolean()
             ? ConditionEvaluationResult.Run()
             : ConditionEvaluationResult.Skip();
-    }
-
-    private static ExpressionEvaluationContext CreateContext(
-        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
-        IReadOnlyDictionary<string, string> inputs,
-        WorkflowEventPayload eventPayload,
-        string projectRoot,
-        Func<ExpressionFunctionCall, IReadOnlyList<ExpressionValue>, ExpressionEvaluationResult> evaluateFunction)
-    {
-        return new ExpressionEvaluationContext(
-            reference => ResolveReference(reference, jobOutputs, inputs, eventPayload),
-            evaluateFunction,
-            projectRoot);
-    }
-
-    private static ExpressionReferenceResolution ResolveReference(
-        ExpressionReference reference,
-        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
-        IReadOnlyDictionary<string, string> inputs,
-        WorkflowEventPayload eventPayload)
-    {
-        if (string.Equals(reference.Root, "inputs", StringComparison.Ordinal) && reference.Path.Count == 1)
-        {
-            return ExpressionReferenceResolution.Resolved(
-                inputs.TryGetValue(reference.Path[0], out var input)
-                    ? ExpressionValue.FromString(input)
-                    : ExpressionValue.Null);
-        }
-
-        if (string.Equals(reference.Root, "github", StringComparison.Ordinal) &&
-            reference.Path.Count >= 2 &&
-            string.Equals(reference.Path[0], "event", StringComparison.Ordinal))
-        {
-            var eventPath = string.Join(".", reference.Path.Skip(1));
-            return ExpressionReferenceResolution.Resolved(
-                eventPayload.GetValue(eventPath) is { } value
-                    ? ExpressionValue.FromString(value)
-                    : ExpressionValue.Null);
-        }
-
-        if (string.Equals(reference.Root, "needs", StringComparison.Ordinal) &&
-            reference.Path.Count == 3 &&
-            string.Equals(reference.Path[1], "outputs", StringComparison.Ordinal))
-        {
-            return ExpressionReferenceResolution.Resolved(
-                jobOutputs.TryGetValue(reference.Path[0], out var outputs) &&
-                outputs.TryGetValue(reference.Path[2], out var output)
-                    ? ExpressionValue.FromString(output)
-                    : ExpressionValue.Null);
-        }
-
-        return ExpressionReferenceResolution.Failed($"Unsupported expression reference '{reference}'.");
     }
 
     private static ExpressionEvaluationResult EvaluateStepStatusFunctionExpression(

@@ -58,9 +58,7 @@ internal static class ActionInputBinder
     {
         var interpolation = ExpressionTemplate.Interpolate(
             command,
-            new ExpressionEvaluationContext(
-                reference => ResolveInputReference(reference, inputs),
-                workspaceRoot: workspaceRoot));
+            CreateEvaluationContext(inputs, workspaceRoot));
 
         return interpolation.Success
             ? ActionInputInterpolationResult.Resolved(interpolation.Value)
@@ -76,20 +74,12 @@ internal static class ActionInputBinder
         return $"INPUT_{new string(segment)}";
     }
 
-    private static ExpressionReferenceResolution ResolveInputReference(
-        ExpressionReference reference,
-        IReadOnlyDictionary<string, string> inputs)
-    {
-        if (string.Equals(reference.Root, "inputs", StringComparison.Ordinal) && reference.Path.Count == 1)
-        {
-            return ExpressionReferenceResolution.Resolved(
-                inputs.TryGetValue(reference.Path[0], out var value)
-                    ? ExpressionValue.FromString(value)
-                    : ExpressionValue.FromString(string.Empty));
-        }
-
-        return ExpressionReferenceResolution.Failed($"Unsupported expression reference '{reference}'.");
-    }
+    private static ExpressionEvaluationContext CreateEvaluationContext(
+        IReadOnlyDictionary<string, string> inputs,
+        string workspaceRoot)
+        => new(
+            ExecutionExpressionContexts.ForActionInputs(inputs, workspaceRoot).Resolve,
+            workspaceRoot: workspaceRoot);
 }
 
 internal sealed record ActionInputBindingResult(

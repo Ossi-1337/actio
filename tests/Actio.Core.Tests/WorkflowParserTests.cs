@@ -1013,6 +1013,40 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
+    public void Parse_AcceptsCoreContextReferences()
+    {
+        var result = Parse(
+            """
+            name: CI
+            env:
+              RUN_TESTS: "true"
+            jobs:
+              prepare:
+                runs-on: ubuntu-latest
+                outputs:
+                  changed: "true"
+                steps:
+                  - name: Prepare
+                    run: dotnet restore
+              test:
+                needs: prepare
+                if: "${{ env.RUN_TESTS == 'true' && github.workflow == 'CI' && github.run_id != '' && runner.os == 'Linux' && needs.prepare.result == 'success' }}"
+                runs-on: ubuntu-latest
+                steps:
+                  - id: detect
+                    name: Detect
+                    run: echo "actio.output changed=true"
+                  - name: Use context
+                    if: "${{ job.status == 'running' && step.name == 'Use context' && steps.detect.outputs.changed == 'true' && steps.detect.outcome == 'success' && env.STEP_FLAG == 'true' }}"
+                    env:
+                      STEP_FLAG: "true"
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+    }
+
+    [Fact]
     public void Parse_AcceptsGitHubEventPayloadConditionExpression()
     {
         var result = Parse(
@@ -1038,7 +1072,7 @@ public sealed class WorkflowParserTests
             name: CI
             jobs:
               test:
-                if: "${{ env.RUN_TESTS == 'true' }}"
+                if: "${{ github.sha == 'abc123' }}"
                 runs-on: ubuntu-latest
                 steps:
                   - name: Test
@@ -1046,7 +1080,27 @@ public sealed class WorkflowParserTests
             """);
 
         Assert.False(result.Success);
-        Assert.Contains(result.Errors, error => error.Contains("unsupported expression context 'env.RUN_TESTS'", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("unsupported expression context 'github.sha'", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Parse_RejectsUnavailableConditionContext()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                if: "${{ secrets.TOKEN != '' }}"
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error.Contains("secrets", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("not available", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

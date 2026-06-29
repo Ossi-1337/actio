@@ -107,12 +107,9 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 cancellationToken.ThrowIfCancellationRequested();
 
                 var outcome = await ExecuteOrSkipJobAsync(
+                    workflow,
                     job,
-                    workflow.Env,
-                    workflow.Defaults,
-                    options.ProjectRoot,
-                    options.RunTrigger.Inputs,
-                    options.RunTrigger.EventPayload,
+                    options,
                     runId,
                     jobStatuses,
                     actualJobStatuses,
@@ -198,12 +195,9 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
     }
 
     private async Task<JobExecutionOutcome> ExecuteOrSkipJobAsync(
+        WorkflowDocument workflow,
         WorkflowJob job,
-        IReadOnlyDictionary<string, string> workflowEnv,
-        WorkflowRunDefaults workflowDefaults,
-        string projectRoot,
-        IReadOnlyDictionary<string, string> inputs,
-        WorkflowEventPayload eventPayload,
+        WorkflowExecutionOptions options,
         string runId,
         IReadOnlyDictionary<string, string> jobStatuses,
         IReadOnlyDictionary<string, string> actualJobStatuses,
@@ -217,12 +211,16 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         {
             var condition = _conditionEvaluator.EvaluateJob(
                 job.If,
-                jobOutputs,
-                inputs,
-                eventPayload,
+                ExecutionExpressionContexts.ForJob(
+                    workflow,
+                    job,
+                    options,
+                    runId,
+                    MergeEnvironment(workflow.Env, job.Env),
+                    jobOutputs,
+                    actualJobStatuses),
                 actualJobStatuses,
-                job.Needs,
-                projectRoot);
+                job.Needs);
 
             if (!condition.Success)
             {
@@ -242,13 +240,14 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
 
         return skipReason is null
             ? await _jobExecutor.ExecuteAsync(
+                workflow.Name,
                 job,
-                workflowEnv,
-                workflowDefaults,
+                workflow.Env,
+                workflow.Defaults,
                 jobOutputs,
-                inputs,
-                eventPayload,
-                projectRoot,
+                actualJobStatuses,
+                options.RunTrigger,
+                options.ProjectRoot,
                 runId,
                 output,
                 error,
@@ -387,5 +386,18 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
     {
         return string.Equals(status, FailedStatus, StringComparison.Ordinal) ||
             string.Equals(status, TimedOutStatus, StringComparison.Ordinal);
+    }
+
+    private static IReadOnlyDictionary<string, string> MergeEnvironment(
+        IReadOnlyDictionary<string, string> workflowEnv,
+        IReadOnlyDictionary<string, string> jobEnv)
+    {
+        var environment = new Dictionary<string, string>(workflowEnv, StringComparer.Ordinal);
+        foreach (var item in jobEnv)
+        {
+            environment[item.Key] = item.Value;
+        }
+
+        return environment;
     }
 }

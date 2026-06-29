@@ -1425,7 +1425,7 @@ public sealed partial class WorkflowParser
                 continue;
             }
 
-            ValidateExpressionReferences(errors, $"workflow.jobs.{job.Name}.if", expression, job, jobs, dispatchInputNames);
+            ValidateExpressionReferences(errors, $"workflow.jobs.{job.Name}.if", expression, job, jobs, dispatchInputNames, stepIndex: null);
         }
 
         ValidateStepConditions(errors, jobs, dispatchInputNames);
@@ -1453,7 +1453,7 @@ public sealed partial class WorkflowParser
                     continue;
                 }
 
-                ValidateExpressionReferences(errors, path, expression, job, jobs, dispatchInputNames);
+                ValidateExpressionReferences(errors, path, expression, job, jobs, dispatchInputNames, index);
             }
         }
     }
@@ -1490,7 +1490,8 @@ public sealed partial class WorkflowParser
         ExpressionNode expression,
         WorkflowJob job,
         IReadOnlyDictionary<string, WorkflowJob> jobs,
-        IReadOnlySet<string> dispatchInputNames)
+        IReadOnlySet<string> dispatchInputNames,
+        int? stepIndex)
     {
         var seenReferences = new HashSet<string>(StringComparer.Ordinal);
         foreach (var reference in ExpressionAnalysis.CollectReferences(expression))
@@ -1519,11 +1520,7 @@ public sealed partial class WorkflowParser
 
             if (string.Equals(reference.Root, "github", StringComparison.Ordinal))
             {
-                if (reference.Path.Count < 2 || !string.Equals(reference.Path[0], "event", StringComparison.Ordinal))
-                {
-                    errors.Add($"{path} references unsupported expression context '{reference}'.");
-                }
-
+                ValidateGitHubReference(errors, path, reference);
                 continue;
             }
 
@@ -1533,8 +1530,190 @@ public sealed partial class WorkflowParser
                 continue;
             }
 
+            if (string.Equals(reference.Root, "env", StringComparison.Ordinal))
+            {
+                ValidateSingleSegmentReference(errors, path, reference);
+                continue;
+            }
+
+            if (string.Equals(reference.Root, "job", StringComparison.Ordinal))
+            {
+                ValidateJobReference(errors, path, reference, stepIndex);
+                continue;
+            }
+
+            if (string.Equals(reference.Root, "runner", StringComparison.Ordinal))
+            {
+                ValidateKnownSingleSegmentReference(
+                    errors,
+                    path,
+                    reference,
+                    "name",
+                    "os",
+                    "environment",
+                    "arch");
+                continue;
+            }
+
+            if (string.Equals(reference.Root, "steps", StringComparison.Ordinal))
+            {
+                ValidateStepsReference(errors, path, reference, job, stepIndex);
+                continue;
+            }
+
+            if (string.Equals(reference.Root, "step", StringComparison.Ordinal))
+            {
+                ValidateStepReference(errors, path, reference, stepIndex);
+                continue;
+            }
+
+            if (IsUnavailableContext(reference.Root))
+            {
+                errors.Add($"{path} references expression context '{reference.Root}', which is not available in local Actio runs yet.");
+                continue;
+            }
+
             errors.Add($"{path} references unsupported expression context '{reference}'.");
         }
+    }
+
+    private static void ValidateGitHubReference(
+        List<string> errors,
+        string path,
+        ExpressionReference reference)
+    {
+        if (reference.Path.Count == 1 &&
+            reference.Path[0] is "event_name" or "workflow" or "workspace" or "run_id" or "job")
+        {
+            return;
+        }
+
+        if (reference.Path.Count >= 2 && string.Equals(reference.Path[0], "event", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        errors.Add($"{path} references unsupported expression context '{reference}'.");
+    }
+
+    private static void ValidateSingleSegmentReference(
+        List<string> errors,
+        string path,
+        ExpressionReference reference)
+    {
+        if (reference.Path.Count == 1)
+        {
+            return;
+        }
+
+        errors.Add($"{path} references unsupported expression context '{reference}'.");
+    }
+
+    private static void ValidateKnownSingleSegmentReference(
+        List<string> errors,
+        string path,
+        ExpressionReference reference,
+        params string[] allowedNames)
+    {
+        if (reference.Path.Count == 1 && allowedNames.Contains(reference.Path[0]))
+        {
+            return;
+        }
+
+        errors.Add($"{path} references unsupported expression context '{reference}'.");
+    }
+
+    private static void ValidateJobReference(
+        List<string> errors,
+        string path,
+        ExpressionReference reference,
+        int? stepIndex)
+    {
+        if (stepIndex is null)
+        {
+            errors.Add($"{path} references expression context 'job', which is available only in step conditions.");
+            return;
+        }
+
+        ValidateKnownSingleSegmentReference(
+            errors,
+            path,
+            reference,
+            "id",
+            "name",
+            "status",
+            "runs-on",
+            "runs_on");
+    }
+
+    private static void ValidateStepsReference(
+        List<string> errors,
+        string path,
+        ExpressionReference reference,
+        WorkflowJob job,
+        int? stepIndex)
+    {
+        if (stepIndex is null)
+        {
+            errors.Add($"{path} references expression context 'steps', which is available only in step conditions.");
+            return;
+        }
+
+        if (reference.Path.Count is not (2 or 3))
+        {
+            errors.Add($"{path} references unsupported expression context '{reference}'.");
+            return;
+        }
+
+        var stepId = reference.Path[0];
+        var referencedStepIndex = job.Steps
+            .Select((step, index) => new { step.Id, Index = index })
+            .FirstOrDefault(step => string.Equals(step.Id, stepId, StringComparison.Ordinal))?
+            .Index;
+
+        if (referencedStepIndex is null)
+        {
+            errors.Add($"{path} references unknown step id '{stepId}'.");
+            return;
+        }
+
+        if (referencedStepIndex >= stepIndex)
+        {
+            errors.Add($"{path} references steps.{stepId}, but only previous steps are available in step conditions.");
+            return;
+        }
+
+        if (reference.Path.Count == 2 && reference.Path[1] is "outcome" or "conclusion")
+        {
+            return;
+        }
+
+        if (reference.Path.Count == 3 && string.Equals(reference.Path[1], "outputs", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        errors.Add($"{path} references unsupported expression context '{reference}'.");
+    }
+
+    private static void ValidateStepReference(
+        List<string> errors,
+        string path,
+        ExpressionReference reference,
+        int? stepIndex)
+    {
+        if (stepIndex is null)
+        {
+            errors.Add($"{path} references expression context 'step', which is available only in step conditions.");
+            return;
+        }
+
+        ValidateKnownSingleSegmentReference(errors, path, reference, "id", "name");
+    }
+
+    private static bool IsUnavailableContext(string root)
+    {
+        return root is "vars" or "secrets" or "strategy" or "matrix";
     }
 
     private static void ValidateNeedsReference(
@@ -1544,12 +1723,28 @@ public sealed partial class WorkflowParser
         WorkflowJob job,
         IReadOnlyDictionary<string, WorkflowJob> jobs)
     {
+        if (reference.Path.Count == 2 && string.Equals(reference.Path[1], "result", StringComparison.Ordinal))
+        {
+            ValidateDeclaredNeed(errors, path, reference, job, jobs);
+            return;
+        }
+
         if (reference.Path.Count != 3 || !string.Equals(reference.Path[1], "outputs", StringComparison.Ordinal))
         {
             errors.Add($"{path} references unsupported expression context '{reference}'.");
             return;
         }
 
+        ValidateDeclaredNeed(errors, path, reference, job, jobs);
+    }
+
+    private static void ValidateDeclaredNeed(
+        List<string> errors,
+        string path,
+        ExpressionReference reference,
+        WorkflowJob job,
+        IReadOnlyDictionary<string, WorkflowJob> jobs)
+    {
         var referencedJob = reference.Path[0];
         if (!jobs.ContainsKey(referencedJob))
         {

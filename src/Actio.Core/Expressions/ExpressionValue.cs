@@ -29,6 +29,17 @@ public readonly record struct ExpressionValue(ExpressionValueKind Kind, object? 
     public static ExpressionValue FromJson(JsonNode value)
         => new(ExpressionValueKind.Json, value);
 
+    public static ExpressionValue FromJsonNode(JsonNode? node)
+    {
+        if (node is null)
+        {
+            return Null;
+        }
+
+        using var document = JsonDocument.Parse(node.ToJsonString(ExpressionJson.SerializerOptions));
+        return FromJsonElement(document.RootElement);
+    }
+
     public static ExpressionValue FromJsonElement(JsonElement element)
     {
         return element.ValueKind switch

@@ -34,12 +34,13 @@ internal sealed class JobExecutor
     }
 
     public async Task<JobExecutionOutcome> ExecuteAsync(
+        string workflowName,
         WorkflowJob job,
         IReadOnlyDictionary<string, string> workflowEnv,
         WorkflowRunDefaults workflowDefaults,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
-        IReadOnlyDictionary<string, string> inputs,
-        WorkflowEventPayload eventPayload,
+        IReadOnlyDictionary<string, string> jobStatuses,
+        WorkflowRunTrigger runTrigger,
         string projectRoot,
         string runId,
         TextWriter output,
@@ -56,6 +57,7 @@ internal sealed class JobExecutor
         var outputs = new Dictionary<string, string>(job.Outputs, StringComparer.Ordinal);
         var stepOutputs = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal);
         var previousStepStatuses = new List<string>();
+        var stepStatuses = new Dictionary<string, string>(StringComparer.Ordinal);
         var hardFailureSeen = false;
         var artifacts = new List<WorkflowRunArtifact>();
         var runDefaults = workflowDefaults.Merge(job.Defaults);
@@ -88,16 +90,25 @@ internal sealed class JobExecutor
                     stepRecords.Add(skippedRecord);
                     skippedSteps++;
                     previousStepStatuses.Add(skippedRecord.Status);
+                    AddStepStatus(stepStatuses, step, skippedRecord.Status);
                     continue;
                 }
 
                 var condition = _conditionEvaluator.EvaluateStep(
                     step.If,
-                    jobOutputs,
-                    inputs,
-                    eventPayload,
-                    previousStepStatuses,
-                    projectRoot);
+                    ExecutionExpressionContexts.ForStep(
+                        workflowName,
+                        job,
+                        step,
+                        projectRoot,
+                        runId,
+                        runTrigger,
+                        CreateStepContextEnvironment(workflowEnv, job.Env, step.Env),
+                        jobOutputs,
+                        jobStatuses,
+                        stepOutputs,
+                        stepStatuses),
+                    previousStepStatuses);
 
                 if (!condition.Success)
                 {
@@ -108,6 +119,7 @@ internal sealed class JobExecutor
                     failedSteps++;
                     hardFailureSeen = true;
                     previousStepStatuses.Add(failedRecord.Status);
+                    AddStepStatus(stepStatuses, step, failedRecord.Status);
                     continue;
                 }
 
@@ -118,6 +130,7 @@ internal sealed class JobExecutor
                     stepRecords.Add(skippedRecord);
                     skippedSteps++;
                     previousStepStatuses.Add(skippedRecord.Status);
+                    AddStepStatus(stepStatuses, step, skippedRecord.Status);
                     continue;
                 }
 
@@ -169,6 +182,7 @@ internal sealed class JobExecutor
                     step.TimeoutMinutes,
                     step.ContinueOnError));
                 previousStepStatuses.Add(stepResult.Status);
+                AddStepStatus(stepStatuses, step, stepResult.Status);
 
                 if (continuedFailure)
                 {
@@ -567,6 +581,28 @@ internal sealed class JobExecutor
         environment.Merge(stepEnv);
         environment.Merge(actionEnv);
         return environment;
+    }
+
+    private static IReadOnlyDictionary<string, string> CreateStepContextEnvironment(
+        IReadOnlyDictionary<string, string> workflowEnv,
+        IReadOnlyDictionary<string, string> jobEnv,
+        IReadOnlyDictionary<string, string> stepEnv)
+    {
+        var environment = new Dictionary<string, string>(workflowEnv, StringComparer.Ordinal);
+        environment.Merge(jobEnv);
+        environment.Merge(stepEnv);
+        return environment;
+    }
+
+    private static void AddStepStatus(
+        Dictionary<string, string> stepStatuses,
+        WorkflowStep step,
+        string status)
+    {
+        if (step.Id is not null)
+        {
+            stepStatuses[step.Id] = status;
+        }
     }
 
     private static IReadOnlyDictionary<string, string> CreateStepOutputEnvironment(
