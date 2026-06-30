@@ -38,7 +38,13 @@ public sealed record ActionOutput(
 
 public sealed record ActionStep(
     string Name,
-    string Run,
+    string? Run,
+    string? Uses,
     string? Id = null,
     string? Shell = null,
-    string? WorkingDirectory = null);
+    string? WorkingDirectory = null,
+    IReadOnlyDictionary<string, string>? With = null)
+{
+    public IReadOnlyDictionary<string, string> With { get; init; } =
+        With ?? new Dictionary<string, string>();
+}

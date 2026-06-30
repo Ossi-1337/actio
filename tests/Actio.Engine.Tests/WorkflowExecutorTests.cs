@@ -1973,6 +1973,218 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_RunsNestedLocalCompositeAction()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-action-tests-{Guid.NewGuid():N}");
+        var parentRoot = Path.Combine(projectRoot, ".actio", "actions", "parent");
+        var childRoot = Path.Combine(parentRoot, "child");
+        Directory.CreateDirectory(childRoot);
+        await File.WriteAllTextAsync(
+            Path.Combine(parentRoot, "action.yml"),
+            """
+            name: Parent
+            inputs:
+              name:
+                required: true
+            outputs:
+              result:
+                value: "${{ steps.child.outputs.result }}"
+            runs:
+              using: composite
+              steps:
+                - id: child
+                  name: Child
+                  uses: ./child
+                  with:
+                    name: "${{ inputs.name }}"
+            """);
+        await File.WriteAllTextAsync(
+            Path.Combine(childRoot, "action.yml"),
+            """
+            name: Child
+            inputs:
+              name:
+                required: true
+            outputs:
+              result:
+                value: "${{ steps.produce.outputs.result }}"
+            runs:
+              using: composite
+              steps:
+                - id: produce
+                  name: Produce
+                  run: echo "${{ inputs.name }}"
+            """);
+
+        try
+        {
+            var runner = new FakeRunnerProvider(
+                [
+                    new FakeRunnerStep(
+                        0,
+                        onExecute: (environment, mounts) =>
+                        {
+                            Assert.Equal("Nested", environment["INPUT_NAME"]);
+                            WriteEnvironmentFile(environment, mounts, "GITHUB_OUTPUT", "result=Nested\n");
+                        }),
+                    new FakeRunnerStep(0)
+                ]);
+            var cache = new RecordingActionCache();
+            var workflow = CreateWorkflow(
+                new WorkflowJob(
+                    "test",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [
+                        new WorkflowStep(
+                            "Use parent",
+                            null,
+                            "./.actio/actions/parent",
+                            Id: "parent",
+                            With: new Dictionary<string, string>
+                            {
+                                ["name"] = "Nested"
+                            }),
+                        new WorkflowStep(
+                            "Use parent output",
+                            "echo later",
+                            null,
+                            If: "${{ steps.parent.outputs.result == 'Nested' }}")
+                    ]));
+
+            var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+            Assert.Equal(2, result.SuccessfulSteps);
+            Assert.Equal(["Use parent / Child / Produce", "Use parent output"], runner.Requests.Select(request => request.StepName));
+            Assert.Contains(cache.Requests, request => request.Uses == "./.actio/actions/parent");
+            Assert.Contains(cache.Requests, request => request.Uses == "./child");
+            Assert.Contains(result.Outputs, output => output.JobName == "test" && output.Name == "result" && output.Value == "Nested");
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_DetectsNestedActionCyclesBeforeExecution()
+    {
+        var actionRoot = Path.Combine(Path.GetTempPath(), $"actio-action-cycle-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(actionRoot);
+        var actionPath = Path.Combine(actionRoot, "action.yml");
+        await File.WriteAllTextAsync(
+            actionPath,
+            """
+            name: Self
+            runs:
+              using: composite
+              steps:
+                - name: Self
+                  uses: owner/repo@v1
+            """);
+
+        try
+        {
+            var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+            var cache = new RecordingActionCache();
+            cache.GitHubSourceResult = GitHubActionSourceResult.Resolved(
+                actionPath,
+                actionRoot,
+                new ActionCacheEntry(
+                    "key",
+                    "github",
+                    "owner/repo@v1",
+                    actionPath,
+                    new string('a', 40),
+                    actionRoot,
+                    DateTimeOffset.UtcNow,
+                    DateTimeOffset.UtcNow,
+                    new string('a', 40),
+                    "v1"));
+            var workflow = CreateWorkflow(
+                new WorkflowJob(
+                    "test",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Use self", null, "owner/repo@v1")]));
+
+            var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(Environment.CurrentDirectory),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.False(result.Success);
+            Assert.Empty(runner.Requests);
+            Assert.Contains(result.Errors, error => error.Contains("nested action cycle detected", StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            Directory.Delete(actionRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_RunsNestedDockerImageActionWithMutableWarning()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-action-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(projectRoot, ".actio", "actions", "parent"));
+        await File.WriteAllTextAsync(
+            Path.Combine(projectRoot, ".actio", "actions", "parent", "action.yml"),
+            """
+            name: Parent
+            runs:
+              using: composite
+              steps:
+                - name: Nested image
+                  uses: docker://alpine:3.20
+            """);
+
+        try
+        {
+            var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+            var cache = new RecordingActionCache();
+            using var error = new StringWriter();
+            var workflow = CreateWorkflow(
+                new WorkflowJob(
+                    "test",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Use parent", null, "./.actio/actions/parent")]));
+
+            var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                error);
+
+            Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+            var request = Assert.Single(runner.DockerActionRequests);
+            Assert.Equal("alpine:3.20", request.Image);
+            Assert.Contains("mutable Docker image reference", error.ToString(), StringComparison.OrdinalIgnoreCase);
+            var cacheRequest = Assert.Single(cache.DockerImageRequests);
+            Assert.Equal("docker://alpine:3.20", cacheRequest.Uses);
+            Assert.False(cacheRequest.IsPinned);
+            Assert.Equal("3.20", cacheRequest.MutablePart);
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ExecuteAsync_FailsCompositeActionWithActionStepName()
     {
         var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-action-tests-{Guid.NewGuid():N}");

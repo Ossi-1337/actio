@@ -665,92 +665,65 @@ internal sealed class JobExecutor
 
         foreach (var actionStep in plan.CompositeSteps)
         {
-            StepEnvironmentFiles environmentFiles;
-            try
-            {
-                environmentFiles = await _runStore.CreateStepEnvironmentFilesAsync(
-                    runId,
-                    job.Name,
+            var actionStepResult = actionStep.IsNestedAction
+                ? await ExecuteNestedActionStepAsync(
+                    job,
+                    step,
+                    actionStep,
                     stepIndex,
-                    $"{step.Name} {actionStep.Name}",
+                    baseEnvironment,
+                    actionStepOutputs,
+                    environmentUpdates,
+                    pathEntries,
+                    effectiveRunDefaults,
+                    projectRoot,
+                    runId,
+                    serviceNetwork,
+                    collector,
+                    cancellationToken)
+                : await ExecuteCompositeRunStepAsync(
+                    job,
+                    step,
+                    actionStep,
+                    stepIndex,
+                    plan,
+                    baseEnvironment,
+                    actionStepOutputs,
+                    environmentUpdates,
+                    pathEntries,
+                    effectiveRunDefaults,
+                    projectRoot,
+                    runId,
+                    serviceNetwork,
+                    collector,
                     cancellationToken);
-            }
-            catch (Exception ex) when (StorageError.IsRecoverable(ex))
-            {
-                return StepExecutionOutcome.StorageFailed(
-                    StorageError.Format($"creating workflow environment files for job '{job.Name}' action step '{actionStep.Name}'", ex),
-                    collector.LogPath);
-            }
-
-            var environment = CreateCompositeActionStepEnvironment(
-                baseEnvironment,
-                actionStepOutputs,
-                environmentUpdates,
-                pathEntries,
-                CreateEnvironmentFileVariables());
-            var additionalMounts = plan.AdditionalMounts
-                .Concat([new StepExecutionMount(environmentFiles.DirectoryPath, StepEnvironmentFileContainerDirectory, ReadOnly: false)])
-                .ToArray();
-            var request = new StepExecutionRequest(
-                job.Name,
-                $"{step.Name} / {actionStep.Name}",
-                job.RunsOn,
-                actionStep.Command,
-                projectRoot,
-                environment,
-                actionStep.Shell ?? effectiveRunDefaults.Shell,
-                actionStep.WorkingDirectory ?? effectiveRunDefaults.WorkingDirectory,
-                additionalMounts,
-                CreateContainerExecutionOptions(job.Container, projectRoot),
-                serviceNetwork);
-            var result = await _runnerProvider.ExecuteStepAsync(request, collector, cancellationToken);
-            var environmentFileResult = await _environmentFileReader.ReadAsync(environmentFiles, cancellationToken);
-            var stepOutputs = MaskValues(environmentFileResult.Outputs, collector);
 
             if (actionStep.Id is not null)
             {
-                actionStepOutputs[actionStep.Id] = new Dictionary<string, string>(stepOutputs, StringComparer.Ordinal);
-                actionStepStatuses[actionStep.Id] = result.Success ? SuccessStatus : FailedStatus;
+                actionStepOutputs[actionStep.Id] = new Dictionary<string, string>(actionStepResult.Outputs, StringComparer.Ordinal);
+                actionStepStatuses[actionStep.Id] = actionStepResult.Status;
             }
 
-            environmentUpdates.Merge(environmentFileResult.Environment);
-            pathEntries.AddRange(environmentFileResult.PathEntries);
+            environmentUpdates.Merge(actionStepResult.EnvironmentUpdates);
+            pathEntries.AddRange(actionStepResult.PathEntries);
 
-            if (environmentFileResult.Summary is not null)
+            if (actionStepResult.Summary is not null)
             {
-                summaryPath = environmentFileResult.SummaryPath;
-                summaryParts.Add(collector.Mask(environmentFileResult.Summary));
+                summaryPath = actionStepResult.SummaryPath;
+                summaryParts.Add(actionStepResult.Summary);
             }
 
-            if (environmentFileResult.Errors.Count > 0)
+            if (IsFailureStatus(actionStepResult.Status))
             {
-                return StepExecutionOutcome.FailedWithoutExitCode(
-                    plan.Command!,
-                    environmentFileResult.Errors,
-                    collector.LogPath,
-                    collector.CapturedOutputs,
-                    environmentUpdates,
-                    pathEntries,
-                    summaryPath,
-                    JoinSummaries(summaryParts),
-                    collector.Annotations);
-            }
-
-            if (!result.Success)
-            {
-                return StepExecutionOutcome.Failed(
-                    plan.Command!,
-                    result.ExitCode,
-                    collector.LogPath,
-                    collector.CapturedOutputs,
-                    actionStep.Shell ?? effectiveRunDefaults.Shell,
-                    actionStep.WorkingDirectory ?? effectiveRunDefaults.WorkingDirectory,
-                    $"workflow.jobs.{job.Name}.steps.{step.Name} action step '{actionStep.Name}' failed with exit code {result.ExitCode}.",
-                    environmentUpdates,
-                    pathEntries,
-                    summaryPath,
-                    JoinSummaries(summaryParts),
-                    collector.Annotations);
+                return actionStepResult with
+                {
+                    Command = plan.Command!,
+                    Outputs = collector.CapturedOutputs,
+                    EnvironmentUpdates = environmentUpdates,
+                    PathEntries = pathEntries,
+                    SummaryPath = summaryPath,
+                    Summary = JoinSummaries(summaryParts)
+                };
             }
         }
 
@@ -789,6 +762,339 @@ internal sealed class JobExecutor
             summaryPath,
             JoinSummaries(summaryParts),
             collector.Annotations);
+    }
+
+    private async Task<StepExecutionOutcome> ExecuteCompositeRunStepAsync(
+        WorkflowJob job,
+        WorkflowStep step,
+        CompositeActionStepPlan actionStep,
+        int stepIndex,
+        StepExecutionPlan plan,
+        IReadOnlyDictionary<string, string> baseEnvironment,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> actionStepOutputs,
+        IReadOnlyDictionary<string, string> environmentUpdates,
+        IReadOnlyList<string> pathEntries,
+        WorkflowRunDefaults effectiveRunDefaults,
+        string projectRoot,
+        string runId,
+        JobServiceNetwork? serviceNetwork,
+        StepOutputCollector collector,
+        CancellationToken cancellationToken)
+    {
+        var environmentFilesResult = await CreateCompositeActionStepEnvironmentFilesAsync(
+            runId,
+            job.Name,
+            stepIndex,
+            step.Name,
+            actionStep.Name,
+            cancellationToken);
+        if (!environmentFilesResult.Success)
+        {
+            return StepExecutionOutcome.StorageFailed(environmentFilesResult.Error!, collector.LogPath);
+        }
+
+        var environmentFiles = environmentFilesResult.Files!;
+        var environment = CreateCompositeActionStepEnvironment(
+            baseEnvironment,
+            actionStepOutputs,
+            environmentUpdates,
+            pathEntries,
+            CreateEnvironmentFileVariables());
+        var additionalMounts = plan.AdditionalMounts
+            .Concat([new StepExecutionMount(environmentFiles.DirectoryPath, StepEnvironmentFileContainerDirectory, ReadOnly: false)])
+            .ToArray();
+        var request = new StepExecutionRequest(
+            job.Name,
+            $"{step.Name} / {actionStep.Name}",
+            job.RunsOn,
+            actionStep.Command!,
+            projectRoot,
+            environment,
+            actionStep.Shell ?? effectiveRunDefaults.Shell,
+            actionStep.WorkingDirectory ?? effectiveRunDefaults.WorkingDirectory,
+            additionalMounts,
+            CreateContainerExecutionOptions(job.Container, projectRoot),
+            serviceNetwork);
+        var result = await _runnerProvider.ExecuteStepAsync(request, collector, cancellationToken);
+        var environmentFileResult = await _environmentFileReader.ReadAsync(environmentFiles, cancellationToken);
+        var outputs = MaskValues(environmentFileResult.Outputs, collector);
+        var summary = environmentFileResult.Summary is null ? null : collector.Mask(environmentFileResult.Summary);
+
+        if (environmentFileResult.Errors.Count > 0)
+        {
+            return StepExecutionOutcome.FailedWithoutExitCode(
+                actionStep.Command!,
+                environmentFileResult.Errors,
+                collector.LogPath,
+                outputs,
+                environmentFileResult.Environment,
+                environmentFileResult.PathEntries,
+                environmentFileResult.SummaryPath,
+                summary,
+                collector.Annotations);
+        }
+
+        if (!result.Success)
+        {
+            return StepExecutionOutcome.Failed(
+                actionStep.Command!,
+                result.ExitCode,
+                collector.LogPath,
+                outputs,
+                actionStep.Shell ?? effectiveRunDefaults.Shell,
+                actionStep.WorkingDirectory ?? effectiveRunDefaults.WorkingDirectory,
+                $"workflow.jobs.{job.Name}.steps.{step.Name} action step '{actionStep.Name}' failed with exit code {result.ExitCode}.",
+                environmentFileResult.Environment,
+                environmentFileResult.PathEntries,
+                environmentFileResult.SummaryPath,
+                summary,
+                collector.Annotations);
+        }
+
+        return StepExecutionOutcome.Succeeded(
+            actionStep.Command!,
+            result.ExitCode,
+            collector.LogPath,
+            outputs,
+            actionStep.Shell ?? effectiveRunDefaults.Shell,
+            actionStep.WorkingDirectory ?? effectiveRunDefaults.WorkingDirectory,
+            environmentFileResult.Environment,
+            environmentFileResult.PathEntries,
+            environmentFileResult.SummaryPath,
+            summary,
+            collector.Annotations);
+    }
+
+    private async Task<StepExecutionOutcome> ExecuteNestedActionStepAsync(
+        WorkflowJob job,
+        WorkflowStep step,
+        CompositeActionStepPlan actionStep,
+        int stepIndex,
+        IReadOnlyDictionary<string, string> baseEnvironment,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> actionStepOutputs,
+        IReadOnlyDictionary<string, string> environmentUpdates,
+        IReadOnlyList<string> pathEntries,
+        WorkflowRunDefaults effectiveRunDefaults,
+        string projectRoot,
+        string runId,
+        JobServiceNetwork? serviceNetwork,
+        StepOutputCollector collector,
+        CancellationToken cancellationToken)
+    {
+        foreach (var warning in actionStep.NestedAction!.Warnings)
+        {
+            await collector.WriteErrorLineAsync($"warning: {warning}", cancellationToken);
+        }
+
+        var nestedPlan = CreateStepExecutionPlan(actionStep.NestedAction);
+        var nestedEnvironment = CreateCompositeActionStepEnvironment(
+            baseEnvironment,
+            actionStepOutputs,
+            environmentUpdates,
+            pathEntries,
+            nestedPlan.Environment);
+        var nestedStep = new WorkflowStep(
+            $"{step.Name} / {actionStep.Name}",
+            null,
+            actionStep.Uses,
+            Id: actionStep.Id,
+            With: actionStep.With);
+
+        if (nestedPlan.Kind == StepExecutionKind.CompositeAction)
+        {
+            return await ExecuteCompositeActionAsync(
+                job,
+                nestedStep,
+                stepIndex,
+                nestedPlan,
+                nestedEnvironment,
+                effectiveRunDefaults,
+                projectRoot,
+                runId,
+                serviceNetwork,
+                collector,
+                cancellationToken);
+        }
+
+        return await ExecuteNestedNonCompositeActionAsync(
+            job,
+            nestedStep,
+            actionStep.Name,
+            stepIndex,
+            nestedPlan,
+            nestedEnvironment,
+            effectiveRunDefaults,
+            projectRoot,
+            runId,
+            serviceNetwork,
+            collector,
+            cancellationToken);
+    }
+
+    private async Task<StepExecutionOutcome> ExecuteNestedNonCompositeActionAsync(
+        WorkflowJob job,
+        WorkflowStep step,
+        string actionStepName,
+        int stepIndex,
+        StepExecutionPlan nestedPlan,
+        IReadOnlyDictionary<string, string> environment,
+        WorkflowRunDefaults effectiveRunDefaults,
+        string projectRoot,
+        string runId,
+        JobServiceNetwork? serviceNetwork,
+        StepOutputCollector collector,
+        CancellationToken cancellationToken)
+    {
+        var environmentFilesResult = await CreateCompositeActionStepEnvironmentFilesAsync(
+            runId,
+            job.Name,
+            stepIndex,
+            step.Name,
+            actionStepName,
+            cancellationToken);
+        if (!environmentFilesResult.Success)
+        {
+            return StepExecutionOutcome.StorageFailed(environmentFilesResult.Error!, collector.LogPath);
+        }
+
+        var environmentFiles = environmentFilesResult.Files!;
+        var actionEnvironment = new Dictionary<string, string>(environment, StringComparer.Ordinal);
+        actionEnvironment.Merge(CreateEnvironmentFileVariables());
+        var additionalMounts = nestedPlan.AdditionalMounts
+            .Concat([new StepExecutionMount(environmentFiles.DirectoryPath, StepEnvironmentFileContainerDirectory, ReadOnly: false)])
+            .ToArray();
+        var result = nestedPlan.Kind switch
+        {
+            StepExecutionKind.DockerfileAction => await _runnerProvider.ExecuteDockerfileActionAsync(
+                new DockerfileActionExecutionRequest(
+                    job.Name,
+                    step.Name,
+                    nestedPlan.DockerImage!,
+                    projectRoot,
+                    nestedPlan.DockerfileBuildContext!,
+                    nestedPlan.DockerfilePath!,
+                    actionEnvironment,
+                    additionalMounts,
+                    serviceNetwork,
+                    nestedPlan.DockerEntryPoint,
+                    nestedPlan.DockerArguments),
+                collector,
+                cancellationToken),
+            StepExecutionKind.DockerImageAction => await _runnerProvider.ExecuteDockerActionAsync(
+                new DockerActionExecutionRequest(
+                    job.Name,
+                    step.Name,
+                    nestedPlan.DockerImage!,
+                    projectRoot,
+                    actionEnvironment,
+                    additionalMounts,
+                    serviceNetwork,
+                    nestedPlan.DockerEntryPoint,
+                    nestedPlan.DockerArguments),
+                collector,
+                cancellationToken),
+            StepExecutionKind.JavaScriptAction => await _runnerProvider.ExecuteJavaScriptActionAsync(
+                new JavaScriptActionExecutionRequest(
+                    job.Name,
+                    step.Name,
+                    projectRoot,
+                    nestedPlan.JavaScriptActionPath!,
+                    nestedPlan.JavaScriptMain!,
+                    actionEnvironment,
+                    additionalMounts,
+                    serviceNetwork,
+                    nestedPlan.JavaScriptPre,
+                    nestedPlan.JavaScriptPost),
+                collector,
+                cancellationToken),
+            _ => await _runnerProvider.ExecuteStepAsync(
+                new StepExecutionRequest(
+                    job.Name,
+                    step.Name,
+                    job.RunsOn,
+                    nestedPlan.Command!,
+                    projectRoot,
+                    actionEnvironment,
+                    effectiveRunDefaults.Shell,
+                    effectiveRunDefaults.WorkingDirectory,
+                    additionalMounts,
+                    CreateContainerExecutionOptions(job.Container, projectRoot),
+                    serviceNetwork),
+                collector,
+                cancellationToken)
+        };
+        var environmentFileResult = await _environmentFileReader.ReadAsync(environmentFiles, cancellationToken);
+        var outputs = MaskValues(environmentFileResult.Outputs, collector);
+        var summary = environmentFileResult.Summary is null ? null : collector.Mask(environmentFileResult.Summary);
+
+        if (environmentFileResult.Errors.Count > 0)
+        {
+            return StepExecutionOutcome.FailedWithoutExitCode(
+                nestedPlan.Command!,
+                environmentFileResult.Errors,
+                collector.LogPath,
+                outputs,
+                environmentFileResult.Environment,
+                environmentFileResult.PathEntries,
+                environmentFileResult.SummaryPath,
+                summary,
+                collector.Annotations);
+        }
+
+        if (!result.Success)
+        {
+            return StepExecutionOutcome.Failed(
+                nestedPlan.Command!,
+                result.ExitCode,
+                collector.LogPath,
+                outputs,
+                nestedPlan.Kind == StepExecutionKind.ShellCommand ? effectiveRunDefaults.Shell : null,
+                nestedPlan.Kind == StepExecutionKind.ShellCommand ? effectiveRunDefaults.WorkingDirectory : null,
+                $"workflow.jobs.{job.Name}.steps.{step.Name} failed with exit code {result.ExitCode}.",
+                environmentFileResult.Environment,
+                environmentFileResult.PathEntries,
+                environmentFileResult.SummaryPath,
+                summary,
+                collector.Annotations);
+        }
+
+        return StepExecutionOutcome.Succeeded(
+            nestedPlan.Command!,
+            result.ExitCode,
+            collector.LogPath,
+            outputs,
+            nestedPlan.Kind == StepExecutionKind.ShellCommand ? effectiveRunDefaults.Shell : null,
+            nestedPlan.Kind == StepExecutionKind.ShellCommand ? effectiveRunDefaults.WorkingDirectory : null,
+            environmentFileResult.Environment,
+            environmentFileResult.PathEntries,
+            environmentFileResult.SummaryPath,
+            summary,
+            collector.Annotations);
+    }
+
+    private async Task<StepEnvironmentFileCreationResult> CreateCompositeActionStepEnvironmentFilesAsync(
+        string runId,
+        string jobName,
+        int stepIndex,
+        string workflowStepName,
+        string actionStepName,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var files = await _runStore.CreateStepEnvironmentFilesAsync(
+                runId,
+                jobName,
+                stepIndex,
+                $"{workflowStepName} {actionStepName}",
+                cancellationToken);
+            return StepEnvironmentFileCreationResult.Created(files);
+        }
+        catch (Exception ex) when (StorageError.IsRecoverable(ex))
+        {
+            return StepEnvironmentFileCreationResult.Failed(
+                StorageError.Format($"creating workflow environment files for job '{jobName}' action step '{actionStepName}'", ex));
+        }
     }
 
     private static IReadOnlyDictionary<string, string> CreateCompositeActionStepEnvironment(
@@ -862,6 +1168,11 @@ internal sealed class JobExecutor
             return StepExecutionPlan.Failed(action.Errors);
         }
 
+        return CreateStepExecutionPlan(action);
+    }
+
+    private static StepExecutionPlan CreateStepExecutionPlan(ActionResolutionResult action)
+    {
         if (action.IsDockerfileAction)
         {
             return StepExecutionPlan.DockerfileAction(
@@ -1277,6 +1588,18 @@ internal sealed class JobExecutor
     private sealed record CompositeActionOutputResolution(
         IReadOnlyDictionary<string, string> Outputs,
         IReadOnlyList<string> Errors);
+
+    private sealed record StepEnvironmentFileCreationResult(
+        bool Success,
+        StepEnvironmentFiles? Files,
+        string? Error)
+    {
+        public static StepEnvironmentFileCreationResult Created(StepEnvironmentFiles files)
+            => new(true, files, null);
+
+        public static StepEnvironmentFileCreationResult Failed(string error)
+            => new(false, null, error);
+    }
 
     private enum StepExecutionKind
     {

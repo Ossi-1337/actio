@@ -49,6 +49,8 @@ public sealed class ActionParser
         "name",
         "run",
         "shell",
+        "uses",
+        "with",
         "working-directory"
     };
 
@@ -327,9 +329,11 @@ public sealed class ActionParser
 
             var id = ReadOptionalScalar(errors, stepMap, "id", $"{itemPath}.id");
             var name = ReadOptionalScalar(errors, stepMap, "name", $"{itemPath}.name");
-            var run = ReadRequiredScalar(errors, stepMap, "run", $"{itemPath}.run");
+            var run = ReadOptionalScalar(errors, stepMap, "run", $"{itemPath}.run");
+            var uses = ReadOptionalScalar(errors, stepMap, "uses", $"{itemPath}.uses");
             var shell = ReadOptionalScalar(errors, stepMap, "shell", $"{itemPath}.shell");
             var workingDirectory = ReadOptionalScalar(errors, stepMap, "working-directory", $"{itemPath}.working-directory");
+            var with = ReadStringMap(errors, stepMap, "with", $"{itemPath}.with");
 
             if (id is not null)
             {
@@ -337,14 +341,52 @@ public sealed class ActionParser
             }
 
             ValidateRelativePath(errors, workingDirectory, $"{itemPath}.working-directory");
+            ValidateActionStepShape(errors, itemPath, run, uses, shell, workingDirectory, with);
 
-            if (run is not null)
+            if (run is not null || uses is not null)
             {
-                steps.Add(new ActionStep(name ?? id ?? $"step {index + 1}", run, id, shell, workingDirectory));
+                steps.Add(new ActionStep(name ?? id ?? uses ?? $"step {index + 1}", run, uses, id, shell, workingDirectory, with));
             }
         }
 
         return steps;
+    }
+
+    private static void ValidateActionStepShape(
+        List<string> errors,
+        string path,
+        string? run,
+        string? uses,
+        string? shell,
+        string? workingDirectory,
+        IReadOnlyDictionary<string, string> with)
+    {
+        if (run is null && uses is null)
+        {
+            errors.Add($"{path} must define either run or uses.");
+            return;
+        }
+
+        if (run is not null && uses is not null)
+        {
+            errors.Add($"{path} cannot define both run and uses.");
+            return;
+        }
+
+        if (uses is null && with.Count > 0)
+        {
+            errors.Add($"{path}.with is supported only on uses steps.");
+        }
+
+        if (run is null && shell is not null)
+        {
+            errors.Add($"{path}.shell is supported only on run steps.");
+        }
+
+        if (run is null && workingDirectory is not null)
+        {
+            errors.Add($"{path}.working-directory is supported only on run steps.");
+        }
     }
 
     private static string? ReadRequiredScalar(List<string> errors, YamlMappingNode map, string key, string path)
@@ -390,6 +432,44 @@ public sealed class ActionParser
         }
 
         return scalar.Value;
+    }
+
+    private static IReadOnlyDictionary<string, string> ReadStringMap(
+        List<string> errors,
+        YamlMappingNode map,
+        string key,
+        string path)
+    {
+        if (!TryGet(map, key, out var node))
+        {
+            return new Dictionary<string, string>();
+        }
+
+        if (node is not YamlMappingNode valueMap)
+        {
+            errors.Add($"{path} must be a mapping.");
+            return new Dictionary<string, string>();
+        }
+
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (keyNode, valueNode) in valueMap.Children)
+        {
+            var itemName = ReadMapKey(errors, keyNode, path);
+            if (itemName is null)
+            {
+                continue;
+            }
+
+            if (valueNode is not YamlScalarNode scalar || scalar.Value is null)
+            {
+                errors.Add($"{path}.{itemName} must be a string.");
+                continue;
+            }
+
+            values[itemName] = scalar.Value;
+        }
+
+        return values;
     }
 
     private static void ValidateActionPath(List<string> errors, string? value, string path)

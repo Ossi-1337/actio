@@ -11,6 +11,7 @@ internal sealed class ActionResolver
     private const string ActionContainerPath = "/actio/action";
     private const string DockerfileImageRepository = "actio/action";
     private const string CheckoutShimCommand = "printf '%s\\n' 'Actio checkout shim: workspace is already available at /workspace.'";
+    private const int MaxNestedActionDepth = 10;
 
     private readonly ActionParser _parser;
     private readonly IActionCache _cache;
@@ -30,36 +31,69 @@ internal sealed class ActionResolver
         WorkflowStep step,
         string projectRoot,
         CancellationToken cancellationToken)
+        => await ResolveAsync(
+            step.Uses,
+            step.With,
+            projectRoot,
+            projectRoot,
+            [],
+            cancellationToken);
+
+    private async Task<ActionResolutionResult> ResolveAsync(
+        string? uses,
+        IReadOnlyDictionary<string, string> with,
+        string projectRoot,
+        string localReferenceRoot,
+        IReadOnlyList<ActionResolutionFrame> stack,
+        CancellationToken cancellationToken)
     {
-        if (step.Uses is null)
+        if (uses is null)
         {
             return ActionResolutionResult.Failed(["Step does not define uses."]);
         }
 
-        if (!ActionReference.TryParse(step.Uses, out var reference))
+        if (!ActionReference.TryParse(uses, out var reference))
         {
-            return ActionResolutionResult.Failed([$"uses '{step.Uses}' is not supported. Supported formats are './...', 'docker://...', and 'owner/repo[/path]@ref'."]);
+            return ActionResolutionResult.Failed([$"uses '{uses}' is not supported. Supported formats are './...', 'docker://...', and 'owner/repo[/path]@ref'."]);
         }
+
+        var warnings = reference!.IsMutable
+            ? new[] { FormatMutableReferenceWarning(reference) }
+            : [];
 
         return reference!.Kind switch
         {
-            ActionReferenceKind.Local => await ResolveLocalActionAsync(step, projectRoot, cancellationToken),
-            ActionReferenceKind.DockerImage => await ResolveDockerImageActionAsync(step, reference, cancellationToken),
-            ActionReferenceKind.GitHubRepository => await ResolveGitHubActionAsync(step, reference, projectRoot, cancellationToken),
-            _ => ActionResolutionResult.Failed([$"uses '{step.Uses}' is not supported."])
+            ActionReferenceKind.Local => AddWarnings(
+                await ResolveLocalActionAsync(uses, with, projectRoot, localReferenceRoot, stack, cancellationToken),
+                warnings),
+            ActionReferenceKind.DockerImage => AddWarnings(
+                await ResolveDockerImageActionAsync(uses, with, reference, cancellationToken),
+                warnings),
+            ActionReferenceKind.GitHubRepository => AddWarnings(
+                await ResolveGitHubActionAsync(uses, with, reference, projectRoot, stack, cancellationToken),
+                warnings),
+            _ => ActionResolutionResult.Failed([$"uses '{uses}' is not supported."])
         };
     }
 
     private async Task<ActionResolutionResult> ResolveLocalActionAsync(
-        WorkflowStep step,
+        string uses,
+        IReadOnlyDictionary<string, string> with,
         string projectRoot,
+        string localReferenceRoot,
+        IReadOnlyList<ActionResolutionFrame> stack,
         CancellationToken cancellationToken)
     {
-        var uses = step.Uses!;
-        var actionPathResult = ResolveLocalActionPath(uses, projectRoot);
+        var actionPathResult = ResolveLocalActionPath(uses, localReferenceRoot);
         if (!actionPathResult.Success)
         {
             return ActionResolutionResult.Failed(actionPathResult.Errors);
+        }
+
+        var cycleCheck = CheckCycleAndDepth(actionPathResult.ActionPath!, stack);
+        if (!cycleCheck.Success)
+        {
+            return ActionResolutionResult.Failed(cycleCheck.Errors);
         }
 
         var parseResult = _parser.ParseFile(actionPathResult.ActionPath!);
@@ -68,22 +102,30 @@ internal sealed class ActionResolver
             return ActionResolutionResult.Failed(parseResult.Errors);
         }
 
-        var inputBinding = ActionInputBinder.Bind(parseResult.Action!, step.With);
+        var inputBinding = ActionInputBinder.Bind(parseResult.Action!, with);
         if (!inputBinding.Success)
         {
             return ActionResolutionResult.Failed(inputBinding.Errors);
         }
 
+        var actionDirectory = Path.GetDirectoryName(actionPathResult.ActionPath!)!;
+        var actionStack = AddFrame(stack, actionPathResult.ActionPath!, uses);
+        CompositeActionPlanResult? compositePlan = null;
         if (string.Equals(parseResult.Action!.Runtime, ActionRuntime.Composite, StringComparison.Ordinal))
         {
-            var plan = BuildCompositeSteps(parseResult.Action, inputBinding.Inputs, projectRoot);
-            if (!plan.Success)
+            compositePlan = await BuildCompositeStepsAsync(
+                parseResult.Action,
+                inputBinding.Inputs,
+                projectRoot,
+                actionDirectory,
+                actionStack,
+                cancellationToken);
+            if (!compositePlan.Success)
             {
-                return ActionResolutionResult.Failed(plan.Errors);
+                return ActionResolutionResult.Failed(compositePlan.Errors);
             }
         }
 
-        var actionDirectory = Path.GetDirectoryName(actionPathResult.ActionPath!)!;
         if (string.Equals(parseResult.Action!.Runtime, ActionRuntime.Docker, StringComparison.Ordinal))
         {
             return await ResolveDockerfileActionAsync(
@@ -104,12 +146,26 @@ internal sealed class ActionResolver
                 new LocalActionCacheRequest(uses, actionPathResult.ActionPath!, contentHash),
                 cancellationToken);
 
-            return ResolveParsedAction(
+            if (compositePlan is not null)
+            {
+                return CreateResolvedCompositeAction(
+                    parseResult.Action!,
+                    cacheEntry,
+                    inputBinding,
+                    actionDirectory,
+                    compositePlan,
+                    []);
+            }
+
+            return await ResolveParsedActionAsync(
                 parseResult.Action!,
                 cacheEntry,
                 inputBinding,
                 actionDirectory,
-                projectRoot);
+                projectRoot,
+                actionStack,
+                [],
+                cancellationToken);
         }
         catch (Exception ex) when (StorageError.IsRecoverable(ex))
         {
@@ -118,12 +174,12 @@ internal sealed class ActionResolver
     }
 
     private async Task<ActionResolutionResult> ResolveDockerImageActionAsync(
-        WorkflowStep step,
+        string uses,
+        IReadOnlyDictionary<string, string> with,
         ActionReference reference,
         CancellationToken cancellationToken)
     {
-        var uses = step.Uses!;
-        var dockerOptions = DockerImageActionOptions.FromInputs(step.With);
+        var dockerOptions = DockerImageActionOptions.FromInputs(with);
         if (!dockerOptions.Success)
         {
             return ActionResolutionResult.Failed(dockerOptions.Errors);
@@ -139,7 +195,7 @@ internal sealed class ActionResolver
                 uses,
                 reference.Target,
                 cacheEntry,
-                ActionInputBinder.CreateEnvironment(step.With),
+                ActionInputBinder.CreateEnvironment(with),
                 dockerOptions.EntryPoint,
                 dockerOptions.Arguments);
         }
@@ -150,12 +206,13 @@ internal sealed class ActionResolver
     }
 
     private async Task<ActionResolutionResult> ResolveGitHubActionAsync(
-        WorkflowStep step,
+        string uses,
+        IReadOnlyDictionary<string, string> with,
         ActionReference reference,
         string projectRoot,
+        IReadOnlyList<ActionResolutionFrame> stack,
         CancellationToken cancellationToken)
     {
-        var uses = step.Uses!;
         if (!reference.TryGetGitHubAction(out var githubAction))
         {
             return ActionResolutionResult.Failed([$"uses '{uses}' is not a valid GitHub action reference."]);
@@ -163,7 +220,7 @@ internal sealed class ActionResolver
 
         if (IsCheckoutShim(githubAction!))
         {
-            if (step.With.Count > 0)
+            if (with.Count > 0)
             {
                 return ActionResolutionResult.Failed(["actions/checkout@v4 with inputs is not supported by the Actio checkout shim yet."]);
             }
@@ -187,13 +244,19 @@ internal sealed class ActionResolver
             return ActionResolutionResult.Failed(sourceResult.Errors);
         }
 
+        var cycleCheck = CheckCycleAndDepth(sourceResult.ActionFilePath!, stack);
+        if (!cycleCheck.Success)
+        {
+            return ActionResolutionResult.Failed(cycleCheck.Errors);
+        }
+
         var parseResult = _parser.ParseFile(sourceResult.ActionFilePath!);
         if (!parseResult.Success)
         {
             return ActionResolutionResult.Failed(parseResult.Errors);
         }
 
-        var inputBinding = ActionInputBinder.Bind(parseResult.Action!, step.With);
+        var inputBinding = ActionInputBinder.Bind(parseResult.Action!, with);
         if (!inputBinding.Success)
         {
             return ActionResolutionResult.Failed(inputBinding.Errors);
@@ -212,12 +275,16 @@ internal sealed class ActionResolver
                 cancellationToken);
         }
 
-        return ResolveParsedAction(
+        var actionStack = AddFrame(stack, sourceResult.ActionFilePath!, uses);
+        return await ResolveParsedActionAsync(
             parseResult.Action!,
             sourceResult.CacheEntry!,
             inputBinding,
             sourceResult.ActionDirectory!,
-            projectRoot);
+            projectRoot,
+            actionStack,
+            [],
+            cancellationToken);
     }
 
     private static bool IsCheckoutShim(GitHubActionReference action)
@@ -228,13 +295,13 @@ internal sealed class ActionResolver
             string.Equals(action.Ref, "v4", StringComparison.Ordinal);
     }
 
-    private static ActionPathResult ResolveLocalActionPath(string uses, string projectRoot)
+    private static ActionPathResult ResolveLocalActionPath(string uses, string localReferenceRoot)
     {
-        var fullProjectRoot = Path.GetFullPath(projectRoot);
-        var candidate = Path.GetFullPath(Path.Combine(fullProjectRoot, uses));
-        if (!IsUnderRoot(candidate, fullProjectRoot))
+        var fullLocalReferenceRoot = Path.GetFullPath(localReferenceRoot);
+        var candidate = Path.GetFullPath(Path.Combine(fullLocalReferenceRoot, uses));
+        if (!IsUnderRoot(candidate, fullLocalReferenceRoot))
         {
-            return ActionPathResult.Failed([$"uses '{uses}' must stay inside the project root."]);
+            return ActionPathResult.Failed([$"uses '{uses}' must stay inside the current action root."]);
         }
 
         if (File.Exists(candidate))
@@ -262,43 +329,109 @@ internal sealed class ActionResolver
         return ActionPathResult.Failed([$"uses '{uses}' could not be resolved to a local action.yml or action.yaml file."]);
     }
 
-    private static CompositeActionPlanResult BuildCompositeSteps(
+    private async Task<CompositeActionPlanResult> BuildCompositeStepsAsync(
         ActionDocument action,
         IReadOnlyDictionary<string, string> inputs,
-        string projectRoot)
+        string projectRoot,
+        string actionDirectory,
+        IReadOnlyList<ActionResolutionFrame> stack,
+        CancellationToken cancellationToken)
     {
         var steps = new List<CompositeActionStepPlan>();
         var errors = new List<string>();
+        var warnings = new List<string>();
 
         foreach (var step in action.Steps)
         {
-            var interpolation = ActionInputBinder.InterpolateInputExpressions(step.Run, inputs, projectRoot);
-            if (interpolation.Success)
+            if (step.Run is not null)
             {
-                steps.Add(new CompositeActionStepPlan(
+                var interpolation = ActionInputBinder.InterpolateInputExpressions(step.Run, inputs, projectRoot);
+                if (interpolation.Success)
+                {
+                    steps.Add(CompositeActionStepPlan.RunStep(
+                        step.Name,
+                        interpolation.Value,
+                        step.Id,
+                        step.Shell,
+                        step.WorkingDirectory));
+                }
+                else
+                {
+                    errors.AddRange(interpolation.Errors);
+                }
+
+                continue;
+            }
+
+            var with = InterpolateWith(inputs, step, projectRoot);
+            if (!with.Success)
+            {
+                errors.AddRange(with.Errors);
+                continue;
+            }
+
+            var nestedAction = await ResolveAsync(
+                step.Uses,
+                with.Values,
+                projectRoot,
+                actionDirectory,
+                stack,
+                cancellationToken);
+            if (nestedAction.Success)
+            {
+                steps.Add(CompositeActionStepPlan.UsesStep(
                     step.Name,
-                    interpolation.Value,
+                    step.Uses!,
                     step.Id,
-                    step.Shell,
-                    step.WorkingDirectory));
+                    with.Values,
+                    nestedAction));
             }
             else
             {
-                errors.AddRange(interpolation.Errors);
+                errors.AddRange(nestedAction.Errors);
             }
         }
 
         return errors.Count == 0
-            ? CompositeActionPlanResult.Resolved(steps)
+            ? CompositeActionPlanResult.Resolved(steps, warnings)
             : CompositeActionPlanResult.Failed(errors);
     }
 
-    private static ActionResolutionResult ResolveParsedAction(
+    private static ActionInputMapInterpolationResult InterpolateWith(
+        IReadOnlyDictionary<string, string> inputs,
+        ActionStep step,
+        string projectRoot)
+    {
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        var errors = new List<string>();
+
+        foreach (var item in step.With)
+        {
+            var interpolation = ActionInputBinder.InterpolateInputExpressions(item.Value, inputs, projectRoot);
+            if (interpolation.Success)
+            {
+                values[item.Key] = interpolation.Value;
+            }
+            else
+            {
+                errors.AddRange(interpolation.Errors.Select(error => $"action.runs.steps.{step.Name}.with.{item.Key}: {error}"));
+            }
+        }
+
+        return errors.Count == 0
+            ? ActionInputMapInterpolationResult.Resolved(values)
+            : ActionInputMapInterpolationResult.Failed(errors);
+    }
+
+    private async Task<ActionResolutionResult> ResolveParsedActionAsync(
         ActionDocument action,
         ActionCacheEntry cacheEntry,
         ActionInputBindingResult inputBinding,
         string actionDirectory,
-        string projectRoot)
+        string projectRoot,
+        IReadOnlyList<ActionResolutionFrame> stack,
+        IReadOnlyList<string> inheritedWarnings,
+        CancellationToken cancellationToken)
     {
         var environment = MergeEnvironment(
             inputBinding.Environment,
@@ -307,7 +440,7 @@ internal sealed class ActionResolver
 
         if (string.Equals(action.Runtime, ActionRuntime.Node20, StringComparison.Ordinal))
         {
-            return ActionResolutionResult.ResolvedJavaScriptAction(
+            return AddWarnings(ActionResolutionResult.ResolvedJavaScriptAction(
                 action,
                 cacheEntry,
                 FormatJavaScriptCommand(action.Main!),
@@ -316,16 +449,45 @@ internal sealed class ActionResolver
                 action.Pre,
                 action.Post,
                 environment,
-                [actionMount]);
+                [actionMount]),
+                inheritedWarnings);
         }
 
-        var compositePlan = BuildCompositeSteps(action, inputBinding.Inputs, projectRoot);
+        var compositePlan = await BuildCompositeStepsAsync(
+            action,
+            inputBinding.Inputs,
+            projectRoot,
+            actionDirectory,
+            stack,
+            cancellationToken);
         if (!compositePlan.Success)
         {
             return ActionResolutionResult.Failed(compositePlan.Errors);
         }
 
-        return ActionResolutionResult.ResolvedCompositeAction(
+        return CreateResolvedCompositeAction(
+            action,
+            cacheEntry,
+            inputBinding,
+            actionDirectory,
+            compositePlan,
+            inheritedWarnings);
+    }
+
+    private static ActionResolutionResult CreateResolvedCompositeAction(
+        ActionDocument action,
+        ActionCacheEntry cacheEntry,
+        ActionInputBindingResult inputBinding,
+        string actionDirectory,
+        CompositeActionPlanResult compositePlan,
+        IReadOnlyList<string> inheritedWarnings)
+    {
+        var environment = MergeEnvironment(
+            inputBinding.Environment,
+            CreateActionPathEnvironment());
+        var actionMount = new StepExecutionMount(actionDirectory, ActionContainerPath, ReadOnly: true);
+
+        return AddWarnings(ActionResolutionResult.ResolvedCompositeAction(
             action,
             cacheEntry,
             compositePlan.Command,
@@ -333,7 +495,8 @@ internal sealed class ActionResolver
             inputBinding.Inputs,
             action.Outputs.ToDictionary(item => item.Key, item => item.Value.Value!, StringComparer.Ordinal),
             environment,
-            [actionMount]);
+            [actionMount]),
+            inheritedWarnings.Concat(compositePlan.Warnings).ToArray());
     }
 
     private async Task<ActionResolutionResult> ResolveDockerfileActionAsync(
@@ -500,6 +663,71 @@ internal sealed class ActionResolver
             : DockerfilePathResult.Failed(["action.runs.image points to Dockerfile, but no Dockerfile exists in the action directory."]);
     }
 
+    private static ActionResolutionStackCheck CheckCycleAndDepth(
+        string actionPath,
+        IReadOnlyList<ActionResolutionFrame> stack)
+    {
+        var fullActionPath = Path.GetFullPath(actionPath);
+        var cycleIndex = stack
+            .Select((frame, index) => new { Frame = frame, Index = index })
+            .FirstOrDefault(item => PathsEqual(item.Frame.ActionPath, fullActionPath));
+
+        if (cycleIndex is not null)
+        {
+            var cycle = stack
+                .Skip(cycleIndex.Index)
+                .Select(frame => frame.Uses)
+                .Concat([Path.GetFileName(Path.GetDirectoryName(fullActionPath)) ?? fullActionPath]);
+            return ActionResolutionStackCheck.Failed([$"nested action cycle detected: {string.Join(" -> ", cycle)}."]);
+        }
+
+        if (stack.Count >= MaxNestedActionDepth)
+        {
+            return ActionResolutionStackCheck.Failed([$"nested action depth limit of {MaxNestedActionDepth} exceeded while resolving '{actionPath}'."]);
+        }
+
+        return ActionResolutionStackCheck.Resolved();
+    }
+
+    private static IReadOnlyList<ActionResolutionFrame> AddFrame(
+        IReadOnlyList<ActionResolutionFrame> stack,
+        string actionPath,
+        string uses)
+        => stack.Concat([new ActionResolutionFrame(Path.GetFullPath(actionPath), uses)]).ToArray();
+
+    private static bool PathsEqual(string first, string second)
+    {
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        return string.Equals(Path.GetFullPath(first), Path.GetFullPath(second), comparison);
+    }
+
+    private static string FormatMutableReferenceWarning(ActionReference reference)
+    {
+        return reference.Kind switch
+        {
+            ActionReferenceKind.DockerImage => $"nested uses '{reference.Value}' uses mutable Docker image reference ({reference.MutablePart}). Pin with an image digest such as docker://image@sha256:<digest> for safer reuse.",
+            ActionReferenceKind.GitHubRepository => $"nested uses '{reference.Value}' uses mutable GitHub ref '{reference.MutablePart}'. Pin with a commit SHA for safer reuse.",
+            _ => string.Empty
+        };
+    }
+
+    private static ActionResolutionResult AddWarnings(
+        ActionResolutionResult result,
+        IReadOnlyList<string> warnings)
+    {
+        if (warnings.Count == 0)
+        {
+            return result;
+        }
+
+        return result with
+        {
+            Warnings = result.Warnings.Concat(warnings).Where(warning => !string.IsNullOrWhiteSpace(warning)).Distinct(StringComparer.Ordinal).ToArray()
+        };
+    }
+
     private sealed record ActionPathResult(
         bool Success,
         string? ActionPath,
@@ -510,6 +738,17 @@ internal sealed class ActionResolver
 
         public static ActionPathResult Failed(IReadOnlyList<string> errors)
             => new(false, null, errors);
+    }
+
+    private sealed record ActionResolutionStackCheck(
+        bool Success,
+        IReadOnlyList<string> Errors)
+    {
+        public static ActionResolutionStackCheck Resolved()
+            => new(true, []);
+
+        public static ActionResolutionStackCheck Failed(IReadOnlyList<string> errors)
+            => new(false, errors);
     }
 
     private sealed record DockerfilePathResult(
@@ -641,29 +880,91 @@ internal sealed class ActionResolver
 
 internal sealed record CompositeActionStepPlan(
     string Name,
-    string Command,
+    string? Command,
+    string? Uses,
     string? Id,
     string? Shell,
-    string? WorkingDirectory);
+    string? WorkingDirectory,
+    IReadOnlyDictionary<string, string> With,
+    ActionResolutionResult? NestedAction)
+{
+    public bool IsNestedAction => NestedAction is not null;
+
+    public static CompositeActionStepPlan RunStep(
+        string name,
+        string command,
+        string? id,
+        string? shell,
+        string? workingDirectory)
+    {
+        return new CompositeActionStepPlan(
+            name,
+            command,
+            null,
+            id,
+            shell,
+            workingDirectory,
+            new Dictionary<string, string>(),
+            null);
+    }
+
+    public static CompositeActionStepPlan UsesStep(
+        string name,
+        string uses,
+        string? id,
+        IReadOnlyDictionary<string, string> with,
+        ActionResolutionResult nestedAction)
+    {
+        return new CompositeActionStepPlan(
+            name,
+            null,
+            uses,
+            id,
+            null,
+            null,
+            with,
+            nestedAction);
+    }
+}
 
 internal sealed record CompositeActionPlanResult(
     bool Success,
     IReadOnlyList<CompositeActionStepPlan> Steps,
     string Command,
+    IReadOnlyList<string> Warnings,
     IReadOnlyList<string> Errors)
 {
-    public static CompositeActionPlanResult Resolved(IReadOnlyList<CompositeActionStepPlan> steps)
+    public static CompositeActionPlanResult Resolved(
+        IReadOnlyList<CompositeActionStepPlan> steps,
+        IReadOnlyList<string> warnings)
     {
         return new CompositeActionPlanResult(
             true,
             steps,
-            string.Join(Environment.NewLine, steps.Select(step => step.Command)),
+            string.Join(Environment.NewLine, steps.Select(step => step.Command ?? step.Uses)),
+            warnings,
             []);
     }
 
     public static CompositeActionPlanResult Failed(IReadOnlyList<string> errors)
-        => new(false, [], string.Empty, errors);
+        => new(false, [], string.Empty, [], errors);
 }
+
+internal sealed record ActionInputMapInterpolationResult(
+    bool Success,
+    IReadOnlyDictionary<string, string> Values,
+    IReadOnlyList<string> Errors)
+{
+    public static ActionInputMapInterpolationResult Resolved(IReadOnlyDictionary<string, string> values)
+        => new(true, values, []);
+
+    public static ActionInputMapInterpolationResult Failed(IReadOnlyList<string> errors)
+        => new(false, new Dictionary<string, string>(), errors);
+}
+
+internal sealed record ActionResolutionFrame(
+    string ActionPath,
+    string Uses);
 
 internal sealed record ActionResolutionResult(
     bool Success,
@@ -684,6 +985,7 @@ internal sealed record ActionResolutionResult(
     string? JavaScriptPost,
     IReadOnlyDictionary<string, string> Environment,
     IReadOnlyList<StepExecutionMount> AdditionalMounts,
+    IReadOnlyList<string> Warnings,
     IReadOnlyList<string> Errors)
 {
     public bool IsCompositeAction => CompositeSteps.Count > 0;
@@ -704,7 +1006,7 @@ internal sealed record ActionResolutionResult(
         IReadOnlyDictionary<string, string> environment,
         IReadOnlyList<StepExecutionMount> additionalMounts)
     {
-        return new ActionResolutionResult(true, action, cacheEntry, command, steps, inputs, outputExpressions, null, null, [], null, null, null, null, null, null, environment, additionalMounts, []);
+        return new ActionResolutionResult(true, action, cacheEntry, command, steps, inputs, outputExpressions, null, null, [], null, null, null, null, null, null, environment, additionalMounts, [], []);
     }
 
     public static ActionResolutionResult ResolvedJavaScriptAction(
@@ -718,7 +1020,7 @@ internal sealed record ActionResolutionResult(
         IReadOnlyDictionary<string, string> environment,
         IReadOnlyList<StepExecutionMount> additionalMounts)
     {
-        return new ActionResolutionResult(true, action, cacheEntry, command, [], new Dictionary<string, string>(), new Dictionary<string, string>(), null, null, [], null, null, actionPath, main, pre, post, environment, additionalMounts, []);
+        return new ActionResolutionResult(true, action, cacheEntry, command, [], new Dictionary<string, string>(), new Dictionary<string, string>(), null, null, [], null, null, actionPath, main, pre, post, environment, additionalMounts, [], []);
     }
 
     public static ActionResolutionResult ResolvedDockerfileAction(
@@ -731,12 +1033,12 @@ internal sealed record ActionResolutionResult(
         IReadOnlyDictionary<string, string> environment,
         IReadOnlyList<StepExecutionMount> additionalMounts)
     {
-        return new ActionResolutionResult(true, action, cacheEntry, command, [], new Dictionary<string, string>(), new Dictionary<string, string>(), dockerImage, null, [], buildContext, dockerfilePath, null, null, null, null, environment, additionalMounts, []);
+        return new ActionResolutionResult(true, action, cacheEntry, command, [], new Dictionary<string, string>(), new Dictionary<string, string>(), dockerImage, null, [], buildContext, dockerfilePath, null, null, null, null, environment, additionalMounts, [], []);
     }
 
     public static ActionResolutionResult ResolvedBuiltInAction(string command)
     {
-        return new ActionResolutionResult(true, null, null, command, [], new Dictionary<string, string>(), new Dictionary<string, string>(), null, null, [], null, null, null, null, null, null, new Dictionary<string, string>(), [], []);
+        return new ActionResolutionResult(true, null, null, command, [], new Dictionary<string, string>(), new Dictionary<string, string>(), null, null, [], null, null, null, null, null, null, new Dictionary<string, string>(), [], [], []);
     }
 
     public static ActionResolutionResult ResolvedDockerImage(
@@ -766,11 +1068,12 @@ internal sealed record ActionResolutionResult(
             null,
             environment,
             [],
+            [],
             []);
     }
 
     public static ActionResolutionResult Failed(IReadOnlyList<string> errors)
     {
-        return new ActionResolutionResult(false, null, null, null, [], new Dictionary<string, string>(), new Dictionary<string, string>(), null, null, [], null, null, null, null, null, null, new Dictionary<string, string>(), [], errors);
+        return new ActionResolutionResult(false, null, null, null, [], new Dictionary<string, string>(), new Dictionary<string, string>(), null, null, [], null, null, null, null, null, null, new Dictionary<string, string>(), [], [], errors);
     }
 }

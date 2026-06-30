@@ -312,7 +312,7 @@ public sealed class ActionParserTests
     }
 
     [Fact]
-    public void Parse_RejectsNestedUsesSteps()
+    public void Parse_AcceptsNestedUsesSteps()
     {
         var result = Parse(
             """
@@ -322,11 +322,34 @@ public sealed class ActionParserTests
               steps:
                 - name: Other
                   uses: ./other
+                  with:
+                    name: Actio
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var step = Assert.Single(result.Action!.Steps);
+        Assert.Equal("Other", step.Name);
+        Assert.Null(step.Run);
+        Assert.Equal("./other", step.Uses);
+        Assert.Equal("Actio", step.With["name"]);
+    }
+
+    [Fact]
+    public void Parse_RejectsCompositeActionStepWithRunAndUses()
+    {
+        var result = Parse(
+            """
+            name: Invalid nested action
+            runs:
+              using: composite
+              steps:
+                - name: Other
+                  run: echo hello
+                  uses: ./other
             """);
 
         Assert.False(result.Success);
-        Assert.Contains(result.Errors, error => error.Contains("uses is not supported", StringComparison.OrdinalIgnoreCase));
-        Assert.Contains(result.Errors, error => error.Contains("run is required", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error == "action.runs.steps[0] cannot define both run and uses.");
     }
 
     private static ActionParseResult Parse(string yaml)
