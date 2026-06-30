@@ -10,6 +10,10 @@ public interface IActionCache
         DockerImageActionCacheRequest request,
         CancellationToken cancellationToken = default);
 
+    Task<ActionCacheEntry> GetOrAddDockerfileActionAsync(
+        DockerfileActionCacheRequest request,
+        CancellationToken cancellationToken = default);
+
     Task<IReadOnlyList<ActionCacheEntry>> ListAsync(CancellationToken cancellationToken = default);
 
     Task<int> CleanAsync(CancellationToken cancellationToken = default);

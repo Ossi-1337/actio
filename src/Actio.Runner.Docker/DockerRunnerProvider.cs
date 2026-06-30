@@ -167,6 +167,55 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         return await ExecuteDockerProcessAsync(process, containerName, output, cancellationToken);
     }
 
+    public async Task<StepExecutionResult> ExecuteDockerfileActionAsync(
+        DockerfileActionExecutionRequest request,
+        IStepOutputSink output,
+        CancellationToken cancellationToken = default)
+    {
+        var buildResult = await EnsureDockerfileActionImageAsync(request, output, cancellationToken);
+        if (!buildResult.Success)
+        {
+            return buildResult;
+        }
+
+        return await ExecuteDockerActionAsync(
+            new DockerActionExecutionRequest(
+                request.JobName,
+                request.StepName,
+                request.Image,
+                request.ProjectRoot,
+                request.Environment,
+                request.AdditionalMounts,
+                request.Services,
+                request.EntryPoint,
+                request.Arguments),
+            output,
+            cancellationToken);
+    }
+
+    private static async Task<StepExecutionResult> EnsureDockerfileActionImageAsync(
+        DockerfileActionExecutionRequest request,
+        IStepOutputSink output,
+        CancellationToken cancellationToken)
+    {
+        var inspectResult = await RunDockerCommandAsync(
+            CreateImageInspectStartInfo(request.Image),
+            cancellationToken);
+
+        if (inspectResult.Success)
+        {
+            return new StepExecutionResult(0);
+        }
+
+        using var process = new Process
+        {
+            StartInfo = CreateDockerfileActionBuildStartInfo(request),
+            EnableRaisingEvents = true
+        };
+
+        return await ExecuteDockerProcessAsync(process, null, output, cancellationToken);
+    }
+
     public async Task<StepExecutionResult> ExecuteJavaScriptActionAsync(
         JavaScriptActionExecutionRequest request,
         IStepOutputSink output,
@@ -215,7 +264,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
 
     private static async Task<StepExecutionResult> ExecuteDockerProcessAsync(
         Process process,
-        string containerName,
+        string? containerName,
         IStepOutputSink output,
         CancellationToken cancellationToken)
     {
@@ -246,7 +295,11 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             TryKillProcess(process);
-            TryRemoveContainer(containerName);
+            if (containerName is not null)
+            {
+                TryRemoveContainer(containerName);
+            }
+
             throw;
         }
 
@@ -299,6 +352,25 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             startInfo.ArgumentList.Add(argument);
         }
 
+        return startInfo;
+    }
+
+    internal static ProcessStartInfo CreateDockerfileActionBuildStartInfo(
+        DockerfileActionExecutionRequest request)
+    {
+        var startInfo = CreateDockerStartInfo();
+        startInfo.ArgumentList.Add("build");
+        startInfo.ArgumentList.Add("--label");
+        startInfo.ArgumentList.Add("actio=true");
+        startInfo.ArgumentList.Add("--label");
+        startInfo.ArgumentList.Add($"actio.job={request.JobName}");
+        startInfo.ArgumentList.Add("--label");
+        startInfo.ArgumentList.Add($"actio.step={request.StepName}");
+        startInfo.ArgumentList.Add("-t");
+        startInfo.ArgumentList.Add(request.Image);
+        startInfo.ArgumentList.Add("-f");
+        startInfo.ArgumentList.Add(Path.GetFullPath(request.DockerfilePath));
+        startInfo.ArgumentList.Add(Path.GetFullPath(request.BuildContext));
         return startInfo;
     }
 
@@ -545,6 +617,15 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         startInfo.ArgumentList.Add("--tail");
         startInfo.ArgumentList.Add("50");
         startInfo.ArgumentList.Add(containerName);
+        return startInfo;
+    }
+
+    private static ProcessStartInfo CreateImageInspectStartInfo(string image)
+    {
+        var startInfo = CreateDockerStartInfo();
+        startInfo.ArgumentList.Add("image");
+        startInfo.ArgumentList.Add("inspect");
+        startInfo.ArgumentList.Add(image);
         return startInfo;
     }
 

@@ -110,6 +110,28 @@ public sealed class ActionParserTests
     }
 
     [Fact]
+    public void Parse_AcceptsDockerfileAction()
+    {
+        var result = Parse(
+            """
+            name: Dockerfile hello
+            inputs:
+              name:
+                default: Actio
+            runs:
+              using: docker
+              image: Dockerfile
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal("Dockerfile hello", result.Action!.Name);
+        Assert.Equal(ActionRuntime.Docker, result.Action.Runtime);
+        Assert.Equal("Dockerfile", result.Action.Image);
+        Assert.Empty(result.Action.Steps);
+        Assert.Equal("Actio", result.Action.Inputs["name"].Default);
+    }
+
+    [Fact]
     public void Parse_RejectsInvalidActionInputMetadata()
     {
         var result = Parse(
@@ -134,7 +156,7 @@ public sealed class ActionParserTests
     }
 
     [Fact]
-    public void Parse_RejectsUnsupportedUsingValue()
+    public void Parse_RejectsDockerActionSteps()
     {
         var result = Parse(
             """
@@ -147,7 +169,8 @@ public sealed class ActionParserTests
             """);
 
         Assert.False(result.Success);
-        Assert.Contains(result.Errors, error => error.Contains("supports only 'composite' or 'node20'", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error == "action.runs.steps is supported only when action.runs.using is 'composite'.");
+        Assert.Contains(result.Errors, error => error == "action.runs.image is required.");
     }
 
     [Fact]
@@ -162,7 +185,41 @@ public sealed class ActionParserTests
             """);
 
         Assert.False(result.Success);
-        Assert.Contains(result.Errors, error => error.Contains("supports only 'composite' or 'node20'", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("supports only 'composite', 'node20', or 'docker'", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Parse_RejectsUnsupportedDockerImageValue()
+    {
+        var result = Parse(
+            """
+            name: Docker action
+            runs:
+              using: docker
+              image: docker://alpine:3.20
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "action.runs.image supports only 'Dockerfile' for Docker actions.");
+    }
+
+    [Fact]
+    public void Parse_RejectsUnsupportedDockerActionEntrypointAndArgs()
+    {
+        var result = Parse(
+            """
+            name: Docker action
+            runs:
+              using: docker
+              image: Dockerfile
+              entrypoint: /entrypoint.sh
+              args:
+                - hello
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "action.runs.entrypoint is not supported.");
+        Assert.Contains(result.Errors, error => error == "action.runs.args is not supported.");
     }
 
     [Theory]

@@ -69,6 +69,34 @@ public sealed class FileSystemActionCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task GetOrAddDockerfileActionAsync_WritesDockerfileEntry()
+    {
+        var cache = new FileSystemActionCache(_root);
+        var actionDirectory = Path.Combine(_root, "actions", "hello");
+        var dockerfilePath = Path.Combine(actionDirectory, "Dockerfile");
+        Directory.CreateDirectory(actionDirectory);
+        await File.WriteAllTextAsync(dockerfilePath, "FROM alpine:3.20");
+        var request = new DockerfileActionCacheRequest(
+            "owner/repo/action@v1",
+            actionDirectory,
+            dockerfilePath,
+            new string('b', 64),
+            PinnedIdentity: new string('c', 40),
+            MutablePart: "v1");
+
+        var entry = await cache.GetOrAddDockerfileActionAsync(request);
+
+        Assert.Equal("dockerfile", entry.Kind);
+        Assert.Equal("owner/repo/action@v1", entry.Uses);
+        Assert.Equal(dockerfilePath, entry.SourcePath);
+        Assert.Equal(new string('b', 64), entry.ContentHash);
+        Assert.Equal(new string('c', 40), entry.PinnedIdentity);
+        Assert.Equal("v1", entry.MutablePart);
+        Assert.Contains(Path.Combine("cache", "actions", "dockerfile"), entry.CachePath);
+        Assert.True(File.Exists(Path.Combine(entry.CachePath, "action.json")));
+    }
+
+    [Fact]
     public async Task GetGitHubActionSourceAsync_DownloadsAndCachesCompositeActionSource()
     {
         var sha = new string('a', 40);

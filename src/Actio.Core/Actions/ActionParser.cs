@@ -17,6 +17,9 @@ public sealed class ActionParser
 
     private static readonly HashSet<string> RunsKeys = new(StringComparer.Ordinal)
     {
+        "args",
+        "entrypoint",
+        "image",
         "main",
         "post",
         "post-if",
@@ -101,6 +104,7 @@ public sealed class ActionParser
             runs.Steps,
             inputs,
             runs.Runtime,
+            runs.Image,
             runs.Main,
             runs.Pre,
             runs.Post));
@@ -173,11 +177,17 @@ public sealed class ActionParser
 
         if (string.Equals(usingValue, ActionRuntime.Composite, StringComparison.Ordinal))
         {
+            AddUnsupportedRunKeys(
+                errors,
+                runsMap,
+                ["args", "entrypoint", "image", "main", "pre", "post"],
+                "action.runs");
             return ActionRuns.Composite(ReadSteps(errors, runsMap));
         }
 
         if (string.Equals(usingValue, ActionRuntime.Node20, StringComparison.Ordinal))
         {
+            AddUnsupportedRunKeys(errors, runsMap, ["args", "entrypoint", "image"], "action.runs");
             if (TryGet(runsMap, "steps", out _))
             {
                 errors.Add("action.runs.steps is supported only when action.runs.using is 'composite'.");
@@ -194,7 +204,23 @@ public sealed class ActionParser
             return ActionRuns.JavaScript(main, pre, post);
         }
 
-        errors.Add("action.runs.using supports only 'composite' or 'node20'.");
+        if (string.Equals(usingValue, ActionRuntime.Docker, StringComparison.Ordinal))
+        {
+            AddUnsupportedRunKeys(errors, runsMap, ["main", "pre", "post"], "action.runs");
+            if (TryGet(runsMap, "steps", out _))
+            {
+                errors.Add("action.runs.steps is supported only when action.runs.using is 'composite'.");
+            }
+
+            AddUnsupportedKeyError(errors, runsMap, "args", "action.runs.args");
+            AddUnsupportedKeyError(errors, runsMap, "entrypoint", "action.runs.entrypoint");
+
+            var image = ReadRequiredScalar(errors, runsMap, "image", "action.runs.image");
+            ValidateDockerImageValue(errors, image);
+            return ActionRuns.Docker(image);
+        }
+
+        errors.Add("action.runs.using supports only 'composite', 'node20', or 'docker'.");
         return ActionRuns.Composite([]);
     }
 
@@ -318,6 +344,19 @@ public sealed class ActionParser
             (value.Length >= 2 && char.IsLetter(value[0]) && value[1] == ':');
     }
 
+    private static void ValidateDockerImageValue(List<string> errors, string? value)
+    {
+        if (value is null)
+        {
+            return;
+        }
+
+        if (!string.Equals(value, "Dockerfile", StringComparison.Ordinal))
+        {
+            errors.Add("action.runs.image supports only 'Dockerfile' for Docker actions.");
+        }
+    }
+
     private static bool? ReadOptionalBoolean(List<string> errors, YamlMappingNode map, string key, string path)
     {
         var value = ReadOptionalScalar(errors, map, key, path);
@@ -378,6 +417,18 @@ public sealed class ActionParser
         }
     }
 
+    private static void AddUnsupportedRunKeys(
+        List<string> errors,
+        YamlMappingNode map,
+        IReadOnlyList<string> keys,
+        string path)
+    {
+        foreach (var key in keys)
+        {
+            AddUnsupportedKeyError(errors, map, key, $"{path}.{key}");
+        }
+    }
+
     private static bool TryGet(YamlMappingNode map, string key, out YamlNode node)
     {
         foreach (var (keyNode, valueNode) in map.Children)
@@ -397,14 +448,18 @@ public sealed class ActionParser
     private sealed record ActionRuns(
         string Runtime,
         IReadOnlyList<ActionStep> Steps,
+        string? Image,
         string? Main,
         string? Pre,
         string? Post)
     {
         public static ActionRuns Composite(IReadOnlyList<ActionStep> steps)
-            => new(ActionRuntime.Composite, steps, null, null, null);
+            => new(ActionRuntime.Composite, steps, null, null, null, null);
 
         public static ActionRuns JavaScript(string? main, string? pre, string? post)
-            => new(ActionRuntime.Node20, [], main, pre, post);
+            => new(ActionRuntime.Node20, [], null, main, pre, post);
+
+        public static ActionRuns Docker(string? image)
+            => new(ActionRuntime.Docker, [], image, null, null, null);
     }
 }

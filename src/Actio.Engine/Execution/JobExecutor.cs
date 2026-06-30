@@ -498,6 +498,21 @@ internal sealed class JobExecutor
                 .ToArray();
             var result = plan.Kind switch
             {
+                StepExecutionKind.DockerfileAction => await _runnerProvider.ExecuteDockerfileActionAsync(
+                    new DockerfileActionExecutionRequest(
+                        job.Name,
+                        step.Name,
+                        plan.DockerImage!,
+                        projectRoot,
+                        plan.DockerfileBuildContext!,
+                        plan.DockerfilePath!,
+                        environment,
+                        additionalMounts,
+                        serviceNetwork,
+                        plan.DockerEntryPoint,
+                        plan.DockerArguments),
+                    collector,
+                    stepCancellationToken),
                 StepExecutionKind.DockerImageAction => await _runnerProvider.ExecuteDockerActionAsync(
                     new DockerActionExecutionRequest(
                         job.Name,
@@ -625,6 +640,17 @@ internal sealed class JobExecutor
         if (!action.Success)
         {
             return StepExecutionPlan.Failed(action.Errors);
+        }
+
+        if (action.IsDockerfileAction)
+        {
+            return StepExecutionPlan.DockerfileAction(
+                action.Command!,
+                action.DockerImage!,
+                action.DockerfileBuildContext!,
+                action.DockerfilePath!,
+                action.Environment,
+                action.AdditionalMounts);
         }
 
         if (action.IsDockerImageAction)
@@ -1021,6 +1047,7 @@ internal sealed class JobExecutor
     {
         ShellCommand,
         DockerImageAction,
+        DockerfileAction,
         JavaScriptAction
     }
 
@@ -1031,6 +1058,8 @@ internal sealed class JobExecutor
         string? DockerImage,
         string? DockerEntryPoint,
         IReadOnlyList<string> DockerArguments,
+        string? DockerfileBuildContext,
+        string? DockerfilePath,
         string? JavaScriptActionPath,
         string? JavaScriptMain,
         string? JavaScriptPre,
@@ -1051,6 +1080,8 @@ internal sealed class JobExecutor
                 null,
                 null,
                 [],
+                null,
+                null,
                 null,
                 null,
                 null,
@@ -1078,8 +1109,36 @@ internal sealed class JobExecutor
                 null,
                 null,
                 null,
+                null,
+                null,
                 environment,
                 [],
+                []);
+        }
+
+        public static StepExecutionPlan DockerfileAction(
+            string command,
+            string dockerImage,
+            string buildContext,
+            string dockerfilePath,
+            IReadOnlyDictionary<string, string> environment,
+            IReadOnlyList<StepExecutionMount> additionalMounts)
+        {
+            return new(
+                true,
+                StepExecutionKind.DockerfileAction,
+                command,
+                dockerImage,
+                null,
+                [],
+                buildContext,
+                dockerfilePath,
+                null,
+                null,
+                null,
+                null,
+                environment,
+                additionalMounts,
                 []);
         }
 
@@ -1099,6 +1158,8 @@ internal sealed class JobExecutor
                 null,
                 null,
                 [],
+                null,
+                null,
                 actionPath,
                 main,
                 pre,
@@ -1116,6 +1177,8 @@ internal sealed class JobExecutor
                 null,
                 null,
                 [],
+                null,
+                null,
                 null,
                 null,
                 null,

@@ -5,6 +5,7 @@ public sealed record ActionDocument(
     IReadOnlyList<ActionStep> Steps,
     IReadOnlyDictionary<string, ActionInput>? Inputs = null,
     string Runtime = ActionRuntime.Composite,
+    string? Image = null,
     string? Main = null,
     string? Pre = null,
     string? Post = null)
@@ -16,6 +17,7 @@ public sealed record ActionDocument(
 public static class ActionRuntime
 {
     public const string Composite = "composite";
+    public const string Docker = "docker";
     public const string Node20 = "node20";
 }
 

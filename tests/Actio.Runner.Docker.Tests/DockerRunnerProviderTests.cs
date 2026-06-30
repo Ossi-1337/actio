@@ -85,6 +85,37 @@ public sealed class DockerRunnerProviderTests
     }
 
     [Fact]
+    public void CreateDockerfileActionBuildStartInfo_BuildsTaggedActionImage()
+    {
+        var actionRoot = Path.Combine(Directory.GetCurrentDirectory(), "cached-action");
+        var dockerfilePath = Path.Combine(actionRoot, "Dockerfile");
+        var request = new DockerfileActionExecutionRequest(
+            "test",
+            "Use Dockerfile action",
+            "actio/action:abc123",
+            Directory.GetCurrentDirectory(),
+            actionRoot,
+            dockerfilePath,
+            new Dictionary<string, string>());
+
+        var startInfo = DockerRunnerProvider.CreateDockerfileActionBuildStartInfo(request);
+        var args = startInfo.ArgumentList.ToArray();
+
+        Assert.Equal("docker", startInfo.FileName);
+        Assert.Equal("build", args[0]);
+        Assert.Contains("actio=true", args);
+        Assert.Contains("actio.job=test", args);
+        Assert.Contains("actio.step=Use Dockerfile action", args);
+        var tagIndex = Array.IndexOf(args, "-t");
+        Assert.True(tagIndex >= 0);
+        Assert.Equal("actio/action:abc123", args[tagIndex + 1]);
+        var dockerfileIndex = Array.IndexOf(args, "-f");
+        Assert.True(dockerfileIndex >= 0);
+        Assert.Equal(Path.GetFullPath(dockerfilePath), args[dockerfileIndex + 1]);
+        Assert.Equal(Path.GetFullPath(actionRoot), args[^1]);
+    }
+
+    [Fact]
     public void CreateJavaScriptActionStartInfo_RunsNode20WithActionScript()
     {
         var actionPath = Path.Combine(Directory.GetCurrentDirectory(), "cached-action");

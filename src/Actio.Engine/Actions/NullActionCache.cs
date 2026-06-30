@@ -45,6 +45,27 @@ public sealed class NullActionCache : IActionCache, IGitHubActionSourceProvider
         return Task.FromResult(entry);
     }
 
+    public Task<ActionCacheEntry> GetOrAddDockerfileActionAsync(
+        DockerfileActionCacheRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var key = request.ContentHash;
+        var entry = new ActionCacheEntry(
+            key,
+            "dockerfile",
+            request.Uses,
+            request.DockerfilePath,
+            request.ContentHash,
+            string.Empty,
+            now,
+            now,
+            request.PinnedIdentity,
+            request.MutablePart);
+
+        return Task.FromResult(entry);
+    }
+
     public Task<IReadOnlyList<ActionCacheEntry>> ListAsync(CancellationToken cancellationToken = default)
     {
         return Task.FromResult<IReadOnlyList<ActionCacheEntry>>([]);

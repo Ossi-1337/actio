@@ -22,6 +22,11 @@ public interface IRunnerProvider
         IStepOutputSink output,
         CancellationToken cancellationToken = default);
 
+    Task<StepExecutionResult> ExecuteDockerfileActionAsync(
+        DockerfileActionExecutionRequest request,
+        IStepOutputSink output,
+        CancellationToken cancellationToken = default);
+
     Task<StepExecutionResult> ExecuteJavaScriptActionAsync(
         JavaScriptActionExecutionRequest request,
         IStepOutputSink output,

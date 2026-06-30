@@ -10,6 +10,7 @@ public sealed class FileSystemActionCache : IActionCache, IGitHubActionSourcePro
 {
     private const string LocalKind = "local";
     private const string DockerKind = "docker";
+    private const string DockerfileKind = "dockerfile";
     private const string GitHubKind = "github";
     private const string EntryFileName = "action.json";
     private const string SourceDirectoryName = "source";
@@ -75,6 +76,28 @@ public sealed class FileSystemActionCache : IActionCache, IGitHubActionSourcePro
                 now,
                 request.IsPinned ? request.Image : null,
                 request.IsPinned ? null : request.MutablePart),
+            cancellationToken);
+    }
+
+    public async Task<ActionCacheEntry> GetOrAddDockerfileActionAsync(
+        DockerfileActionCacheRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var key = CreateDockerfileKey(request.ActionDirectory, request.ContentHash);
+        return await GetOrAddActionAsync(
+            DockerfileKind,
+            key,
+            (cachePath, createdAt, now) => new ActionCacheEntry(
+                key,
+                DockerfileKind,
+                request.Uses,
+                request.DockerfilePath,
+                request.ContentHash,
+                cachePath,
+                createdAt,
+                now,
+                request.PinnedIdentity,
+                request.MutablePart),
             cancellationToken);
     }
 
@@ -257,6 +280,19 @@ public sealed class FileSystemActionCache : IActionCache, IGitHubActionSourcePro
     private static string CreateDockerKey(string image)
     {
         var identity = string.Join('\0', DockerKind, image);
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(identity));
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private static string CreateDockerfileKey(string actionDirectory, string contentHash)
+    {
+        var normalizedPath = Path.GetFullPath(actionDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (OperatingSystem.IsWindows())
+        {
+            normalizedPath = normalizedPath.ToUpperInvariant();
+        }
+
+        var identity = string.Join('\0', DockerfileKind, normalizedPath, contentHash);
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(identity));
         return Convert.ToHexString(hash).ToLowerInvariant();
     }

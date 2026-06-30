@@ -1954,6 +1954,119 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_RunsLocalDockerfileAction()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-action-tests-{Guid.NewGuid():N}");
+        var actionRoot = Path.Combine(projectRoot, ".actio", "actions", "hello");
+        Directory.CreateDirectory(actionRoot);
+        await File.WriteAllTextAsync(
+            Path.Combine(actionRoot, "action.yml"),
+            """
+            name: Hello
+            inputs:
+              name:
+                default: Actio
+            runs:
+              using: docker
+              image: Dockerfile
+            """);
+        await File.WriteAllTextAsync(
+            Path.Combine(actionRoot, "Dockerfile"),
+            """
+            FROM alpine:3.20
+            CMD ["sh", "-c", "echo hello"]
+            """);
+
+        try
+        {
+            var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+            var cache = new RecordingActionCache();
+            var workflow = CreateWorkflow(
+                new WorkflowJob(
+                    "test",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Use hello", null, "./.actio/actions/hello")]));
+
+            var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+            Assert.Empty(runner.Requests);
+            Assert.Empty(runner.DockerActionRequests);
+            var cacheRequest = Assert.Single(cache.DockerfileRequests);
+            Assert.Equal("./.actio/actions/hello", cacheRequest.Uses);
+            Assert.Equal(actionRoot, cacheRequest.ActionDirectory);
+            Assert.Equal(Path.Combine(actionRoot, "Dockerfile"), cacheRequest.DockerfilePath);
+            Assert.Equal(64, cacheRequest.ContentHash.Length);
+
+            var request = Assert.Single(runner.DockerfileActionRequests);
+            Assert.Equal($"actio/action:{cacheRequest.ContentHash}", request.Image);
+            Assert.Equal(actionRoot, request.BuildContext);
+            Assert.Equal(Path.Combine(actionRoot, "Dockerfile"), request.DockerfilePath);
+            Assert.Equal("Actio", request.Environment["INPUT_NAME"]);
+            Assert.Equal("/actio/action", request.Environment["GITHUB_ACTION_PATH"]);
+            var actionMount = Assert.Single(request.AdditionalMounts, mount => mount.ContainerPath == "/actio/action");
+            Assert.Equal(actionRoot, actionMount.HostPath);
+            Assert.True(actionMount.ReadOnly);
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_FailsLocalDockerfileActionWhenDockerfileIsMissing()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-action-tests-{Guid.NewGuid():N}");
+        var actionRoot = Path.Combine(projectRoot, ".actio", "actions", "hello");
+        Directory.CreateDirectory(actionRoot);
+        await File.WriteAllTextAsync(
+            Path.Combine(actionRoot, "action.yml"),
+            """
+            name: Hello
+            runs:
+              using: docker
+              image: Dockerfile
+            """);
+
+        try
+        {
+            var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+            var cache = new RecordingActionCache();
+            var workflow = CreateWorkflow(
+                new WorkflowJob(
+                    "test",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Use hello", null, "./.actio/actions/hello")]));
+
+            var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.False(result.Success);
+            Assert.Empty(cache.DockerfileRequests);
+            Assert.Empty(runner.DockerfileActionRequests);
+            Assert.Contains(result.Errors, error => error.Contains("no Dockerfile exists", StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ExecuteAsync_FailsLocalCompositeActionWhenRequiredInputIsMissing()
     {
         var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-action-tests-{Guid.NewGuid():N}");
@@ -2274,6 +2387,101 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_RunsGitHubDockerfileAction()
+    {
+        var actionRoot = Path.Combine(Path.GetTempPath(), $"actio-github-action-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(actionRoot);
+        var actionPath = Path.Combine(actionRoot, "action.yml");
+        var dockerfilePath = Path.Combine(actionRoot, "Dockerfile");
+        var commitSha = new string('c', 40);
+        await File.WriteAllTextAsync(
+            actionPath,
+            """
+            name: Remote Dockerfile action
+            inputs:
+              name:
+                required: true
+            runs:
+              using: docker
+              image: Dockerfile
+            """);
+        await File.WriteAllTextAsync(
+            dockerfilePath,
+            """
+            FROM alpine:3.20
+            CMD ["sh", "-c", "echo remote"]
+            """);
+
+        try
+        {
+            var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+            var cache = new RecordingActionCache
+            {
+                GitHubSourceResult = GitHubActionSourceResult.Resolved(
+                    actionPath,
+                    actionRoot,
+                    new ActionCacheEntry(
+                        "github-key",
+                        "github",
+                        "owner/repo/action@v1",
+                        actionPath,
+                        commitSha,
+                        actionRoot,
+                        DateTimeOffset.UtcNow,
+                        DateTimeOffset.UtcNow,
+                        commitSha,
+                        "v1"))
+            };
+            var workflow = CreateWorkflow(
+                new WorkflowJob(
+                    "test",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [
+                        new WorkflowStep(
+                            "Use GitHub Dockerfile action",
+                            null,
+                            "owner/repo/action@v1",
+                            With: new Dictionary<string, string>
+                            {
+                                ["name"] = "Remote"
+                            })
+                    ]));
+
+            var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(Environment.CurrentDirectory),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+            Assert.Empty(runner.Requests);
+            Assert.Empty(runner.DockerActionRequests);
+            Assert.Single(cache.GitHubSourceRequests);
+            var cacheRequest = Assert.Single(cache.DockerfileRequests);
+            Assert.Equal("owner/repo/action@v1", cacheRequest.Uses);
+            Assert.Equal(actionRoot, cacheRequest.ActionDirectory);
+            Assert.Equal(dockerfilePath, cacheRequest.DockerfilePath);
+            Assert.Equal(commitSha, cacheRequest.PinnedIdentity);
+            Assert.Equal("v1", cacheRequest.MutablePart);
+
+            var request = Assert.Single(runner.DockerfileActionRequests);
+            Assert.Equal(actionRoot, request.BuildContext);
+            Assert.Equal(dockerfilePath, request.DockerfilePath);
+            Assert.Equal("Remote", request.Environment["INPUT_NAME"]);
+            var actionMount = Assert.Single(request.AdditionalMounts, mount => mount.ContainerPath == "/actio/action");
+            Assert.Equal(actionRoot, actionMount.HostPath);
+            Assert.True(actionMount.ReadOnly);
+        }
+        finally
+        {
+            Directory.Delete(actionRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ExecuteAsync_RunsCheckoutShimWithoutDownloadingGitHubAction()
     {
         var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
@@ -2576,6 +2784,8 @@ public sealed class WorkflowExecutorTests
 
         public List<DockerActionExecutionRequest> DockerActionRequests { get; } = [];
 
+        public List<DockerfileActionExecutionRequest> DockerfileActionRequests { get; } = [];
+
         public List<JavaScriptActionExecutionRequest> JavaScriptActionRequests { get; } = [];
 
         public List<ServiceContainerStartRequest> ServiceStartRequests { get; } = [];
@@ -2634,6 +2844,21 @@ public sealed class WorkflowExecutorTests
             {
                 step = _steps.Dequeue();
                 DockerActionRequests.Add(request);
+            }
+
+            return ExecuteStepAsync(step, request.Environment, request.AdditionalMounts, output, cancellationToken);
+        }
+
+        public Task<StepExecutionResult> ExecuteDockerfileActionAsync(
+            DockerfileActionExecutionRequest request,
+            IStepOutputSink output,
+            CancellationToken cancellationToken = default)
+        {
+            FakeRunnerStep step;
+            lock (_gate)
+            {
+                step = _steps.Dequeue();
+                DockerfileActionRequests.Add(request);
             }
 
             return ExecuteStepAsync(step, request.Environment, request.AdditionalMounts, output, cancellationToken);
@@ -2844,6 +3069,8 @@ public sealed class WorkflowExecutorTests
 
         public List<DockerImageActionCacheRequest> DockerImageRequests { get; } = [];
 
+        public List<DockerfileActionCacheRequest> DockerfileRequests { get; } = [];
+
         public List<GitHubActionSourceRequest> GitHubSourceRequests { get; } = [];
 
         public GitHubActionSourceResult? GitHubSourceResult { get; set; }
@@ -2881,6 +3108,25 @@ public sealed class WorkflowExecutorTests
                 now,
                 request.IsPinned ? request.Image : null,
                 request.IsPinned ? null : request.MutablePart));
+        }
+
+        public Task<ActionCacheEntry> GetOrAddDockerfileActionAsync(
+            DockerfileActionCacheRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            DockerfileRequests.Add(request);
+            var now = DateTimeOffset.UtcNow;
+            return Task.FromResult(new ActionCacheEntry(
+                request.ContentHash,
+                "dockerfile",
+                request.Uses,
+                request.DockerfilePath,
+                request.ContentHash,
+                string.Empty,
+                now,
+                now,
+                request.PinnedIdentity,
+                request.MutablePart));
         }
 
         public Task<GitHubActionSourceResult> GetGitHubActionSourceAsync(

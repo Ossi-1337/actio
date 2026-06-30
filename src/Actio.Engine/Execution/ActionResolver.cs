@@ -9,6 +9,7 @@ namespace Actio.Engine.Execution;
 internal sealed class ActionResolver
 {
     private const string ActionContainerPath = "/actio/action";
+    private const string DockerfileImageRepository = "actio/action";
     private const string CheckoutShimCommand = "printf '%s\\n' 'Actio checkout shim: workspace is already available at /workspace.'";
 
     private readonly ActionParser _parser;
@@ -85,6 +86,20 @@ internal sealed class ActionResolver
             compositeCommand = command.Value;
         }
 
+        var actionDirectory = Path.GetDirectoryName(actionPathResult.ActionPath!)!;
+        if (string.Equals(parseResult.Action!.Runtime, ActionRuntime.Docker, StringComparison.Ordinal))
+        {
+            return await ResolveDockerfileActionAsync(
+                uses,
+                parseResult.Action,
+                inputBinding,
+                actionDirectory,
+                projectRoot,
+                null,
+                null,
+                cancellationToken);
+        }
+
         try
         {
             var contentHash = await ComputeContentHashAsync(actionPathResult.ActionPath!, cancellationToken);
@@ -96,7 +111,7 @@ internal sealed class ActionResolver
                 parseResult.Action!,
                 cacheEntry,
                 inputBinding,
-                Path.GetDirectoryName(actionPathResult.ActionPath!)!,
+                actionDirectory,
                 projectRoot,
                 compositeCommand);
         }
@@ -186,6 +201,19 @@ internal sealed class ActionResolver
         if (!inputBinding.Success)
         {
             return ActionResolutionResult.Failed(inputBinding.Errors);
+        }
+
+        if (string.Equals(parseResult.Action!.Runtime, ActionRuntime.Docker, StringComparison.Ordinal))
+        {
+            return await ResolveDockerfileActionAsync(
+                uses,
+                parseResult.Action,
+                inputBinding,
+                sourceResult.ActionDirectory!,
+                projectRoot,
+                sourceResult.CacheEntry!.PinnedIdentity,
+                sourceResult.CacheEntry.MutablePart,
+                cancellationToken);
         }
 
         return ResolveParsedAction(
@@ -310,6 +338,55 @@ internal sealed class ActionResolver
             [actionMount]);
     }
 
+    private async Task<ActionResolutionResult> ResolveDockerfileActionAsync(
+        string uses,
+        ActionDocument action,
+        ActionInputBindingResult inputBinding,
+        string actionDirectory,
+        string projectRoot,
+        string? pinnedIdentity,
+        string? mutablePart,
+        CancellationToken cancellationToken)
+    {
+        var dockerfilePathResult = ResolveDockerfilePath(actionDirectory, action.Image);
+        if (!dockerfilePathResult.Success)
+        {
+            return ActionResolutionResult.Failed(dockerfilePathResult.Errors);
+        }
+
+        try
+        {
+            var contentHash = await ComputeDirectoryHashAsync(actionDirectory, cancellationToken);
+            var cacheEntry = await _cache.GetOrAddDockerfileActionAsync(
+                new DockerfileActionCacheRequest(
+                    uses,
+                    actionDirectory,
+                    dockerfilePathResult.DockerfilePath!,
+                    contentHash,
+                    pinnedIdentity,
+                    mutablePart),
+                cancellationToken);
+            var environment = MergeEnvironment(
+                inputBinding.Environment,
+                CreateActionPathEnvironment());
+            var actionMount = new StepExecutionMount(actionDirectory, ActionContainerPath, ReadOnly: true);
+
+            return ActionResolutionResult.ResolvedDockerfileAction(
+                action,
+                cacheEntry,
+                uses,
+                FormatDockerfileImage(cacheEntry.Key),
+                actionDirectory,
+                dockerfilePathResult.DockerfilePath!,
+                environment,
+                [actionMount]);
+        }
+        catch (Exception ex) when (StorageError.IsRecoverable(ex))
+        {
+            return ActionResolutionResult.Failed([StorageError.Format($"caching Dockerfile action '{uses}'", ex)]);
+        }
+    }
+
     private static IReadOnlyDictionary<string, string> CreateActionPathEnvironment()
     {
         return new Dictionary<string, string>(StringComparer.Ordinal)
@@ -333,6 +410,9 @@ internal sealed class ActionResolver
         return $"{ActionContainerPath}/{normalized}";
     }
 
+    private static string FormatDockerfileImage(string cacheKey)
+        => $"{DockerfileImageRepository}:{cacheKey}";
+
     private static IReadOnlyDictionary<string, string> MergeEnvironment(
         IReadOnlyDictionary<string, string> first,
         IReadOnlyDictionary<string, string> second)
@@ -355,6 +435,34 @@ internal sealed class ActionResolver
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
+    private static async Task<string> ComputeDirectoryHashAsync(
+        string directoryPath,
+        CancellationToken cancellationToken)
+    {
+        var files = Directory
+            .EnumerateFiles(directoryPath, "*", SearchOption.AllDirectories)
+            .OrderBy(path => Path.GetRelativePath(directoryPath, path), StringComparer.Ordinal)
+            .ToArray();
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+
+        foreach (var filePath in files)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var relativePath = Path.GetRelativePath(directoryPath, filePath)
+                .Replace('\\', '/');
+            var relativePathBytes = Encoding.UTF8.GetBytes(relativePath);
+            hash.AppendData(relativePathBytes);
+            hash.AppendData([0]);
+
+            await using var stream = File.OpenRead(filePath);
+            var fileHash = await SHA256.HashDataAsync(stream, cancellationToken);
+            hash.AppendData(fileHash);
+            hash.AppendData([0]);
+        }
+
+        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+    }
+
     private static bool IsActionFile(string path)
     {
         return string.Equals(Path.GetFileName(path), "action.yml", StringComparison.OrdinalIgnoreCase) ||
@@ -374,6 +482,26 @@ internal sealed class ActionResolver
             normalizedPath.StartsWith(normalizedRoot + Path.AltDirectorySeparatorChar, comparison);
     }
 
+    private static DockerfilePathResult ResolveDockerfilePath(string actionDirectory, string? image)
+    {
+        const string supportedImage = "Dockerfile";
+        if (!string.Equals(image, supportedImage, StringComparison.Ordinal))
+        {
+            return DockerfilePathResult.Failed(["action.runs.image supports only 'Dockerfile' for Docker actions."]);
+        }
+
+        var fullActionDirectory = Path.GetFullPath(actionDirectory);
+        var dockerfilePath = Path.GetFullPath(Path.Combine(fullActionDirectory, supportedImage));
+        if (!IsUnderRoot(dockerfilePath, fullActionDirectory))
+        {
+            return DockerfilePathResult.Failed(["action.runs.image must stay inside the action directory."]);
+        }
+
+        return File.Exists(dockerfilePath)
+            ? DockerfilePathResult.Resolved(dockerfilePath)
+            : DockerfilePathResult.Failed(["action.runs.image points to Dockerfile, but no Dockerfile exists in the action directory."]);
+    }
+
     private sealed record ActionPathResult(
         bool Success,
         string? ActionPath,
@@ -383,6 +511,18 @@ internal sealed class ActionResolver
             => new(true, actionPath, []);
 
         public static ActionPathResult Failed(IReadOnlyList<string> errors)
+            => new(false, null, errors);
+    }
+
+    private sealed record DockerfilePathResult(
+        bool Success,
+        string? DockerfilePath,
+        IReadOnlyList<string> Errors)
+    {
+        public static DockerfilePathResult Resolved(string dockerfilePath)
+            => new(true, dockerfilePath, []);
+
+        public static DockerfilePathResult Failed(IReadOnlyList<string> errors)
             => new(false, null, errors);
     }
 
@@ -509,6 +649,8 @@ internal sealed record ActionResolutionResult(
     string? DockerImage,
     string? DockerEntryPoint,
     IReadOnlyList<string> DockerArguments,
+    string? DockerfileBuildContext,
+    string? DockerfilePath,
     string? JavaScriptActionPath,
     string? JavaScriptMain,
     string? JavaScriptPre,
@@ -517,7 +659,9 @@ internal sealed record ActionResolutionResult(
     IReadOnlyList<StepExecutionMount> AdditionalMounts,
     IReadOnlyList<string> Errors)
 {
-    public bool IsDockerImageAction => DockerImage is not null;
+    public bool IsDockerImageAction => DockerImage is not null && DockerfileBuildContext is null;
+
+    public bool IsDockerfileAction => DockerfileBuildContext is not null;
 
     public bool IsJavaScriptAction => JavaScriptMain is not null;
 
@@ -528,7 +672,7 @@ internal sealed record ActionResolutionResult(
         IReadOnlyDictionary<string, string> environment,
         IReadOnlyList<StepExecutionMount> additionalMounts)
     {
-        return new ActionResolutionResult(true, action, cacheEntry, command, null, null, [], null, null, null, null, environment, additionalMounts, []);
+        return new ActionResolutionResult(true, action, cacheEntry, command, null, null, [], null, null, null, null, null, null, environment, additionalMounts, []);
     }
 
     public static ActionResolutionResult ResolvedJavaScriptAction(
@@ -542,12 +686,25 @@ internal sealed record ActionResolutionResult(
         IReadOnlyDictionary<string, string> environment,
         IReadOnlyList<StepExecutionMount> additionalMounts)
     {
-        return new ActionResolutionResult(true, action, cacheEntry, command, null, null, [], actionPath, main, pre, post, environment, additionalMounts, []);
+        return new ActionResolutionResult(true, action, cacheEntry, command, null, null, [], null, null, actionPath, main, pre, post, environment, additionalMounts, []);
+    }
+
+    public static ActionResolutionResult ResolvedDockerfileAction(
+        ActionDocument action,
+        ActionCacheEntry cacheEntry,
+        string command,
+        string dockerImage,
+        string buildContext,
+        string dockerfilePath,
+        IReadOnlyDictionary<string, string> environment,
+        IReadOnlyList<StepExecutionMount> additionalMounts)
+    {
+        return new ActionResolutionResult(true, action, cacheEntry, command, dockerImage, null, [], buildContext, dockerfilePath, null, null, null, null, environment, additionalMounts, []);
     }
 
     public static ActionResolutionResult ResolvedBuiltInAction(string command)
     {
-        return new ActionResolutionResult(true, null, null, command, null, null, [], null, null, null, null, new Dictionary<string, string>(), [], []);
+        return new ActionResolutionResult(true, null, null, command, null, null, [], null, null, null, null, null, null, new Dictionary<string, string>(), [], []);
     }
 
     public static ActionResolutionResult ResolvedDockerImage(
@@ -570,6 +727,8 @@ internal sealed record ActionResolutionResult(
             null,
             null,
             null,
+            null,
+            null,
             environment,
             [],
             []);
@@ -577,6 +736,6 @@ internal sealed record ActionResolutionResult(
 
     public static ActionResolutionResult Failed(IReadOnlyList<string> errors)
     {
-        return new ActionResolutionResult(false, null, null, null, null, null, [], null, null, null, null, new Dictionary<string, string>(), [], errors);
+        return new ActionResolutionResult(false, null, null, null, null, null, [], null, null, null, null, null, null, new Dictionary<string, string>(), [], errors);
     }
 }
