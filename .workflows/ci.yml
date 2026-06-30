@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate solution
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/dotnet/sdk:10.0
+    steps:
+      - name: Validate
+        run: |
+          set -e
+          work=/tmp/actio-ci
+          rm -rf "$work"
+          mkdir -p "$work"
+          tar \
+            --exclude='.git' \
+            --exclude='.actio' \
+            --exclude='*/bin' \
+            --exclude='*/obj' \
+            -cf - . | tar -C "$work" -xf -
+          cd "$work"
+          dotnet restore Actio.slnx
+          dotnet build Actio.slnx --no-restore
+          dotnet test Actio.slnx --no-build
+          dotnet format Actio.slnx --verify-no-changes --no-restore
