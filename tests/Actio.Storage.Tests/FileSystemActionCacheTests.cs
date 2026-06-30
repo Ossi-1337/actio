@@ -1,6 +1,9 @@
 using Actio.Engine.Actions;
 using Actio.Storage;
 using System.IO.Compression;
+using System.Net;
+using System.Net.Http.Headers;
+using System.Text;
 
 namespace Actio.Storage.Tests;
 
@@ -199,6 +202,39 @@ public sealed class FileSystemActionCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task GetGitHubActionSourceAsync_DoesNotWriteTokenToCacheMetadata()
+    {
+        var sha = new string('e', 40);
+        const string token = "secret-token";
+        var handler = new RecordingHttpMessageHandler(request =>
+            request.RequestUri?.AbsolutePath.Contains("/commits/", StringComparison.Ordinal) == true
+                ? JsonResponse($$"""{"sha":"{{sha}}"}""")
+                : ArchiveResponse());
+        using var httpClient = new HttpClient(handler)
+        {
+            BaseAddress = new Uri("https://api.github.com/")
+        };
+        var client = new GitHubActionClient(httpClient, new StaticGitHubTokenProvider(token));
+        var cache = new FileSystemActionCache(_root, client);
+        var request = new GitHubActionSourceRequest(
+            "owner/repo/action@main",
+            "owner",
+            "repo",
+            "action",
+            "main",
+            IsPinned: false,
+            MutablePart: "main");
+
+        var result = await cache.GetGitHubActionSourceAsync(request);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.All(handler.Requests, item => Assert.Equal(token, item.Authorization?.Parameter));
+        var metadata = await File.ReadAllTextAsync(Path.Combine(result.CacheEntry!.CachePath, "action.json"));
+        Assert.DoesNotContain(token, metadata, StringComparison.Ordinal);
+        Assert.Contains("owner/repo/action@main", metadata, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task GetOrAddLocalActionAsync_RecreatesCorruptedEntry()
     {
         var cache = new FileSystemActionCache(_root);
@@ -257,6 +293,75 @@ public sealed class FileSystemActionCacheTests : IDisposable
         using var writer = new StreamWriter(entry.Open());
         writer.Write("# repo");
     }
+
+    private static HttpResponseMessage JsonResponse(string json)
+    {
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        };
+    }
+
+    private static HttpResponseMessage ArchiveResponse()
+    {
+        using var stream = new MemoryStream();
+        using (var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            var entry = archive.CreateEntry("owner-repo/action/action.yml");
+            using var writer = new StreamWriter(entry.Open());
+            writer.Write(
+                """
+                name: Remote action
+                runs:
+                  using: composite
+                  steps:
+                    - name: Run
+                      run: echo remote
+                """);
+        }
+
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(stream.ToArray())
+        };
+    }
+
+    private sealed class StaticGitHubTokenProvider : IGitHubTokenProvider
+    {
+        private readonly string _token;
+
+        public StaticGitHubTokenProvider(string token)
+        {
+            _token = token;
+        }
+
+        public GitHubToken? GetToken()
+            => new(_token, EnvironmentGitHubTokenProvider.TokenEnvironmentVariable);
+    }
+
+    private sealed class RecordingHttpMessageHandler : HttpMessageHandler
+    {
+        private readonly Func<HttpRequestMessage, HttpResponseMessage> _handle;
+
+        public RecordingHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> handle)
+        {
+            _handle = handle;
+        }
+
+        public List<RecordedRequest> Requests { get; } = [];
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            Requests.Add(new RecordedRequest(request.RequestUri, request.Headers.Authorization));
+            return Task.FromResult(_handle(request));
+        }
+    }
+
+    private sealed record RecordedRequest(
+        Uri? Uri,
+        AuthenticationHeaderValue? Authorization);
 
     private sealed class FakeGitHubActionClient : IGitHubActionClient
     {
