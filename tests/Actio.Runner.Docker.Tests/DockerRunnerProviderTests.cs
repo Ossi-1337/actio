@@ -85,6 +85,36 @@ public sealed class DockerRunnerProviderTests
     }
 
     [Fact]
+    public void CreateJavaScriptActionStartInfo_RunsNode20WithActionScript()
+    {
+        var actionPath = Path.Combine(Directory.GetCurrentDirectory(), "cached-action");
+        var request = new JavaScriptActionExecutionRequest(
+            "test",
+            "Use JavaScript action",
+            Directory.GetCurrentDirectory(),
+            "/actio/action",
+            "dist/index.js",
+            new Dictionary<string, string>
+            {
+                ["INPUT_NAME"] = "Actio"
+            },
+            [new StepExecutionMount(actionPath, "/actio/action", ReadOnly: true)]);
+
+        var startInfo = DockerRunnerProvider.CreateJavaScriptActionStartInfo(request, "dist/index.js", "actio-test");
+        var args = startInfo.ArgumentList.ToArray();
+        var imageIndex = Array.IndexOf(args, "node:20-bookworm-slim");
+
+        Assert.Equal("docker", startInfo.FileName);
+        Assert.Contains("run", args);
+        Assert.Contains("actio-test", args);
+        Assert.Contains("INPUT_NAME=Actio", args);
+        Assert.Contains($"{Path.GetFullPath(actionPath)}:/actio/action:ro", args);
+        Assert.True(imageIndex >= 0);
+        Assert.Equal("node", args[imageIndex + 1]);
+        Assert.Equal("/actio/action/dist/index.js", args[imageIndex + 2]);
+    }
+
+    [Fact]
     public void CreateShellStepStartInfo_AddsAdditionalReadOnlyMounts()
     {
         var actionPath = Path.Combine(Directory.GetCurrentDirectory(), "cached-action");
@@ -248,5 +278,17 @@ public sealed class DockerRunnerProviderTests
         string expected)
     {
         Assert.Equal(expected, DockerRunnerProvider.ToContainerWorkingDirectory(workingDirectory));
+    }
+
+    [Theory]
+    [InlineData("/actio/action", "dist/index.js", "/actio/action/dist/index.js")]
+    [InlineData("/actio/action/", "./dist/index.js", "/actio/action/dist/index.js")]
+    [InlineData("/actio/action", "dist\\index.js", "/actio/action/dist/index.js")]
+    public void ToActionContainerPath_MapsActionScriptsInsideActionMount(
+        string actionPath,
+        string scriptPath,
+        string expected)
+    {
+        Assert.Equal(expected, DockerRunnerProvider.ToActionContainerPath(actionPath, scriptPath));
     }
 }

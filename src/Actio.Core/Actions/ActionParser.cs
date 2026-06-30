@@ -17,6 +17,11 @@ public sealed class ActionParser
 
     private static readonly HashSet<string> RunsKeys = new(StringComparer.Ordinal)
     {
+        "main",
+        "post",
+        "post-if",
+        "pre",
+        "pre-if",
         "using",
         "steps"
     };
@@ -84,14 +89,21 @@ public sealed class ActionParser
 
         var name = ReadRequiredScalar(errors, root, "name", "action.name");
         var inputs = ReadInputs(errors, root);
-        var steps = ReadRuns(errors, root);
+        var runs = ReadRuns(errors, root);
 
         if (errors.Count > 0)
         {
             return ActionParseResult.Failed(errors);
         }
 
-        return ActionParseResult.Parsed(new ActionDocument(name!, steps, inputs));
+        return ActionParseResult.Parsed(new ActionDocument(
+            name!,
+            runs.Steps,
+            inputs,
+            runs.Runtime,
+            runs.Main,
+            runs.Pre,
+            runs.Post));
     }
 
     private static IReadOnlyDictionary<string, ActionInput> ReadInputs(List<string> errors, YamlMappingNode root)
@@ -135,29 +147,55 @@ public sealed class ActionParser
         return inputs;
     }
 
-    private static IReadOnlyList<ActionStep> ReadRuns(List<string> errors, YamlMappingNode root)
+    private static ActionRuns ReadRuns(List<string> errors, YamlMappingNode root)
     {
         if (!TryGet(root, "runs", out var runsNode))
         {
             errors.Add("action.runs is required.");
-            return [];
+            return ActionRuns.Composite([]);
         }
 
         if (runsNode is not YamlMappingNode runsMap)
         {
             errors.Add("action.runs must be a mapping.");
-            return [];
+            return ActionRuns.Composite([]);
         }
 
         AddUnknownKeyErrors(errors, runsMap, RunsKeys, "action.runs");
+        AddUnsupportedKeyError(errors, runsMap, "pre-if", "action.runs.pre-if");
+        AddUnsupportedKeyError(errors, runsMap, "post-if", "action.runs.post-if");
 
         var usingValue = ReadRequiredScalar(errors, runsMap, "using", "action.runs.using");
-        if (usingValue is not null && !string.Equals(usingValue, "composite", StringComparison.Ordinal))
+        if (usingValue is null)
         {
-            errors.Add("action.runs.using supports only 'composite'.");
+            return ActionRuns.Composite([]);
         }
 
-        return ReadSteps(errors, runsMap);
+        if (string.Equals(usingValue, ActionRuntime.Composite, StringComparison.Ordinal))
+        {
+            return ActionRuns.Composite(ReadSteps(errors, runsMap));
+        }
+
+        if (string.Equals(usingValue, ActionRuntime.Node20, StringComparison.Ordinal))
+        {
+            if (TryGet(runsMap, "steps", out _))
+            {
+                errors.Add("action.runs.steps is supported only when action.runs.using is 'composite'.");
+            }
+
+            var main = ReadRequiredScalar(errors, runsMap, "main", "action.runs.main");
+            var pre = ReadOptionalScalar(errors, runsMap, "pre", "action.runs.pre");
+            var post = ReadOptionalScalar(errors, runsMap, "post", "action.runs.post");
+
+            ValidateActionPath(errors, main, "action.runs.main");
+            ValidateActionPath(errors, pre, "action.runs.pre");
+            ValidateActionPath(errors, post, "action.runs.post");
+
+            return ActionRuns.JavaScript(main, pre, post);
+        }
+
+        errors.Add("action.runs.using supports only 'composite' or 'node20'.");
+        return ActionRuns.Composite([]);
     }
 
     private static IReadOnlyList<ActionStep> ReadSteps(List<string> errors, YamlMappingNode runsMap)
@@ -251,6 +289,35 @@ public sealed class ActionParser
         return scalar.Value;
     }
 
+    private static void ValidateActionPath(List<string> errors, string? value, string path)
+    {
+        if (value is null)
+        {
+            return;
+        }
+
+        if (IsRootedActionPath(value))
+        {
+            errors.Add($"{path} must be a relative path inside the action directory.");
+            return;
+        }
+
+        if (value
+            .Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
+            .Any(segment => string.Equals(segment, "..", StringComparison.Ordinal)))
+        {
+            errors.Add($"{path} must be a relative path inside the action directory.");
+        }
+    }
+
+    private static bool IsRootedActionPath(string value)
+    {
+        return Path.IsPathRooted(value) ||
+            value.StartsWith("/", StringComparison.Ordinal) ||
+            value.StartsWith("\\", StringComparison.Ordinal) ||
+            (value.Length >= 2 && char.IsLetter(value[0]) && value[1] == ':');
+    }
+
     private static bool? ReadOptionalBoolean(List<string> errors, YamlMappingNode map, string key, string path)
     {
         var value = ReadOptionalScalar(errors, map, key, path);
@@ -299,6 +366,18 @@ public sealed class ActionParser
         }
     }
 
+    private static void AddUnsupportedKeyError(
+        List<string> errors,
+        YamlMappingNode map,
+        string key,
+        string path)
+    {
+        if (TryGet(map, key, out _))
+        {
+            errors.Add($"{path} is not supported.");
+        }
+    }
+
     private static bool TryGet(YamlMappingNode map, string key, out YamlNode node)
     {
         foreach (var (keyNode, valueNode) in map.Children)
@@ -313,5 +392,19 @@ public sealed class ActionParser
 
         node = null!;
         return false;
+    }
+
+    private sealed record ActionRuns(
+        string Runtime,
+        IReadOnlyList<ActionStep> Steps,
+        string? Main,
+        string? Pre,
+        string? Post)
+    {
+        public static ActionRuns Composite(IReadOnlyList<ActionStep> steps)
+            => new(ActionRuntime.Composite, steps, null, null, null);
+
+        public static ActionRuns JavaScript(string? main, string? pre, string? post)
+            => new(ActionRuntime.Node20, [], main, pre, post);
     }
 }

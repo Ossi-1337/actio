@@ -84,6 +84,32 @@ public sealed class ActionParserTests
     }
 
     [Fact]
+    public void Parse_AcceptsNode20JavaScriptAction()
+    {
+        var result = Parse(
+            """
+            name: JavaScript hello
+            inputs:
+              name:
+                required: true
+            runs:
+              using: node20
+              pre: dist/pre.js
+              main: dist/index.js
+              post: dist/post.js
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal("JavaScript hello", result.Action!.Name);
+        Assert.Equal(ActionRuntime.Node20, result.Action.Runtime);
+        Assert.Empty(result.Action.Steps);
+        Assert.Equal("dist/pre.js", result.Action.Pre);
+        Assert.Equal("dist/index.js", result.Action.Main);
+        Assert.Equal("dist/post.js", result.Action.Post);
+        Assert.True(result.Action.Inputs["name"].Required);
+    }
+
+    [Fact]
     public void Parse_RejectsInvalidActionInputMetadata()
     {
         var result = Parse(
@@ -121,7 +147,58 @@ public sealed class ActionParserTests
             """);
 
         Assert.False(result.Success);
-        Assert.Contains(result.Errors, error => error.Contains("supports only 'composite'", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("supports only 'composite' or 'node20'", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Parse_RejectsUnsupportedJavaScriptRuntime()
+    {
+        var result = Parse(
+            """
+            name: JavaScript action
+            runs:
+              using: node16
+              main: dist/index.js
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error.Contains("supports only 'composite' or 'node20'", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Theory]
+    [InlineData("../dist/index.js")]
+    [InlineData("/dist/index.js")]
+    [InlineData("C:\\dist\\index.js")]
+    [InlineData("dist/../index.js")]
+    public void Parse_RejectsJavaScriptActionPathsOutsideActionDirectory(string main)
+    {
+        var result = Parse(
+            $$"""
+            name: JavaScript action
+            runs:
+              using: node20
+              main: {{main}}
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error.Contains("must be a relative path inside the action directory", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Parse_RejectsJavaScriptActionLifecycleConditions()
+    {
+        var result = Parse(
+            """
+            name: JavaScript action
+            runs:
+              using: node20
+              main: dist/index.js
+              post: dist/post.js
+              post-if: success()
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "action.runs.post-if is not supported.");
     }
 
     [Fact]

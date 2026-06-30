@@ -496,8 +496,9 @@ internal sealed class JobExecutor
             var additionalMounts = plan.AdditionalMounts
                 .Concat([new StepExecutionMount(environmentFiles.DirectoryPath, StepEnvironmentFileContainerDirectory, ReadOnly: false)])
                 .ToArray();
-            var result = plan.Kind == StepExecutionKind.DockerImageAction
-                ? await _runnerProvider.ExecuteDockerActionAsync(
+            var result = plan.Kind switch
+            {
+                StepExecutionKind.DockerImageAction => await _runnerProvider.ExecuteDockerActionAsync(
                     new DockerActionExecutionRequest(
                         job.Name,
                         step.Name,
@@ -509,8 +510,22 @@ internal sealed class JobExecutor
                         plan.DockerEntryPoint,
                         plan.DockerArguments),
                     collector,
-                    stepCancellationToken)
-                : await _runnerProvider.ExecuteStepAsync(
+                    stepCancellationToken),
+                StepExecutionKind.JavaScriptAction => await _runnerProvider.ExecuteJavaScriptActionAsync(
+                    new JavaScriptActionExecutionRequest(
+                        job.Name,
+                        step.Name,
+                        projectRoot,
+                        plan.JavaScriptActionPath!,
+                        plan.JavaScriptMain!,
+                        environment,
+                        additionalMounts,
+                        serviceNetwork,
+                        plan.JavaScriptPre,
+                        plan.JavaScriptPost),
+                    collector,
+                    stepCancellationToken),
+                _ => await _runnerProvider.ExecuteStepAsync(
                     new StepExecutionRequest(
                         job.Name,
                         step.Name,
@@ -524,9 +539,10 @@ internal sealed class JobExecutor
                         CreateContainerExecutionOptions(job.Container, projectRoot),
                         serviceNetwork),
                     collector,
-                    stepCancellationToken);
-            var resultShell = plan.Kind == StepExecutionKind.DockerImageAction ? null : effectiveRunDefaults.Shell;
-            var resultWorkingDirectory = plan.Kind == StepExecutionKind.DockerImageAction ? null : effectiveRunDefaults.WorkingDirectory;
+                    stepCancellationToken)
+            };
+            var resultShell = plan.Kind == StepExecutionKind.ShellCommand ? effectiveRunDefaults.Shell : null;
+            var resultWorkingDirectory = plan.Kind == StepExecutionKind.ShellCommand ? effectiveRunDefaults.WorkingDirectory : null;
             var environmentFileResult = await _environmentFileReader.ReadAsync(environmentFiles, stepCancellationToken);
             var outputs = MergeOutputs(collector.CapturedOutputs, MaskValues(environmentFileResult.Outputs, collector));
             var summary = environmentFileResult.Summary is null ? null : collector.Mask(environmentFileResult.Summary);
@@ -611,14 +627,29 @@ internal sealed class JobExecutor
             return StepExecutionPlan.Failed(action.Errors);
         }
 
-        return action.IsDockerImageAction
-            ? StepExecutionPlan.DockerImageAction(
+        if (action.IsDockerImageAction)
+        {
+            return StepExecutionPlan.DockerImageAction(
                 action.Command!,
                 action.DockerImage!,
                 action.Environment,
                 action.DockerEntryPoint,
-                action.DockerArguments)
-            : StepExecutionPlan.ShellCommand(action.Command!, action.Environment, action.AdditionalMounts);
+                action.DockerArguments);
+        }
+
+        if (action.IsJavaScriptAction)
+        {
+            return StepExecutionPlan.JavaScriptAction(
+                action.Command!,
+                action.JavaScriptActionPath!,
+                action.JavaScriptMain!,
+                action.JavaScriptPre,
+                action.JavaScriptPost,
+                action.Environment,
+                action.AdditionalMounts);
+        }
+
+        return StepExecutionPlan.ShellCommand(action.Command!, action.Environment, action.AdditionalMounts);
     }
 
     private static JobExecutionOutcome CompleteJob(
@@ -989,7 +1020,8 @@ internal sealed class JobExecutor
     private enum StepExecutionKind
     {
         ShellCommand,
-        DockerImageAction
+        DockerImageAction,
+        JavaScriptAction
     }
 
     private sealed record StepExecutionPlan(
@@ -999,6 +1031,10 @@ internal sealed class JobExecutor
         string? DockerImage,
         string? DockerEntryPoint,
         IReadOnlyList<string> DockerArguments,
+        string? JavaScriptActionPath,
+        string? JavaScriptMain,
+        string? JavaScriptPre,
+        string? JavaScriptPost,
         IReadOnlyDictionary<string, string> Environment,
         IReadOnlyList<StepExecutionMount> AdditionalMounts,
         IReadOnlyList<string> Errors)
@@ -1015,6 +1051,10 @@ internal sealed class JobExecutor
                 null,
                 null,
                 [],
+                null,
+                null,
+                null,
+                null,
                 environment ?? new Dictionary<string, string>(),
                 additionalMounts ?? [],
                 []);
@@ -1034,13 +1074,55 @@ internal sealed class JobExecutor
                 dockerImage,
                 dockerEntryPoint,
                 dockerArguments,
+                null,
+                null,
+                null,
+                null,
                 environment,
                 [],
                 []);
         }
 
+        public static StepExecutionPlan JavaScriptAction(
+            string command,
+            string actionPath,
+            string main,
+            string? pre,
+            string? post,
+            IReadOnlyDictionary<string, string> environment,
+            IReadOnlyList<StepExecutionMount> additionalMounts)
+        {
+            return new(
+                true,
+                StepExecutionKind.JavaScriptAction,
+                command,
+                null,
+                null,
+                [],
+                actionPath,
+                main,
+                pre,
+                post,
+                environment,
+                additionalMounts,
+                []);
+        }
+
         public static StepExecutionPlan Failed(IReadOnlyList<string> errors)
-            => new(false, StepExecutionKind.ShellCommand, null, null, null, [], new Dictionary<string, string>(), [], errors);
+            => new(
+                false,
+                StepExecutionKind.ShellCommand,
+                null,
+                null,
+                null,
+                [],
+                null,
+                null,
+                null,
+                null,
+                new Dictionary<string, string>(),
+                [],
+                errors);
     }
 }
 

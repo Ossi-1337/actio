@@ -6,6 +6,8 @@ namespace Actio.Runner.Docker;
 
 public sealed class DockerRunnerProvider : IRunnerProvider
 {
+    private const string JavaScriptActionNodeImage = "node:20-bookworm-slim";
+
     private static readonly TimeSpan ServiceHealthTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan ServiceHealthPollInterval = TimeSpan.FromMilliseconds(500);
 
@@ -165,6 +167,52 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         return await ExecuteDockerProcessAsync(process, containerName, output, cancellationToken);
     }
 
+    public async Task<StepExecutionResult> ExecuteJavaScriptActionAsync(
+        JavaScriptActionExecutionRequest request,
+        IStepOutputSink output,
+        CancellationToken cancellationToken = default)
+    {
+        var result = new StepExecutionResult(0);
+
+        if (!string.IsNullOrWhiteSpace(request.Pre))
+        {
+            result = await ExecuteJavaScriptActionPhaseAsync(request, request.Pre, "pre", output, cancellationToken);
+        }
+
+        if (result.Success)
+        {
+            result = await ExecuteJavaScriptActionPhaseAsync(request, request.Main, "main", output, cancellationToken);
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.Post))
+        {
+            var postResult = await ExecuteJavaScriptActionPhaseAsync(request, request.Post, "post", output, cancellationToken);
+            if (result.Success)
+            {
+                result = postResult;
+            }
+        }
+
+        return result;
+    }
+
+    private static async Task<StepExecutionResult> ExecuteJavaScriptActionPhaseAsync(
+        JavaScriptActionExecutionRequest request,
+        string scriptPath,
+        string phase,
+        IStepOutputSink output,
+        CancellationToken cancellationToken)
+    {
+        var containerName = CreateContainerName(request.JobName, $"{request.StepName}-{phase}");
+        using var process = new Process
+        {
+            StartInfo = CreateJavaScriptActionStartInfo(request, scriptPath, containerName),
+            EnableRaisingEvents = true
+        };
+
+        return await ExecuteDockerProcessAsync(process, containerName, output, cancellationToken);
+    }
+
     private static async Task<StepExecutionResult> ExecuteDockerProcessAsync(
         Process process,
         string containerName,
@@ -250,6 +298,29 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         {
             startInfo.ArgumentList.Add(argument);
         }
+
+        return startInfo;
+    }
+
+    internal static ProcessStartInfo CreateJavaScriptActionStartInfo(
+        JavaScriptActionExecutionRequest request,
+        string scriptPath,
+        string containerName)
+    {
+        var startInfo = CreateBaseStartInfo(
+            request.JobName,
+            request.StepName,
+            request.ProjectRoot,
+            request.Environment,
+            containerName,
+            null,
+            request.AdditionalMounts,
+            null,
+            request.Services);
+
+        startInfo.ArgumentList.Add(JavaScriptActionNodeImage);
+        startInfo.ArgumentList.Add("node");
+        startInfo.ArgumentList.Add(ToActionContainerPath(request.ActionPath, scriptPath));
 
         return startInfo;
     }
@@ -401,6 +472,18 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         return string.IsNullOrWhiteSpace(normalized)
             ? "/workspace"
             : $"/workspace/{normalized}";
+    }
+
+    internal static string ToActionContainerPath(string actionPath, string scriptPath)
+    {
+        var normalizedActionPath = actionPath.Replace('\\', '/').TrimEnd('/');
+        var normalizedScriptPath = scriptPath.Replace('\\', '/').TrimStart('/');
+        if (normalizedScriptPath.StartsWith("./", StringComparison.Ordinal))
+        {
+            normalizedScriptPath = normalizedScriptPath[2..];
+        }
+
+        return $"{normalizedActionPath}/{normalizedScriptPath}";
     }
 
     internal static string BuildShellScript(string command)

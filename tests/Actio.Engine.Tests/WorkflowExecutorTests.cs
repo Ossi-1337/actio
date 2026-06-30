@@ -1886,6 +1886,74 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_RunsLocalJavaScriptAction()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-action-tests-{Guid.NewGuid():N}");
+        var actionRoot = Path.Combine(projectRoot, ".actio", "actions", "hello");
+        Directory.CreateDirectory(Path.Combine(actionRoot, "dist"));
+        await File.WriteAllTextAsync(
+            Path.Combine(actionRoot, "action.yml"),
+            """
+            name: Hello
+            inputs:
+              name:
+                required: true
+            runs:
+              using: node20
+              pre: dist/pre.js
+              main: dist/index.js
+              post: dist/post.js
+            """);
+
+        try
+        {
+            var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+            var cache = new RecordingActionCache();
+            var workflow = CreateWorkflow(
+                new WorkflowJob(
+                    "test",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [
+                        new WorkflowStep(
+                            "Use hello",
+                            null,
+                            "./.actio/actions/hello",
+                            With: new Dictionary<string, string>
+                            {
+                                ["name"] = "Actio"
+                            })
+                    ]));
+
+            var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+            Assert.Empty(runner.Requests);
+            var request = Assert.Single(runner.JavaScriptActionRequests);
+            Assert.Equal("/actio/action", request.ActionPath);
+            Assert.Equal("dist/index.js", request.Main);
+            Assert.Equal("dist/pre.js", request.Pre);
+            Assert.Equal("dist/post.js", request.Post);
+            Assert.Equal("Actio", request.Environment["INPUT_NAME"]);
+            Assert.Equal("/actio/action", request.Environment["GITHUB_ACTION_PATH"]);
+            var actionMount = Assert.Single(request.AdditionalMounts, mount => mount.ContainerPath == "/actio/action");
+            Assert.Equal(actionRoot, actionMount.HostPath);
+            Assert.True(actionMount.ReadOnly);
+            Assert.Equal("./.actio/actions/hello", cache.Requests[0].Uses);
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ExecuteAsync_FailsLocalCompositeActionWhenRequiredInputIsMissing()
     {
         var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-action-tests-{Guid.NewGuid():N}");
@@ -2268,18 +2336,21 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_FailsUnsupportedGitHubActionBeforeExecutingRunner()
+    public async Task ExecuteAsync_RunsGitHubJavaScriptAction()
     {
         var actionRoot = Path.Combine(Path.GetTempPath(), $"actio-github-action-tests-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(actionRoot);
+        Directory.CreateDirectory(Path.Combine(actionRoot, "dist"));
         var actionPath = Path.Combine(actionRoot, "action.yml");
         await File.WriteAllTextAsync(
             actionPath,
             """
             name: JavaScript action
+            inputs:
+              name:
+                default: Actio
             runs:
               using: node20
-              main: index.js
+              main: dist/index.js
             """);
 
         try
@@ -2309,7 +2380,16 @@ public sealed class WorkflowExecutorTests
                     null,
                     "ubuntu-latest",
                     new Dictionary<string, string>(),
-                    [new WorkflowStep("Use setup-node", null, "actions/setup-node@v4")]));
+                    [
+                        new WorkflowStep(
+                            "Use setup-node",
+                            null,
+                            "actions/setup-node@v4",
+                            With: new Dictionary<string, string>
+                            {
+                                ["name"] = "Remote"
+                            })
+                    ]));
 
             var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
                 workflow,
@@ -2317,10 +2397,18 @@ public sealed class WorkflowExecutorTests
                 TextWriter.Null,
                 TextWriter.Null);
 
-            Assert.False(result.Success);
+            Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
             Assert.Empty(runner.Requests);
             Assert.Empty(runner.DockerActionRequests);
-            Assert.Contains(result.Errors, error => error.Contains("supports only 'composite'", StringComparison.OrdinalIgnoreCase));
+            var request = Assert.Single(runner.JavaScriptActionRequests);
+            Assert.Equal("/actio/action", request.ActionPath);
+            Assert.Equal("dist/index.js", request.Main);
+            Assert.Null(request.Pre);
+            Assert.Null(request.Post);
+            Assert.Equal("Remote", request.Environment["INPUT_NAME"]);
+            var actionMount = Assert.Single(request.AdditionalMounts, mount => mount.ContainerPath == "/actio/action");
+            Assert.Equal(actionRoot, actionMount.HostPath);
+            Assert.True(actionMount.ReadOnly);
         }
         finally
         {
@@ -2488,6 +2576,8 @@ public sealed class WorkflowExecutorTests
 
         public List<DockerActionExecutionRequest> DockerActionRequests { get; } = [];
 
+        public List<JavaScriptActionExecutionRequest> JavaScriptActionRequests { get; } = [];
+
         public List<ServiceContainerStartRequest> ServiceStartRequests { get; } = [];
 
         public List<JobServiceNetwork> StoppedServiceNetworks { get; } = [];
@@ -2544,6 +2634,21 @@ public sealed class WorkflowExecutorTests
             {
                 step = _steps.Dequeue();
                 DockerActionRequests.Add(request);
+            }
+
+            return ExecuteStepAsync(step, request.Environment, request.AdditionalMounts, output, cancellationToken);
+        }
+
+        public Task<StepExecutionResult> ExecuteJavaScriptActionAsync(
+            JavaScriptActionExecutionRequest request,
+            IStepOutputSink output,
+            CancellationToken cancellationToken = default)
+        {
+            FakeRunnerStep step;
+            lock (_gate)
+            {
+                step = _steps.Dequeue();
+                JavaScriptActionRequests.Add(request);
             }
 
             return ExecuteStepAsync(step, request.Environment, request.AdditionalMounts, output, cancellationToken);

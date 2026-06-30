@@ -8,7 +8,7 @@ namespace Actio.Engine.Execution;
 
 internal sealed class ActionResolver
 {
-    private const string GitHubActionContainerPath = "/actio/action";
+    private const string ActionContainerPath = "/actio/action";
     private const string CheckoutShimCommand = "printf '%s\\n' 'Actio checkout shim: workspace is already available at /workspace.'";
 
     private readonly ActionParser _parser;
@@ -73,10 +73,16 @@ internal sealed class ActionResolver
             return ActionResolutionResult.Failed(inputBinding.Errors);
         }
 
-        var command = BuildCommand(parseResult.Action!, inputBinding.Inputs, projectRoot);
-        if (!command.Success)
+        string? compositeCommand = null;
+        if (string.Equals(parseResult.Action!.Runtime, ActionRuntime.Composite, StringComparison.Ordinal))
         {
-            return ActionResolutionResult.Failed(command.Errors);
+            var command = BuildCommand(parseResult.Action, inputBinding.Inputs, projectRoot);
+            if (!command.Success)
+            {
+                return ActionResolutionResult.Failed(command.Errors);
+            }
+
+            compositeCommand = command.Value;
         }
 
         try
@@ -86,11 +92,13 @@ internal sealed class ActionResolver
                 new LocalActionCacheRequest(uses, actionPathResult.ActionPath!, contentHash),
                 cancellationToken);
 
-            return ActionResolutionResult.ResolvedLocalAction(
+            return ResolveParsedAction(
                 parseResult.Action!,
                 cacheEntry,
-                command.Value,
-                inputBinding.Environment);
+                inputBinding,
+                Path.GetDirectoryName(actionPathResult.ActionPath!)!,
+                projectRoot,
+                compositeCommand);
         }
         catch (Exception ex) when (StorageError.IsRecoverable(ex))
         {
@@ -180,24 +188,12 @@ internal sealed class ActionResolver
             return ActionResolutionResult.Failed(inputBinding.Errors);
         }
 
-        var command = BuildCommand(parseResult.Action!, inputBinding.Inputs, projectRoot);
-        if (!command.Success)
-        {
-            return ActionResolutionResult.Failed(command.Errors);
-        }
-
-        return ActionResolutionResult.ResolvedGitHubAction(
+        return ResolveParsedAction(
             parseResult.Action!,
             sourceResult.CacheEntry!,
-            command.Value,
-            MergeEnvironment(
-                inputBinding.Environment,
-                new Dictionary<string, string>(StringComparer.Ordinal)
-                {
-                    ["ACTIO_ACTION_PATH"] = GitHubActionContainerPath,
-                    ["GITHUB_ACTION_PATH"] = GitHubActionContainerPath
-                }),
-            [new StepExecutionMount(sourceResult.ActionDirectory!, GitHubActionContainerPath, ReadOnly: true)]);
+            inputBinding,
+            sourceResult.ActionDirectory!,
+            projectRoot);
     }
 
     private static bool IsCheckoutShim(GitHubActionReference action)
@@ -266,6 +262,75 @@ internal sealed class ActionResolver
         return errors.Count == 0
             ? ActionInputInterpolationResult.Resolved(string.Join(Environment.NewLine, commands))
             : ActionInputInterpolationResult.Failed(errors);
+    }
+
+    private static ActionResolutionResult ResolveParsedAction(
+        ActionDocument action,
+        ActionCacheEntry cacheEntry,
+        ActionInputBindingResult inputBinding,
+        string actionDirectory,
+        string projectRoot,
+        string? compositeCommand = null)
+    {
+        var environment = MergeEnvironment(
+            inputBinding.Environment,
+            CreateActionPathEnvironment());
+        var actionMount = new StepExecutionMount(actionDirectory, ActionContainerPath, ReadOnly: true);
+
+        if (string.Equals(action.Runtime, ActionRuntime.Node20, StringComparison.Ordinal))
+        {
+            return ActionResolutionResult.ResolvedJavaScriptAction(
+                action,
+                cacheEntry,
+                FormatJavaScriptCommand(action.Main!),
+                ActionContainerPath,
+                action.Main!,
+                action.Pre,
+                action.Post,
+                environment,
+                [actionMount]);
+        }
+
+        if (compositeCommand is null)
+        {
+            var command = BuildCommand(action, inputBinding.Inputs, projectRoot);
+            if (!command.Success)
+            {
+                return ActionResolutionResult.Failed(command.Errors);
+            }
+
+            compositeCommand = command.Value;
+        }
+
+        return ActionResolutionResult.ResolvedCompositeAction(
+            action,
+            cacheEntry,
+            compositeCommand,
+            environment,
+            [actionMount]);
+    }
+
+    private static IReadOnlyDictionary<string, string> CreateActionPathEnvironment()
+    {
+        return new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["ACTIO_ACTION_PATH"] = ActionContainerPath,
+            ["GITHUB_ACTION_PATH"] = ActionContainerPath
+        };
+    }
+
+    private static string FormatJavaScriptCommand(string main)
+        => $"node {ToActionContainerPath(main)}";
+
+    private static string ToActionContainerPath(string relativePath)
+    {
+        var normalized = relativePath.Replace('\\', '/').TrimStart('/');
+        if (normalized.StartsWith("./", StringComparison.Ordinal))
+        {
+            normalized = normalized[2..];
+        }
+
+        return $"{ActionContainerPath}/{normalized}";
     }
 
     private static IReadOnlyDictionary<string, string> MergeEnvironment(
@@ -444,34 +509,45 @@ internal sealed record ActionResolutionResult(
     string? DockerImage,
     string? DockerEntryPoint,
     IReadOnlyList<string> DockerArguments,
+    string? JavaScriptActionPath,
+    string? JavaScriptMain,
+    string? JavaScriptPre,
+    string? JavaScriptPost,
     IReadOnlyDictionary<string, string> Environment,
     IReadOnlyList<StepExecutionMount> AdditionalMounts,
     IReadOnlyList<string> Errors)
 {
     public bool IsDockerImageAction => DockerImage is not null;
 
-    public static ActionResolutionResult ResolvedLocalAction(
-        ActionDocument action,
-        ActionCacheEntry cacheEntry,
-        string command,
-        IReadOnlyDictionary<string, string> environment)
-    {
-        return new ActionResolutionResult(true, action, cacheEntry, command, null, null, [], environment, [], []);
-    }
+    public bool IsJavaScriptAction => JavaScriptMain is not null;
 
-    public static ActionResolutionResult ResolvedGitHubAction(
+    public static ActionResolutionResult ResolvedCompositeAction(
         ActionDocument action,
         ActionCacheEntry cacheEntry,
         string command,
         IReadOnlyDictionary<string, string> environment,
         IReadOnlyList<StepExecutionMount> additionalMounts)
     {
-        return new ActionResolutionResult(true, action, cacheEntry, command, null, null, [], environment, additionalMounts, []);
+        return new ActionResolutionResult(true, action, cacheEntry, command, null, null, [], null, null, null, null, environment, additionalMounts, []);
+    }
+
+    public static ActionResolutionResult ResolvedJavaScriptAction(
+        ActionDocument action,
+        ActionCacheEntry cacheEntry,
+        string command,
+        string actionPath,
+        string main,
+        string? pre,
+        string? post,
+        IReadOnlyDictionary<string, string> environment,
+        IReadOnlyList<StepExecutionMount> additionalMounts)
+    {
+        return new ActionResolutionResult(true, action, cacheEntry, command, null, null, [], actionPath, main, pre, post, environment, additionalMounts, []);
     }
 
     public static ActionResolutionResult ResolvedBuiltInAction(string command)
     {
-        return new ActionResolutionResult(true, null, null, command, null, null, [], new Dictionary<string, string>(), [], []);
+        return new ActionResolutionResult(true, null, null, command, null, null, [], null, null, null, null, new Dictionary<string, string>(), [], []);
     }
 
     public static ActionResolutionResult ResolvedDockerImage(
@@ -490,6 +566,10 @@ internal sealed record ActionResolutionResult(
             dockerImage,
             dockerEntryPoint,
             dockerArguments,
+            null,
+            null,
+            null,
+            null,
             environment,
             [],
             []);
@@ -497,6 +577,6 @@ internal sealed record ActionResolutionResult(
 
     public static ActionResolutionResult Failed(IReadOnlyList<string> errors)
     {
-        return new ActionResolutionResult(false, null, null, null, null, null, [], new Dictionary<string, string>(), [], errors);
+        return new ActionResolutionResult(false, null, null, null, null, null, [], null, null, null, null, new Dictionary<string, string>(), [], errors);
     }
 }
