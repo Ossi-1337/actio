@@ -239,7 +239,18 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             request.AdditionalMounts,
             null,
             request.Services);
+        if (!string.IsNullOrWhiteSpace(request.EntryPoint))
+        {
+            startInfo.ArgumentList.Add("--entrypoint");
+            startInfo.ArgumentList.Add(request.EntryPoint);
+        }
+
         startInfo.ArgumentList.Add(request.Image);
+        foreach (var argument in request.Arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
         return startInfo;
     }
 

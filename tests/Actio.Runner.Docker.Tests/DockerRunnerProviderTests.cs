@@ -62,6 +62,29 @@ public sealed class DockerRunnerProviderTests
     }
 
     [Fact]
+    public void CreateDockerActionStartInfo_UsesEntrypointAndArguments()
+    {
+        var request = new DockerActionExecutionRequest(
+            "test",
+            "Use image",
+            "alpine:3.20",
+            Directory.GetCurrentDirectory(),
+            new Dictionary<string, string>(),
+            EntryPoint: "/bin/echo",
+            Arguments: ["hello world", "--count", "2"]);
+
+        var startInfo = DockerRunnerProvider.CreateDockerActionStartInfo(request, "actio-test");
+        var args = startInfo.ArgumentList.ToArray();
+        var entryPointIndex = Array.IndexOf(args, "--entrypoint");
+        var imageIndex = Array.IndexOf(args, "alpine:3.20");
+
+        Assert.True(entryPointIndex >= 0);
+        Assert.Equal("/bin/echo", args[entryPointIndex + 1]);
+        Assert.True(imageIndex > entryPointIndex);
+        Assert.Equal(["hello world", "--count", "2"], args[(imageIndex + 1)..]);
+    }
+
+    [Fact]
     public void CreateShellStepStartInfo_AddsAdditionalReadOnlyMounts()
     {
         var actionPath = Path.Combine(Directory.GetCurrentDirectory(), "cached-action");

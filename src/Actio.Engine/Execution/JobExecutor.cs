@@ -505,7 +505,9 @@ internal sealed class JobExecutor
                         projectRoot,
                         environment,
                         additionalMounts,
-                        serviceNetwork),
+                        serviceNetwork,
+                        plan.DockerEntryPoint,
+                        plan.DockerArguments),
                     collector,
                     stepCancellationToken)
                 : await _runnerProvider.ExecuteStepAsync(
@@ -610,7 +612,12 @@ internal sealed class JobExecutor
         }
 
         return action.IsDockerImageAction
-            ? StepExecutionPlan.DockerImageAction(action.Command!, action.DockerImage!, action.Environment)
+            ? StepExecutionPlan.DockerImageAction(
+                action.Command!,
+                action.DockerImage!,
+                action.Environment,
+                action.DockerEntryPoint,
+                action.DockerArguments)
             : StepExecutionPlan.ShellCommand(action.Command!, action.Environment, action.AdditionalMounts);
     }
 
@@ -990,6 +997,8 @@ internal sealed class JobExecutor
         StepExecutionKind Kind,
         string? Command,
         string? DockerImage,
+        string? DockerEntryPoint,
+        IReadOnlyList<string> DockerArguments,
         IReadOnlyDictionary<string, string> Environment,
         IReadOnlyList<StepExecutionMount> AdditionalMounts,
         IReadOnlyList<string> Errors)
@@ -1004,6 +1013,8 @@ internal sealed class JobExecutor
                 StepExecutionKind.ShellCommand,
                 command,
                 null,
+                null,
+                [],
                 environment ?? new Dictionary<string, string>(),
                 additionalMounts ?? [],
                 []);
@@ -1012,13 +1023,24 @@ internal sealed class JobExecutor
         public static StepExecutionPlan DockerImageAction(
             string command,
             string dockerImage,
-            IReadOnlyDictionary<string, string> environment)
+            IReadOnlyDictionary<string, string> environment,
+            string? dockerEntryPoint,
+            IReadOnlyList<string> dockerArguments)
         {
-            return new(true, StepExecutionKind.DockerImageAction, command, dockerImage, environment, [], []);
+            return new(
+                true,
+                StepExecutionKind.DockerImageAction,
+                command,
+                dockerImage,
+                dockerEntryPoint,
+                dockerArguments,
+                environment,
+                [],
+                []);
         }
 
         public static StepExecutionPlan Failed(IReadOnlyList<string> errors)
-            => new(false, StepExecutionKind.ShellCommand, null, null, new Dictionary<string, string>(), [], errors);
+            => new(false, StepExecutionKind.ShellCommand, null, null, null, [], new Dictionary<string, string>(), [], errors);
     }
 }
 

@@ -1071,11 +1071,17 @@ public sealed class WorkflowParserTests
                 steps:
                   - name: Node action
                     uses: docker://node:22
+                    with:
+                      entrypoint: /bin/echo
+                      args: '"hello world" --count 2'
             """);
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
         Assert.Contains(result.Warnings, warning => warning.Contains("mutable Docker image reference", StringComparison.OrdinalIgnoreCase));
-        Assert.Equal("docker://node:22", result.Workflow!.Jobs["test"].Steps[0].Uses);
+        var step = result.Workflow!.Jobs["test"].Steps[0];
+        Assert.Equal("docker://node:22", step.Uses);
+        Assert.Equal("/bin/echo", step.With["entrypoint"]);
+        Assert.Equal("\"hello world\" --count 2", step.With["args"]);
     }
 
     [Fact]

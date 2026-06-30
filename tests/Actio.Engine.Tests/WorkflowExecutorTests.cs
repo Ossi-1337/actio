@@ -1999,6 +1999,8 @@ public sealed class WorkflowExecutorTests
                         "docker://alpine:3.20",
                         With: new Dictionary<string, string>
                         {
+                            ["args"] = "\"hello world\" --count 2",
+                            ["entrypoint"] = "/bin/echo",
                             ["node-version"] = "22"
                         })
                 ]));
@@ -2013,7 +2015,11 @@ public sealed class WorkflowExecutorTests
         Assert.Empty(runner.Requests);
         var request = Assert.Single(runner.DockerActionRequests);
         Assert.Equal("alpine:3.20", request.Image);
+        Assert.Equal("/bin/echo", request.EntryPoint);
+        Assert.Equal(["hello world", "--count", "2"], request.Arguments);
         Assert.Equal("true", request.Environment["DOTNET_NOLOGO"]);
+        Assert.Equal("\"hello world\" --count 2", request.Environment["INPUT_ARGS"]);
+        Assert.Equal("/bin/echo", request.Environment["INPUT_ENTRYPOINT"]);
         Assert.Equal("22", request.Environment["INPUT_NODE_VERSION"]);
         AssertDefaultEnvironment(
             request.Environment,
@@ -2026,6 +2032,40 @@ public sealed class WorkflowExecutorTests
             "CLI",
             expectedCi: "true");
         Assert.Equal("alpine:3.20", Assert.Single(cache.DockerImageRequests).Image);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_FailsDockerImageActionWhenArgsCannotBeParsed()
+    {
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Use image",
+                        null,
+                        "docker://alpine:3.20",
+                        With: new Dictionary<string, string>
+                        {
+                            ["args"] = "\"unterminated"
+                        })
+                ]));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(Environment.CurrentDirectory),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Empty(runner.DockerActionRequests);
+        Assert.Contains(result.Errors, error => error.Contains("with.args", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("unterminated quote", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

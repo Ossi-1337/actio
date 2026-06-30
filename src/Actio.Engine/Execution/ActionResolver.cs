@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text;
 using Actio.Core.Actions;
 using Actio.Core.Workflows;
 using Actio.Engine.Actions;
@@ -103,6 +104,11 @@ internal sealed class ActionResolver
         CancellationToken cancellationToken)
     {
         var uses = step.Uses!;
+        var dockerOptions = DockerImageActionOptions.FromInputs(step.With);
+        if (!dockerOptions.Success)
+        {
+            return ActionResolutionResult.Failed(dockerOptions.Errors);
+        }
 
         try
         {
@@ -114,7 +120,9 @@ internal sealed class ActionResolver
                 uses,
                 reference.Target,
                 cacheEntry,
-                ActionInputBinder.CreateEnvironment(step.With));
+                ActionInputBinder.CreateEnvironment(step.With),
+                dockerOptions.EntryPoint,
+                dockerOptions.Arguments);
         }
         catch (Exception ex) when (StorageError.IsRecoverable(ex))
         {
@@ -312,6 +320,120 @@ internal sealed class ActionResolver
         public static ActionPathResult Failed(IReadOnlyList<string> errors)
             => new(false, null, errors);
     }
+
+    private sealed record DockerImageActionOptions(
+        bool Success,
+        string? EntryPoint,
+        IReadOnlyList<string> Arguments,
+        IReadOnlyList<string> Errors)
+    {
+        public static DockerImageActionOptions FromInputs(IReadOnlyDictionary<string, string> inputs)
+        {
+            var entryPoint = inputs.TryGetValue("entrypoint", out var value)
+                ? value
+                : null;
+
+            if (!inputs.TryGetValue("args", out var args))
+            {
+                return Resolved(entryPoint, []);
+            }
+
+            var arguments = SplitArguments(args);
+            return arguments.Success
+                ? Resolved(entryPoint, arguments.Arguments)
+                : Failed(arguments.Errors);
+        }
+
+        private static DockerImageActionOptions Resolved(
+            string? entryPoint,
+            IReadOnlyList<string> arguments)
+            => new(true, entryPoint, arguments, []);
+
+        private static DockerImageActionOptions Failed(IReadOnlyList<string> errors)
+            => new(false, null, [], errors);
+    }
+
+    private sealed record DockerImageActionArgumentResult(
+        bool Success,
+        IReadOnlyList<string> Arguments,
+        IReadOnlyList<string> Errors)
+    {
+        public static DockerImageActionArgumentResult Resolved(IReadOnlyList<string> arguments)
+            => new(true, arguments, []);
+
+        public static DockerImageActionArgumentResult Failed(IReadOnlyList<string> errors)
+            => new(false, [], errors);
+    }
+
+    private static DockerImageActionArgumentResult SplitArguments(string value)
+    {
+        var arguments = new List<string>();
+        var current = new StringBuilder();
+        var tokenStarted = false;
+        char? quote = null;
+
+        for (var index = 0; index < value.Length; index++)
+        {
+            var character = value[index];
+
+            if (quote is not null &&
+                character == '\\' &&
+                index + 1 < value.Length &&
+                IsEscapedQuotedCharacter(value[index + 1], quote.Value))
+            {
+                current.Append(value[index + 1]);
+                tokenStarted = true;
+                index++;
+                continue;
+            }
+
+            if (character is '"' or '\'')
+            {
+                if (quote is null)
+                {
+                    quote = character;
+                    tokenStarted = true;
+                    continue;
+                }
+
+                if (quote == character)
+                {
+                    quote = null;
+                    continue;
+                }
+            }
+
+            if (quote is null && char.IsWhiteSpace(character))
+            {
+                if (tokenStarted)
+                {
+                    arguments.Add(current.ToString());
+                    current.Clear();
+                    tokenStarted = false;
+                }
+
+                continue;
+            }
+
+            current.Append(character);
+            tokenStarted = true;
+        }
+
+        if (quote is not null)
+        {
+            return DockerImageActionArgumentResult.Failed(["docker image action with.args contains an unterminated quote."]);
+        }
+
+        if (tokenStarted)
+        {
+            arguments.Add(current.ToString());
+        }
+
+        return DockerImageActionArgumentResult.Resolved(arguments);
+    }
+
+    private static bool IsEscapedQuotedCharacter(char character, char quote)
+        => character == quote || character == '\\';
 }
 
 internal sealed record ActionResolutionResult(
@@ -320,6 +442,8 @@ internal sealed record ActionResolutionResult(
     ActionCacheEntry? CacheEntry,
     string? Command,
     string? DockerImage,
+    string? DockerEntryPoint,
+    IReadOnlyList<string> DockerArguments,
     IReadOnlyDictionary<string, string> Environment,
     IReadOnlyList<StepExecutionMount> AdditionalMounts,
     IReadOnlyList<string> Errors)
@@ -332,7 +456,7 @@ internal sealed record ActionResolutionResult(
         string command,
         IReadOnlyDictionary<string, string> environment)
     {
-        return new ActionResolutionResult(true, action, cacheEntry, command, null, environment, [], []);
+        return new ActionResolutionResult(true, action, cacheEntry, command, null, null, [], environment, [], []);
     }
 
     public static ActionResolutionResult ResolvedGitHubAction(
@@ -342,25 +466,37 @@ internal sealed record ActionResolutionResult(
         IReadOnlyDictionary<string, string> environment,
         IReadOnlyList<StepExecutionMount> additionalMounts)
     {
-        return new ActionResolutionResult(true, action, cacheEntry, command, null, environment, additionalMounts, []);
+        return new ActionResolutionResult(true, action, cacheEntry, command, null, null, [], environment, additionalMounts, []);
     }
 
     public static ActionResolutionResult ResolvedBuiltInAction(string command)
     {
-        return new ActionResolutionResult(true, null, null, command, null, new Dictionary<string, string>(), [], []);
+        return new ActionResolutionResult(true, null, null, command, null, null, [], new Dictionary<string, string>(), [], []);
     }
 
     public static ActionResolutionResult ResolvedDockerImage(
         string command,
         string dockerImage,
         ActionCacheEntry cacheEntry,
-        IReadOnlyDictionary<string, string> environment)
+        IReadOnlyDictionary<string, string> environment,
+        string? dockerEntryPoint,
+        IReadOnlyList<string> dockerArguments)
     {
-        return new ActionResolutionResult(true, null, cacheEntry, command, dockerImage, environment, [], []);
+        return new ActionResolutionResult(
+            true,
+            null,
+            cacheEntry,
+            command,
+            dockerImage,
+            dockerEntryPoint,
+            dockerArguments,
+            environment,
+            [],
+            []);
     }
 
     public static ActionResolutionResult Failed(IReadOnlyList<string> errors)
     {
-        return new ActionResolutionResult(false, null, null, null, null, new Dictionary<string, string>(), [], errors);
+        return new ActionResolutionResult(false, null, null, null, null, null, [], new Dictionary<string, string>(), [], errors);
     }
 }
