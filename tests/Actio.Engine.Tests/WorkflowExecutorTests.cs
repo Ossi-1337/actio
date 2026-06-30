@@ -1796,7 +1796,11 @@ public sealed class WorkflowExecutorTests
 
         try
         {
-            var runner = new FakeRunnerProvider([new FakeRunnerStep(0, ["actio.output greeting=hello"])]);
+            var runner = new FakeRunnerProvider(
+                [
+                    new FakeRunnerStep(0),
+                    new FakeRunnerStep(0, ["actio.output greeting=hello"])
+                ]);
             var cache = new RecordingActionCache();
             var workflow = CreateWorkflow(
                 new WorkflowJob(
@@ -1814,7 +1818,7 @@ public sealed class WorkflowExecutorTests
                 TextWriter.Null);
 
             Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
-            Assert.Equal("echo first" + Environment.NewLine + "echo \"actio.output greeting=hello\"", runner.Requests[0].Command);
+            Assert.Equal(["echo first", "echo \"actio.output greeting=hello\""], runner.Requests.Select(request => request.Command));
             Assert.Equal("./.actio/actions/hello", cache.Requests[0].Uses);
             Assert.Equal("hello", Assert.Single(result.Outputs).Value);
         }
@@ -1878,6 +1882,137 @@ public sealed class WorkflowExecutorTests
             Assert.Equal("echo \"Actio!\"", request.Command);
             Assert.Equal("Actio", request.Environment["INPUT_NAME"]);
             Assert.Equal("!", request.Environment["INPUT_PUNCTUATION"]);
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_PropagatesCompositeActionOutputs()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-action-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(projectRoot, ".actio", "actions", "outputs"));
+        await File.WriteAllTextAsync(
+            Path.Combine(projectRoot, ".actio", "actions", "outputs", "action.yml"),
+            """
+            name: Output action
+            inputs:
+              name:
+                default: Actio
+            outputs:
+              result:
+                value: "${{ steps.produce.outputs.result }}"
+              greeting:
+                value: "hello ${{ inputs.name }}"
+            runs:
+              using: composite
+              steps:
+                - id: produce
+                  name: Produce
+                  shell: bash
+                  working-directory: tools
+                  run: echo produce
+                - name: Consume
+                  shell: sh
+                  run: echo consume
+            """);
+
+        try
+        {
+            var runner = new FakeRunnerProvider(
+                [
+                    new FakeRunnerStep(
+                        0,
+                        onExecute: (environment, mounts) => WriteEnvironmentFile(
+                            environment,
+                            mounts,
+                            "GITHUB_OUTPUT",
+                            "result=passed\n")),
+                    new FakeRunnerStep(0),
+                    new FakeRunnerStep(0)
+                ]);
+            var workflow = CreateWorkflow(
+                new WorkflowJob(
+                    "test",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [
+                        new WorkflowStep("Use composite", null, "./.actio/actions/outputs", Id: "composite"),
+                        new WorkflowStep(
+                            "Use composite output",
+                            "echo later",
+                            null,
+                            If: "${{ steps.composite.outputs.result == 'passed' }}")
+                    ]));
+
+            var result = await new WorkflowExecutor(runner).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+            Assert.Equal(2, result.SuccessfulSteps);
+            Assert.Equal(["Use composite / Produce", "Use composite / Consume", "Use composite output"], runner.Requests.Select(request => request.StepName));
+            Assert.Equal("bash", runner.Requests[0].Shell);
+            Assert.Equal("tools", runner.Requests[0].WorkingDirectory);
+            Assert.Equal("sh", runner.Requests[1].Shell);
+            Assert.Equal("passed", runner.Requests[1].Environment["ACTIO_STEP_PRODUCE_OUTPUT_RESULT"]);
+            Assert.Equal("passed", runner.Requests[2].Environment["ACTIO_STEP_COMPOSITE_OUTPUT_RESULT"]);
+            Assert.Contains(result.Outputs, output => output.JobName == "test" && output.Name == "result" && output.Value == "passed");
+            Assert.Contains(result.Outputs, output => output.JobName == "test" && output.Name == "greeting" && output.Value == "hello Actio");
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_FailsCompositeActionWithActionStepName()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-action-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(projectRoot, ".actio", "actions", "failure"));
+        await File.WriteAllTextAsync(
+            Path.Combine(projectRoot, ".actio", "actions", "failure", "action.yml"),
+            """
+            name: Failure action
+            runs:
+              using: composite
+              steps:
+                - name: Prepare
+                  run: echo prepare
+                - name: Fail inside
+                  run: exit 42
+            """);
+
+        try
+        {
+            var runner = new FakeRunnerProvider([0, 42]);
+            var workflow = CreateWorkflow(
+                new WorkflowJob(
+                    "test",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Use failing action", null, "./.actio/actions/failure")]));
+
+            var result = await new WorkflowExecutor(runner).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.False(result.Success);
+            Assert.Equal(1, result.FailedSteps);
+            Assert.Equal(1, result.TotalSteps);
+            Assert.Equal(["Use failing action / Prepare", "Use failing action / Fail inside"], runner.Requests.Select(request => request.StepName));
+            Assert.Contains(result.Errors, error => error.Contains("action step 'Fail inside' failed with exit code 42", StringComparison.OrdinalIgnoreCase));
         }
         finally
         {

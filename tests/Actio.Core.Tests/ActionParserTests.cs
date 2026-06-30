@@ -37,14 +37,17 @@ public sealed class ActionParserTests
             outputs:
               greeting:
                 description: Greeting output
+                value: "${{ steps.greet.outputs.greeting }}"
             branding:
               icon: terminal
               color: green
             runs:
               using: composite
               steps:
-                - name: Greet
+                - id: greet
+                  name: Greet
                   shell: bash
+                  working-directory: tools
                   run: echo hello
             """);
 
@@ -52,9 +55,34 @@ public sealed class ActionParserTests
         var input = result.Action!.Inputs["name"];
         Assert.Equal("Name to greet", input.Description);
         Assert.False(input.Required);
+        var output = result.Action.Outputs["greeting"];
+        Assert.Equal("Greeting output", output.Description);
+        Assert.Equal("${{ steps.greet.outputs.greeting }}", output.Value);
         var step = Assert.Single(result.Action!.Steps);
+        Assert.Equal("greet", step.Id);
         Assert.Equal("Greet", step.Name);
         Assert.Equal("echo hello", step.Run);
+        Assert.Equal("bash", step.Shell);
+        Assert.Equal("tools", step.WorkingDirectory);
+    }
+
+    [Fact]
+    public void Parse_AllowsCompositeActionStepNameToBeOmittedWhenIdExists()
+    {
+        var result = Parse(
+            """
+            name: Say hello
+            runs:
+              using: composite
+              steps:
+                - id: greet
+                  run: echo hello
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var step = Assert.Single(result.Action!.Steps);
+        Assert.Equal("greet", step.Id);
+        Assert.Equal("greet", step.Name);
     }
 
     [Fact]
@@ -92,6 +120,9 @@ public sealed class ActionParserTests
             inputs:
               name:
                 required: true
+            outputs:
+              cache-hit:
+                description: Whether a cache was restored
             runs:
               using: node20
               pre: dist/pre.js
@@ -107,6 +138,7 @@ public sealed class ActionParserTests
         Assert.Equal("dist/index.js", result.Action.Main);
         Assert.Equal("dist/post.js", result.Action.Post);
         Assert.True(result.Action.Inputs["name"].Required);
+        Assert.Null(result.Action.Outputs["cache-hit"].Value);
     }
 
     [Fact]
@@ -153,6 +185,27 @@ public sealed class ActionParserTests
         Assert.False(result.Success);
         Assert.Contains(result.Errors, error => error == "action.inputs.name.required must be true or false.");
         Assert.Contains(result.Errors, error => error == "action.inputs.bad.nested is not supported.");
+    }
+
+    [Fact]
+    public void Parse_RejectsInvalidActionOutputMetadata()
+    {
+        var result = Parse(
+            """
+            name: Say hello
+            outputs:
+              greeting:
+                unknown: no
+            runs:
+              using: composite
+              steps:
+                - name: Greet
+                  run: echo hello
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "action.outputs.greeting.unknown is not supported.");
+        Assert.Contains(result.Errors, error => error == "action.outputs.greeting.value is required.");
     }
 
     [Fact]

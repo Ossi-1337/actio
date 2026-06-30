@@ -74,16 +74,13 @@ internal sealed class ActionResolver
             return ActionResolutionResult.Failed(inputBinding.Errors);
         }
 
-        string? compositeCommand = null;
         if (string.Equals(parseResult.Action!.Runtime, ActionRuntime.Composite, StringComparison.Ordinal))
         {
-            var command = BuildCommand(parseResult.Action, inputBinding.Inputs, projectRoot);
-            if (!command.Success)
+            var plan = BuildCompositeSteps(parseResult.Action, inputBinding.Inputs, projectRoot);
+            if (!plan.Success)
             {
-                return ActionResolutionResult.Failed(command.Errors);
+                return ActionResolutionResult.Failed(plan.Errors);
             }
-
-            compositeCommand = command.Value;
         }
 
         var actionDirectory = Path.GetDirectoryName(actionPathResult.ActionPath!)!;
@@ -112,8 +109,7 @@ internal sealed class ActionResolver
                 cacheEntry,
                 inputBinding,
                 actionDirectory,
-                projectRoot,
-                compositeCommand);
+                projectRoot);
         }
         catch (Exception ex) when (StorageError.IsRecoverable(ex))
         {
@@ -266,12 +262,12 @@ internal sealed class ActionResolver
         return ActionPathResult.Failed([$"uses '{uses}' could not be resolved to a local action.yml or action.yaml file."]);
     }
 
-    private static ActionInputInterpolationResult BuildCommand(
+    private static CompositeActionPlanResult BuildCompositeSteps(
         ActionDocument action,
         IReadOnlyDictionary<string, string> inputs,
         string projectRoot)
     {
-        var commands = new List<string>();
+        var steps = new List<CompositeActionStepPlan>();
         var errors = new List<string>();
 
         foreach (var step in action.Steps)
@@ -279,7 +275,12 @@ internal sealed class ActionResolver
             var interpolation = ActionInputBinder.InterpolateInputExpressions(step.Run, inputs, projectRoot);
             if (interpolation.Success)
             {
-                commands.Add(interpolation.Value);
+                steps.Add(new CompositeActionStepPlan(
+                    step.Name,
+                    interpolation.Value,
+                    step.Id,
+                    step.Shell,
+                    step.WorkingDirectory));
             }
             else
             {
@@ -288,8 +289,8 @@ internal sealed class ActionResolver
         }
 
         return errors.Count == 0
-            ? ActionInputInterpolationResult.Resolved(string.Join(Environment.NewLine, commands))
-            : ActionInputInterpolationResult.Failed(errors);
+            ? CompositeActionPlanResult.Resolved(steps)
+            : CompositeActionPlanResult.Failed(errors);
     }
 
     private static ActionResolutionResult ResolveParsedAction(
@@ -297,8 +298,7 @@ internal sealed class ActionResolver
         ActionCacheEntry cacheEntry,
         ActionInputBindingResult inputBinding,
         string actionDirectory,
-        string projectRoot,
-        string? compositeCommand = null)
+        string projectRoot)
     {
         var environment = MergeEnvironment(
             inputBinding.Environment,
@@ -319,21 +319,19 @@ internal sealed class ActionResolver
                 [actionMount]);
         }
 
-        if (compositeCommand is null)
+        var compositePlan = BuildCompositeSteps(action, inputBinding.Inputs, projectRoot);
+        if (!compositePlan.Success)
         {
-            var command = BuildCommand(action, inputBinding.Inputs, projectRoot);
-            if (!command.Success)
-            {
-                return ActionResolutionResult.Failed(command.Errors);
-            }
-
-            compositeCommand = command.Value;
+            return ActionResolutionResult.Failed(compositePlan.Errors);
         }
 
         return ActionResolutionResult.ResolvedCompositeAction(
             action,
             cacheEntry,
-            compositeCommand,
+            compositePlan.Command,
+            compositePlan.Steps,
+            inputBinding.Inputs,
+            action.Outputs.ToDictionary(item => item.Key, item => item.Value.Value!, StringComparer.Ordinal),
             environment,
             [actionMount]);
     }
@@ -641,11 +639,40 @@ internal sealed class ActionResolver
         => character == quote || character == '\\';
 }
 
+internal sealed record CompositeActionStepPlan(
+    string Name,
+    string Command,
+    string? Id,
+    string? Shell,
+    string? WorkingDirectory);
+
+internal sealed record CompositeActionPlanResult(
+    bool Success,
+    IReadOnlyList<CompositeActionStepPlan> Steps,
+    string Command,
+    IReadOnlyList<string> Errors)
+{
+    public static CompositeActionPlanResult Resolved(IReadOnlyList<CompositeActionStepPlan> steps)
+    {
+        return new CompositeActionPlanResult(
+            true,
+            steps,
+            string.Join(Environment.NewLine, steps.Select(step => step.Command)),
+            []);
+    }
+
+    public static CompositeActionPlanResult Failed(IReadOnlyList<string> errors)
+        => new(false, [], string.Empty, errors);
+}
+
 internal sealed record ActionResolutionResult(
     bool Success,
     ActionDocument? Action,
     ActionCacheEntry? CacheEntry,
     string? Command,
+    IReadOnlyList<CompositeActionStepPlan> CompositeSteps,
+    IReadOnlyDictionary<string, string> CompositeInputs,
+    IReadOnlyDictionary<string, string> CompositeOutputExpressions,
     string? DockerImage,
     string? DockerEntryPoint,
     IReadOnlyList<string> DockerArguments,
@@ -659,6 +686,8 @@ internal sealed record ActionResolutionResult(
     IReadOnlyList<StepExecutionMount> AdditionalMounts,
     IReadOnlyList<string> Errors)
 {
+    public bool IsCompositeAction => CompositeSteps.Count > 0;
+
     public bool IsDockerImageAction => DockerImage is not null && DockerfileBuildContext is null;
 
     public bool IsDockerfileAction => DockerfileBuildContext is not null;
@@ -669,10 +698,13 @@ internal sealed record ActionResolutionResult(
         ActionDocument action,
         ActionCacheEntry cacheEntry,
         string command,
+        IReadOnlyList<CompositeActionStepPlan> steps,
+        IReadOnlyDictionary<string, string> inputs,
+        IReadOnlyDictionary<string, string> outputExpressions,
         IReadOnlyDictionary<string, string> environment,
         IReadOnlyList<StepExecutionMount> additionalMounts)
     {
-        return new ActionResolutionResult(true, action, cacheEntry, command, null, null, [], null, null, null, null, null, null, environment, additionalMounts, []);
+        return new ActionResolutionResult(true, action, cacheEntry, command, steps, inputs, outputExpressions, null, null, [], null, null, null, null, null, null, environment, additionalMounts, []);
     }
 
     public static ActionResolutionResult ResolvedJavaScriptAction(
@@ -686,7 +718,7 @@ internal sealed record ActionResolutionResult(
         IReadOnlyDictionary<string, string> environment,
         IReadOnlyList<StepExecutionMount> additionalMounts)
     {
-        return new ActionResolutionResult(true, action, cacheEntry, command, null, null, [], null, null, actionPath, main, pre, post, environment, additionalMounts, []);
+        return new ActionResolutionResult(true, action, cacheEntry, command, [], new Dictionary<string, string>(), new Dictionary<string, string>(), null, null, [], null, null, actionPath, main, pre, post, environment, additionalMounts, []);
     }
 
     public static ActionResolutionResult ResolvedDockerfileAction(
@@ -699,12 +731,12 @@ internal sealed record ActionResolutionResult(
         IReadOnlyDictionary<string, string> environment,
         IReadOnlyList<StepExecutionMount> additionalMounts)
     {
-        return new ActionResolutionResult(true, action, cacheEntry, command, dockerImage, null, [], buildContext, dockerfilePath, null, null, null, null, environment, additionalMounts, []);
+        return new ActionResolutionResult(true, action, cacheEntry, command, [], new Dictionary<string, string>(), new Dictionary<string, string>(), dockerImage, null, [], buildContext, dockerfilePath, null, null, null, null, environment, additionalMounts, []);
     }
 
     public static ActionResolutionResult ResolvedBuiltInAction(string command)
     {
-        return new ActionResolutionResult(true, null, null, command, null, null, [], null, null, null, null, null, null, new Dictionary<string, string>(), [], []);
+        return new ActionResolutionResult(true, null, null, command, [], new Dictionary<string, string>(), new Dictionary<string, string>(), null, null, [], null, null, null, null, null, null, new Dictionary<string, string>(), [], []);
     }
 
     public static ActionResolutionResult ResolvedDockerImage(
@@ -720,6 +752,9 @@ internal sealed record ActionResolutionResult(
             null,
             cacheEntry,
             command,
+            [],
+            new Dictionary<string, string>(),
+            new Dictionary<string, string>(),
             dockerImage,
             dockerEntryPoint,
             dockerArguments,
@@ -736,6 +771,6 @@ internal sealed record ActionResolutionResult(
 
     public static ActionResolutionResult Failed(IReadOnlyList<string> errors)
     {
-        return new ActionResolutionResult(false, null, null, null, null, null, [], null, null, null, null, null, null, new Dictionary<string, string>(), [], errors);
+        return new ActionResolutionResult(false, null, null, null, [], new Dictionary<string, string>(), new Dictionary<string, string>(), null, null, [], null, null, null, null, null, null, new Dictionary<string, string>(), [], errors);
     }
 }

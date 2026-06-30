@@ -37,11 +37,19 @@ public sealed class ActionParser
         "required"
     };
 
+    private static readonly HashSet<string> OutputKeys = new(StringComparer.Ordinal)
+    {
+        "description",
+        "value"
+    };
+
     private static readonly HashSet<string> StepKeys = new(StringComparer.Ordinal)
     {
+        "id",
         "name",
         "run",
-        "shell"
+        "shell",
+        "working-directory"
     };
 
     public ActionParseResult ParseFile(string actionPath)
@@ -92,7 +100,9 @@ public sealed class ActionParser
 
         var name = ReadRequiredScalar(errors, root, "name", "action.name");
         var inputs = ReadInputs(errors, root);
+        var outputs = ReadOutputs(errors, root);
         var runs = ReadRuns(errors, root);
+        ValidateOutputs(errors, outputs, runs.Runtime);
 
         if (errors.Count > 0)
         {
@@ -103,6 +113,7 @@ public sealed class ActionParser
             name!,
             runs.Steps,
             inputs,
+            outputs,
             runs.Runtime,
             runs.Image,
             runs.Main,
@@ -149,6 +160,62 @@ public sealed class ActionParser
         }
 
         return inputs;
+    }
+
+    private static IReadOnlyDictionary<string, ActionOutput> ReadOutputs(List<string> errors, YamlMappingNode root)
+    {
+        if (!TryGet(root, "outputs", out var outputsNode))
+        {
+            return new Dictionary<string, ActionOutput>();
+        }
+
+        if (outputsNode is not YamlMappingNode outputsMap)
+        {
+            errors.Add("action.outputs must be a mapping.");
+            return new Dictionary<string, ActionOutput>();
+        }
+
+        var outputs = new Dictionary<string, ActionOutput>(StringComparer.Ordinal);
+
+        foreach (var (keyNode, valueNode) in outputsMap.Children)
+        {
+            var outputName = ReadMapKey(errors, keyNode, "action.outputs");
+            if (outputName is null)
+            {
+                continue;
+            }
+
+            var outputPath = $"action.outputs.{outputName}";
+            if (valueNode is not YamlMappingNode outputMap)
+            {
+                errors.Add($"{outputPath} must be a mapping.");
+                continue;
+            }
+
+            AddUnknownKeyErrors(errors, outputMap, OutputKeys, outputPath);
+            var description = ReadOptionalScalar(errors, outputMap, "description", $"{outputPath}.description");
+            var value = ReadOptionalScalar(errors, outputMap, "value", $"{outputPath}.value");
+
+            outputs[outputName] = new ActionOutput(outputName, description, value);
+        }
+
+        return outputs;
+    }
+
+    private static void ValidateOutputs(
+        List<string> errors,
+        IReadOnlyDictionary<string, ActionOutput> outputs,
+        string runtime)
+    {
+        if (!string.Equals(runtime, ActionRuntime.Composite, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        foreach (var output in outputs.Values.Where(output => output.Value is null))
+        {
+            errors.Add($"action.outputs.{output.Name}.value is required.");
+        }
     }
 
     private static ActionRuns ReadRuns(List<string> errors, YamlMappingNode root)
@@ -258,12 +325,22 @@ public sealed class ActionParser
 
             AddUnknownKeyErrors(errors, stepMap, StepKeys, itemPath);
 
-            var name = ReadRequiredScalar(errors, stepMap, "name", $"{itemPath}.name");
+            var id = ReadOptionalScalar(errors, stepMap, "id", $"{itemPath}.id");
+            var name = ReadOptionalScalar(errors, stepMap, "name", $"{itemPath}.name");
             var run = ReadRequiredScalar(errors, stepMap, "run", $"{itemPath}.run");
+            var shell = ReadOptionalScalar(errors, stepMap, "shell", $"{itemPath}.shell");
+            var workingDirectory = ReadOptionalScalar(errors, stepMap, "working-directory", $"{itemPath}.working-directory");
 
-            if (name is not null && run is not null)
+            if (id is not null)
             {
-                steps.Add(new ActionStep(name, run));
+                ValidateActionStepId(errors, id, $"{itemPath}.id");
+            }
+
+            ValidateRelativePath(errors, workingDirectory, $"{itemPath}.working-directory");
+
+            if (run is not null)
+            {
+                steps.Add(new ActionStep(name ?? id ?? $"step {index + 1}", run, id, shell, workingDirectory));
             }
         }
 
@@ -333,6 +410,41 @@ public sealed class ActionParser
             .Any(segment => string.Equals(segment, "..", StringComparison.Ordinal)))
         {
             errors.Add($"{path} must be a relative path inside the action directory.");
+        }
+    }
+
+    private static void ValidateRelativePath(List<string> errors, string? value, string path)
+    {
+        if (value is null)
+        {
+            return;
+        }
+
+        if (IsRootedActionPath(value))
+        {
+            errors.Add($"{path} must be a relative path.");
+            return;
+        }
+
+        if (value
+            .Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries)
+            .Any(segment => string.Equals(segment, "..", StringComparison.Ordinal)))
+        {
+            errors.Add($"{path} must be a relative path.");
+        }
+    }
+
+    private static void ValidateActionStepId(List<string> errors, string value, string path)
+    {
+        if (!char.IsAsciiLetter(value[0]) && value[0] != '_')
+        {
+            errors.Add($"{path} must start with a letter or underscore.");
+            return;
+        }
+
+        if (value.Any(character => !char.IsAsciiLetterOrDigit(character) && character != '_' && character != '-'))
+        {
+            errors.Add($"{path} can contain only letters, numbers, underscores, and hyphens.");
         }
     }
 

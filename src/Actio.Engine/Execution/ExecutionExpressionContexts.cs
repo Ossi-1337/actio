@@ -72,6 +72,19 @@ internal static class ExecutionExpressionContexts
             workspaceRoot);
     }
 
+    public static ExpressionContextData ForActionOutputs(
+        IReadOnlyDictionary<string, string> inputs,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> stepOutputs,
+        IReadOnlyDictionary<string, string> stepStatuses,
+        string workspaceRoot)
+    {
+        return new ExpressionContextData(
+            CreateUnavailableRoots()
+                .Prepend(ExpressionContextRoot.AvailableRoot("steps", CreateStepsContext(stepOutputs, stepStatuses), allowMissingProperties: true, includeInSafeSnapshot: false))
+                .Prepend(ExpressionContextRoot.AvailableRoot("inputs", ExpressionContextData.FromStrings(inputs), allowMissingProperties: true, includeInSafeSnapshot: false)),
+            workspaceRoot);
+    }
+
     private static ExpressionContextData Create(
         string workflowName,
         WorkflowJob job,
