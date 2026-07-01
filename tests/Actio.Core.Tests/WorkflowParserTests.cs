@@ -909,7 +909,145 @@ public sealed class WorkflowParserTests
 
         Assert.False(result.Success);
         Assert.Contains(result.Errors, error => error.Contains("inputs.missing", StringComparison.OrdinalIgnoreCase));
-        Assert.Contains(result.Errors, error => error.Contains("is not declared", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("no workflow_dispatch or workflow_call input named 'missing'", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Parse_AcceptsWorkflowCallContract()
+    {
+        var result = Parse(
+            """
+            name: Reusable Build
+            on:
+              workflow_call:
+                inputs:
+                  configuration:
+                    description: Build configuration
+                    required: true
+                    type: string
+                  publish:
+                    type: boolean
+                    default: "false"
+                secrets:
+                  nuget-token:
+                    description: NuGet token
+                    required: false
+                outputs:
+                  package-path:
+                    description: Package path
+                    value: "${{ jobs.build.outputs.package-path }}"
+            jobs:
+              build:
+                if: "${{ inputs.configuration == 'Release' }}"
+                runs-on: ubuntu-latest
+                outputs:
+                  package-path: dist/app.zip
+                steps:
+                  - name: Build
+                    run: dotnet build
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var trigger = Assert.Single(result.Workflow!.Triggers);
+        Assert.Equal("workflow_call", trigger.EventName);
+        Assert.Equal(["configuration", "publish"], trigger.Call.Inputs.Keys);
+        Assert.True(trigger.Call.Inputs["configuration"].Required);
+        Assert.Equal("string", trigger.Call.Inputs["configuration"].Type);
+        Assert.Equal("boolean", trigger.Call.Inputs["publish"].Type);
+        Assert.Equal("false", trigger.Call.Inputs["publish"].Default);
+        Assert.Equal(["nuget-token"], trigger.Call.Secrets.Keys);
+        Assert.False(trigger.Call.Secrets["nuget-token"].Required);
+        Assert.Equal(["package-path"], trigger.Call.Outputs.Keys);
+        Assert.Equal("${{ jobs.build.outputs.package-path }}", trigger.Call.Outputs["package-path"].Value);
+        Assert.True(result.Workflow.IsReusableOnly);
+    }
+
+    [Fact]
+    public void Parse_RejectsInvalidWorkflowCallContract()
+    {
+        var result = Parse(
+            """
+            name: Reusable Build
+            on:
+              workflow_call:
+                inputs:
+                  configuration:
+                    required: maybe
+                    default: true
+                  publish:
+                    type: boolean
+                    default: maybe
+                  retries:
+                    type: number
+                    default: many
+                secrets:
+                  nuget-token:
+                    required: sometimes
+                outputs:
+                  package-path:
+                    description: Missing value
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Build
+                    run: dotnet build
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "workflow.on.workflow_call.inputs.configuration.required must be true or false.");
+        Assert.Contains(result.Errors, error => error == "workflow.on.workflow_call.inputs.configuration.type is required.");
+        Assert.Contains(result.Errors, error => error == "workflow.on.workflow_call.inputs.publish.default must be true or false when type is boolean.");
+        Assert.Contains(result.Errors, error => error == "workflow.on.workflow_call.inputs.retries.default must be a number when type is number.");
+        Assert.Contains(result.Errors, error => error == "workflow.on.workflow_call.secrets.nuget-token.required must be true or false.");
+        Assert.Contains(result.Errors, error => error == "workflow.on.workflow_call.outputs.package-path.value is required.");
+    }
+
+    [Fact]
+    public void Parse_RejectsUnsupportedWorkflowCallTriggerConfigurationKey()
+    {
+        var result = Parse(
+            """
+            name: Reusable Build
+            on:
+              workflow_call:
+                branches:
+                  - main
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Build
+                    run: dotnet build
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(
+            result.Errors,
+            error => error == "workflow.on.workflow_call.branches is not supported in workflow_call reusable workflow definitions.");
+    }
+
+    [Fact]
+    public void Parse_AcceptsWorkflowCallInputsInConditions()
+    {
+        var result = Parse(
+            """
+            name: Reusable Build
+            on:
+              workflow_call:
+                inputs:
+                  configuration:
+                    type: string
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Build
+                    if: "${{ inputs.configuration == 'Release' }}"
+                    run: dotnet build
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
     }
 
     [Fact]

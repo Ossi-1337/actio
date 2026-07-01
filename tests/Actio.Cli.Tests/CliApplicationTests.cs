@@ -557,6 +557,40 @@ public sealed class CliApplicationTests : IDisposable
     }
 
     [Fact]
+    public void Run_ReturnsValidationErrorForReusableOnlyWorkflow()
+    {
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "reusable.yml"),
+            """
+            name: Reusable Build
+            on:
+              workflow_call:
+                inputs:
+                  configuration:
+                    type: string
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Build
+                    run: dotnet build
+            """);
+
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var executor = new FakeWorkflowExecutor(new WorkflowExecutionResult(WorkflowExecutionStatus.Success, 0, 0, []));
+        var exitCode = CreateApplication(executor).Run(["reusable.yml"], _root, output, error);
+
+        Assert.Equal(ExitCodes.ValidationError, exitCode);
+        Assert.Contains("Workflow 'Reusable Build' is reusable through workflow_call and cannot be run directly yet.", error.ToString());
+        Assert.Contains("Reusable workflow caller jobs are planned for a later milestone.", error.ToString());
+        Assert.DoesNotContain("Workflow validation failed:", error.ToString());
+        Assert.Equal(string.Empty, output.ToString());
+        Assert.Null(executor.Workflow);
+    }
+
+    [Fact]
     public void Run_PrintsFailureSummaryForFailedExecution()
     {
         File.WriteAllText(

@@ -18,6 +18,9 @@ public sealed record WorkflowDocument(
     public WorkflowRunDefaults Defaults { get; init; } = Defaults ?? WorkflowRunDefaults.Empty;
 
     public int StepCount => Jobs.Values.Sum(job => job.Steps.Count);
+
+    public bool IsReusableOnly => Triggers.Count > 0
+        && Triggers.All(trigger => string.Equals(trigger.EventName, "workflow_call", StringComparison.Ordinal));
 }
 
 public sealed record WorkflowTrigger(
@@ -25,12 +28,15 @@ public sealed record WorkflowTrigger(
     WorkflowTriggerValue? Configuration,
     WorkflowTriggerFilters? Filters = null,
     WorkflowDispatch? Dispatch = null,
+    WorkflowCall? Call = null,
     IReadOnlyList<WorkflowSchedule>? Schedules = null,
     IReadOnlyList<string>? ActivityTypes = null)
 {
     public WorkflowTriggerFilters Filters { get; init; } = Filters ?? WorkflowTriggerFilters.Empty;
 
     public WorkflowDispatch Dispatch { get; init; } = Dispatch ?? WorkflowDispatch.Empty;
+
+    public WorkflowCall Call { get; init; } = Call ?? WorkflowCall.Empty;
 
     public IReadOnlyList<WorkflowSchedule> Schedules { get; init; } = Schedules ?? [];
 
@@ -50,6 +56,34 @@ public sealed record WorkflowDispatchInput(
     string? Default,
     string Type,
     IReadOnlyList<string> Options);
+
+public sealed record WorkflowCall(
+    IReadOnlyDictionary<string, WorkflowCallInput> Inputs,
+    IReadOnlyDictionary<string, WorkflowCallSecret> Secrets,
+    IReadOnlyDictionary<string, WorkflowCallOutput> Outputs)
+{
+    public static WorkflowCall Empty { get; } = new(
+        new Dictionary<string, WorkflowCallInput>(),
+        new Dictionary<string, WorkflowCallSecret>(),
+        new Dictionary<string, WorkflowCallOutput>());
+}
+
+public sealed record WorkflowCallInput(
+    string Name,
+    string? Description,
+    bool Required,
+    string? Default,
+    string Type);
+
+public sealed record WorkflowCallSecret(
+    string Name,
+    string? Description,
+    bool Required);
+
+public sealed record WorkflowCallOutput(
+    string Name,
+    string? Description,
+    string Value);
 
 public sealed record WorkflowSchedule(string Cron);
 

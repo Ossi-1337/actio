@@ -129,6 +129,13 @@ public sealed class CliApplication
         WriteWarnings(error, parseResult.Warnings);
 
         var workflow = parseResult.Workflow!;
+        if (workflow.IsReusableOnly)
+        {
+            error.WriteLine($"Workflow '{workflow.Name}' is reusable through workflow_call and cannot be run directly yet.");
+            error.WriteLine("Reusable workflow caller jobs are planned for a later milestone.");
+            return ExitCodes.ValidationError;
+        }
+
         var inputResolution = WorkflowDispatchInputResolver.Resolve(workflow, command.Inputs);
         if (!inputResolution.Success)
         {
