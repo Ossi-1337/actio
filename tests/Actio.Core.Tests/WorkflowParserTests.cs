@@ -119,6 +119,131 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
+    public void Parse_PreservesWorkflowAndJobPermissionsMetadata()
+    {
+        var result = Parse(
+            """
+            name: CI
+            permissions:
+              contents: read
+              checks: write
+            jobs:
+              publish:
+                permissions:
+                  packages: write
+                  id-token: write
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Publish
+                    run: dotnet nuget push
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal(WorkflowPermissions.ScopedMode, result.Workflow!.Permissions.Mode);
+        Assert.Equal("read", result.Workflow.Permissions.Scopes["contents"]);
+        Assert.Equal("write", result.Workflow.Permissions.Scopes["checks"]);
+        var job = result.Workflow.Jobs["publish"];
+        Assert.Equal("write", job.Permissions.Scopes["packages"]);
+        Assert.Equal("write", job.Permissions.Scopes["id-token"]);
+        Assert.True(job.Permissions.ExpectsGitHubToken);
+        Assert.True(job.Permissions.RequestsOidcToken);
+        Assert.Contains(result.Warnings, warning => warning.Contains("workflow.permissions", StringComparison.OrdinalIgnoreCase) && warning.Contains("GITHUB_TOKEN", StringComparison.Ordinal));
+        Assert.Contains(result.Warnings, warning => warning.Contains("workflow.jobs.publish.permissions", StringComparison.OrdinalIgnoreCase) && warning.Contains("GITHUB_TOKEN", StringComparison.Ordinal));
+        Assert.Contains(result.Warnings, warning => warning.Contains("workflow.jobs.publish.permissions.id-token", StringComparison.OrdinalIgnoreCase) && warning.Contains("OIDC", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Parse_AcceptsPermissionsNoneWithoutTokenWarning()
+    {
+        var result = Parse(
+            """
+            name: CI
+            permissions: {}
+            jobs:
+              test:
+                permissions:
+                  contents: none
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal(WorkflowPermissions.NoneMode, result.Workflow!.Permissions.Mode);
+        Assert.Equal("none", result.Workflow.Jobs["test"].Permissions.Scopes["contents"]);
+        Assert.DoesNotContain(result.Warnings, warning => warning.Contains("GITHUB_TOKEN", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Parse_TreatsIdTokenPermissionAsOidcOnly()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              deploy:
+                permissions:
+                  id-token: write
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Deploy
+                    run: ./deploy.sh
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var permissions = result.Workflow!.Jobs["deploy"].Permissions;
+        Assert.False(permissions.ExpectsGitHubToken);
+        Assert.True(permissions.RequestsOidcToken);
+        Assert.DoesNotContain(result.Warnings, warning => warning.Contains("GITHUB_TOKEN", StringComparison.Ordinal));
+        Assert.Contains(result.Warnings, warning => warning.Contains("workflow.jobs.deploy.permissions.id-token", StringComparison.OrdinalIgnoreCase) && warning.Contains("OIDC", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Parse_RejectsInvalidPermissionValues()
+    {
+        var result = Parse(
+            """
+            name: CI
+            permissions: admin
+            jobs:
+              test:
+                permissions:
+                  contents: admin
+                  checks:
+                    access: read
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "workflow.permissions must be 'read-all', 'write-all', or a mapping.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.permissions.contents must be 'read', 'write', or 'none'.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.permissions.checks must be 'read', 'write', or 'none'.");
+    }
+
+    [Fact]
+    public void Parse_RejectsGithubTokenContextWithLocalTokenGuidance()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                if: "${{ github.token != '' }}"
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error.Contains("Actio does not create GitHub's automatic GITHUB_TOKEN", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Parse_ValidatesTopLevelCompatibilityKeywordShapes()
     {
         var result = Parse(

@@ -7,6 +7,18 @@ namespace Actio.Engine.Execution;
 
 internal static class ExecutionExpressionContexts
 {
+    private const string MissingAutomaticGitHubTokenMessage = "Actio does not create GitHub's automatic GITHUB_TOKEN in local runs. Configure a local secret named GITHUB_TOKEN through .actio/secrets.env or ACTIO_SECRET_GITHUB_TOKEN when a workflow step or action needs a token.";
+
+    private static readonly IReadOnlyDictionary<string, string> GitHubMissingPropertyMessages = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["github.token"] = MissingAutomaticGitHubTokenMessage
+    };
+
+    private static readonly IReadOnlyDictionary<string, string> SecretsMissingPropertyMessages = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["secrets.GITHUB_TOKEN"] = MissingAutomaticGitHubTokenMessage
+    };
+
     public static ExpressionContextData ForJob(
         WorkflowDocument workflow,
         WorkflowJob job,
@@ -98,7 +110,7 @@ internal static class ExecutionExpressionContexts
         return new ExpressionContextData(
             CreateUnavailableRoots(includeVariables: false, includeSecrets: false)
                 .Prepend(ExpressionContextRoot.AvailableRoot("inputs", ExpressionContextData.FromStrings(options.RunTrigger.Inputs), allowMissingProperties: false, includeInSafeSnapshot: false))
-                .Prepend(ExpressionContextRoot.AvailableRoot("secrets", ExpressionContextData.FromStrings(options.Secrets), allowMissingProperties: false, includeInSafeSnapshot: false))
+                .Prepend(CreateSecretsRoot(options.Secrets))
                 .Prepend(ExpressionContextRoot.AvailableRoot("vars", ExpressionContextData.FromStrings(options.Variables), allowMissingProperties: false, includeInSafeSnapshot: false)),
             options.ProjectRoot);
     }
@@ -123,10 +135,10 @@ internal static class ExecutionExpressionContexts
     {
         var roots = new List<ExpressionContextRoot>
         {
-            ExpressionContextRoot.AvailableRoot("github", CreateGitHubContext(workflowName, projectRoot, runId, runTrigger, job.Name), includeInSafeSnapshot: false),
+            ExpressionContextRoot.AvailableRoot("github", CreateGitHubContext(workflowName, projectRoot, runId, runTrigger, job.Name), includeInSafeSnapshot: false, missingPropertyMessages: GitHubMissingPropertyMessages),
             ExpressionContextRoot.AvailableRoot("env", ExpressionContextData.FromStrings(env), allowMissingProperties: true, includeInSafeSnapshot: false),
             ExpressionContextRoot.AvailableRoot("vars", ExpressionContextData.FromStrings(variables), allowMissingProperties: false, includeInSafeSnapshot: false),
-            ExpressionContextRoot.AvailableRoot("secrets", ExpressionContextData.FromStrings(secrets), allowMissingProperties: false, includeInSafeSnapshot: false),
+            CreateSecretsRoot(secrets),
             ExpressionContextRoot.AvailableRoot("job", CreateJobContext(job, jobStatus), includeInSafeSnapshot: true),
             ExpressionContextRoot.AvailableRoot("matrix", ExpressionContextData.FromStrings(job.Matrix), allowMissingProperties: true, includeInSafeSnapshot: true),
             ExpressionContextRoot.AvailableRoot("runner", CreateRunnerContext(job.RunsOn), includeInSafeSnapshot: true),
@@ -164,6 +176,16 @@ internal static class ExecutionExpressionContexts
             ["triggering_actor"] = actor,
             ["event"] = CreateEventContext(runTrigger.EventPayload)
         };
+    }
+
+    private static ExpressionContextRoot CreateSecretsRoot(IReadOnlyDictionary<string, string> secrets)
+    {
+        return ExpressionContextRoot.AvailableRoot(
+            "secrets",
+            ExpressionContextData.FromStrings(secrets),
+            allowMissingProperties: false,
+            includeInSafeSnapshot: false,
+            missingPropertyMessages: SecretsMissingPropertyMessages);
     }
 
     private static JsonObject CreateEventContext(WorkflowEventPayload eventPayload)

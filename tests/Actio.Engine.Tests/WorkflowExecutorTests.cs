@@ -1963,6 +1963,62 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_FailsClearlyWhenActionWithReferencesMissingGithubToken()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-action-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(projectRoot, ".actio", "actions", "secure"));
+        await File.WriteAllTextAsync(
+            Path.Combine(projectRoot, ".actio", "actions", "secure", "action.yml"),
+            """
+            name: Secure
+            inputs:
+              token:
+                required: true
+            runs:
+              using: composite
+              steps:
+                - name: Use token
+                  run: echo ready
+            """);
+
+        try
+        {
+            var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+            var workflow = CreateWorkflow(
+                new WorkflowJob(
+                    "test",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [
+                        new WorkflowStep(
+                            "Use secure action",
+                            null,
+                            "./.actio/actions/secure",
+                            With: new Dictionary<string, string>
+                            {
+                                ["token"] = "${{ secrets.GITHUB_TOKEN }}"
+                            })
+                    ]));
+
+            var result = await new WorkflowExecutor(runner).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.False(result.Success);
+            Assert.Empty(runner.Requests);
+            Assert.Contains(result.Errors, error => error.Contains("Actio does not create GitHub's automatic GITHUB_TOKEN", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ExecuteAsync_PropagatesCompositeActionOutputs()
     {
         var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-action-tests-{Guid.NewGuid():N}");
@@ -3458,6 +3514,7 @@ public sealed class WorkflowExecutorTests
         Assert.Equal(actor, environment["GITHUB_TRIGGERING_ACTOR"]);
         Assert.Equal(workflowName, environment["GITHUB_WORKFLOW"]);
         Assert.Equal("/workspace", environment["GITHUB_WORKSPACE"]);
+        Assert.False(environment.ContainsKey("GITHUB_TOKEN"));
         Assert.False(string.IsNullOrWhiteSpace(environment["RUNNER_ARCH"]));
         Assert.Equal("docker", environment["RUNNER_ENVIRONMENT"]);
         Assert.Equal("ubuntu-latest", environment["RUNNER_NAME"]);

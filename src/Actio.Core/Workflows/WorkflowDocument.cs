@@ -5,7 +5,8 @@ public sealed record WorkflowDocument(
     IReadOnlyDictionary<string, string> Env,
     IReadOnlyDictionary<string, WorkflowJob> Jobs,
     IReadOnlyList<WorkflowTrigger> Triggers,
-    WorkflowRunDefaults? Defaults = null)
+    WorkflowRunDefaults? Defaults = null,
+    WorkflowPermissions? Permissions = null)
 {
     public WorkflowDocument(
         string name,
@@ -16,6 +17,8 @@ public sealed record WorkflowDocument(
     }
 
     public WorkflowRunDefaults Defaults { get; init; } = Defaults ?? WorkflowRunDefaults.Empty;
+
+    public WorkflowPermissions Permissions { get; init; } = Permissions ?? WorkflowPermissions.Unspecified;
 
     public int StepCount => Jobs.Values.Sum(job => job.ExecutionStepCount);
 
@@ -99,6 +102,37 @@ public sealed record WorkflowRunDefaults(
             other.Shell ?? Shell,
             other.WorkingDirectory ?? WorkingDirectory);
     }
+}
+
+public sealed record WorkflowPermissions(
+    string Mode,
+    IReadOnlyDictionary<string, string> Scopes)
+{
+    public const string UnspecifiedMode = "unspecified";
+    public const string NoneMode = "none";
+    public const string ScopedMode = "scoped";
+    public const string ReadAllMode = "read-all";
+    public const string WriteAllMode = "write-all";
+
+    public static WorkflowPermissions Unspecified { get; } = new(
+        UnspecifiedMode,
+        new Dictionary<string, string>());
+
+    public static WorkflowPermissions None { get; } = new(
+        NoneMode,
+        new Dictionary<string, string>());
+
+    public bool IsSpecified => !string.Equals(Mode, UnspecifiedMode, StringComparison.Ordinal);
+
+    public bool ExpectsGitHubToken =>
+        string.Equals(Mode, ReadAllMode, StringComparison.Ordinal) ||
+        string.Equals(Mode, WriteAllMode, StringComparison.Ordinal) ||
+        Scopes.Any(scope => !string.Equals(scope.Key, "id-token", StringComparison.Ordinal) &&
+            scope.Value is "read" or "write");
+
+    public bool RequestsOidcToken =>
+        Scopes.TryGetValue("id-token", out var value) &&
+        string.Equals(value, "write", StringComparison.Ordinal);
 }
 
 public sealed record WorkflowJobConcurrency(
@@ -295,7 +329,8 @@ public sealed record WorkflowJob
         IReadOnlyList<WorkflowStep> steps,
         WorkflowJobContainer? container = null,
         IReadOnlyDictionary<string, WorkflowJobService>? services = null,
-        WorkflowJobCall? call = null)
+        WorkflowJobCall? call = null,
+        WorkflowPermissions? permissions = null)
     {
         Name = name;
         BaseName = name;
@@ -317,6 +352,7 @@ public sealed record WorkflowJob
         Artifacts = artifacts;
         Steps = steps;
         Call = call;
+        Permissions = permissions ?? WorkflowPermissions.Unspecified;
     }
 
     public string Name { get; init; }
@@ -358,6 +394,8 @@ public sealed record WorkflowJob
     public IReadOnlyList<WorkflowStep> Steps { get; init; }
 
     public WorkflowJobCall? Call { get; init; }
+
+    public WorkflowPermissions Permissions { get; init; }
 
     public bool IsReusableWorkflowCall => Call is not null;
 

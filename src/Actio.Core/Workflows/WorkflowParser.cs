@@ -25,6 +25,7 @@ public sealed partial class WorkflowParser
         "needs",
         "if",
         "runs-on",
+        "permissions",
         "env",
         "defaults",
         "container",
@@ -195,6 +196,38 @@ public sealed partial class WorkflowParser
         "sh"
     };
 
+    private static readonly HashSet<string> SupportedPermissionModes = new(StringComparer.Ordinal)
+    {
+        WorkflowPermissions.ReadAllMode,
+        WorkflowPermissions.WriteAllMode
+    };
+
+    private static readonly HashSet<string> SupportedPermissionValues = new(StringComparer.Ordinal)
+    {
+        "none",
+        "read",
+        "write"
+    };
+
+    private static readonly HashSet<string> KnownPermissionScopes = new(StringComparer.Ordinal)
+    {
+        "actions",
+        "attestations",
+        "checks",
+        "contents",
+        "deployments",
+        "discussions",
+        "id-token",
+        "issues",
+        "models",
+        "packages",
+        "pages",
+        "pull-requests",
+        "repository-projects",
+        "security-events",
+        "statuses"
+    };
+
     private static readonly HashSet<string> JobConcurrencyKeys = new(StringComparer.Ordinal)
     {
         "group",
@@ -280,6 +313,7 @@ public sealed partial class WorkflowParser
         var name = ReadRequiredScalar(errors, root, "name", "workflow.name");
         var env = ReadOptionalStringMap(errors, root, "env", "workflow.env");
         var defaults = ReadRunDefaults(errors, root, "defaults", "workflow.defaults");
+        var permissions = ReadPermissions(errors, warnings, root, "permissions", "workflow.permissions");
         var jobs = ReadJobs(errors, warnings, root);
         ValidateConditions(errors, jobs, triggers);
 
@@ -288,7 +322,7 @@ public sealed partial class WorkflowParser
             return WorkflowParseResult.Failed(errors, warnings);
         }
 
-        return WorkflowParseResult.Parsed(new WorkflowDocument(name!, env, jobs, triggers, defaults), warnings);
+        return WorkflowParseResult.Parsed(new WorkflowDocument(name!, env, jobs, triggers, defaults, permissions), warnings);
     }
 
     private static IReadOnlyDictionary<string, WorkflowJob> ReadJobs(
@@ -341,6 +375,7 @@ public sealed partial class WorkflowParser
                 : null;
             var env = ReadOptionalStringMap(errors, jobMap, "env", $"workflow.jobs.{jobName}.env");
             var defaults = ReadRunDefaults(errors, jobMap, "defaults", $"workflow.jobs.{jobName}.defaults");
+            var permissions = ReadPermissions(errors, warnings, jobMap, "permissions", $"workflow.jobs.{jobName}.permissions");
             var container = ReadJobContainer(errors, jobMap, jobName);
             var services = ReadJobServices(errors, jobMap, jobName);
             var timeoutMinutes = ReadOptionalPositiveInt(errors, jobMap, "timeout-minutes", $"workflow.jobs.{jobName}.timeout-minutes");
@@ -373,7 +408,8 @@ public sealed partial class WorkflowParser
                     artifacts,
                     steps,
                     container,
-                    services);
+                    services,
+                    permissions: permissions);
             }
             else if (uses is not null)
             {
@@ -392,7 +428,8 @@ public sealed partial class WorkflowParser
                     new Dictionary<string, string>(),
                     [],
                     [],
-                    call: new WorkflowJobCall(uses, with, secrets));
+                    call: new WorkflowJobCall(uses, with, secrets),
+                    permissions: permissions);
             }
         }
 
@@ -764,7 +801,6 @@ public sealed partial class WorkflowParser
             "run-name",
             "workflow.run-name",
             "workflow.run-name is accepted for GitHub Actions compatibility but Actio does not use it as the run display name yet.");
-        ValidatePermissionsCompatibility(errors, warnings, root);
         ValidateCompatibilityStringOrMapping(
             errors,
             warnings,
@@ -1434,36 +1470,124 @@ public sealed partial class WorkflowParser
             "workflow.on is parsed as trigger metadata, but Actio still runs workflows only when invoked locally.");
     }
 
-    private static void ValidatePermissionsCompatibility(
+    private static WorkflowPermissions ReadPermissions(
         List<string> errors,
         List<string> warnings,
-        YamlMappingNode root)
+        YamlMappingNode map,
+        string key,
+        string path)
     {
-        if (!TryGet(root, "permissions", out var node))
+        if (!TryGet(map, key, out var node))
         {
-            return;
+            return WorkflowPermissions.Unspecified;
         }
 
-        var path = "workflow.permissions";
         if (node is YamlScalarNode scalar)
         {
-            if (ReadScalarValue(errors, scalar, path) is not null)
+            var value = ReadScalarValue(errors, scalar, path);
+            if (value is null)
             {
-                warnings.Add("workflow.permissions is accepted for GitHub Actions compatibility but Actio does not create or enforce GITHUB_TOKEN permissions.");
+                return WorkflowPermissions.Unspecified;
             }
 
-            return;
+            if (!SupportedPermissionModes.Contains(value))
+            {
+                errors.Add($"{path} must be 'read-all', 'write-all', or a mapping.");
+                return WorkflowPermissions.Unspecified;
+            }
+
+            var permissions = new WorkflowPermissions(value, new Dictionary<string, string>());
+            AddPermissionsWarnings(warnings, path, permissions);
+            return permissions;
         }
 
-        if (node is YamlMappingNode map)
+        if (node is YamlMappingNode permissionsMap)
         {
-            var errorCount = errors.Count;
-            ValidateScalarMap(errors, map, path);
-            AddWarningIfNoNewErrors(errors, errorCount, warnings, "workflow.permissions is accepted for GitHub Actions compatibility but Actio does not create or enforce GITHUB_TOKEN permissions.");
-            return;
+            return ReadPermissionsMap(errors, warnings, permissionsMap, path);
         }
 
         errors.Add($"{path} must be a string or a mapping.");
+        return WorkflowPermissions.Unspecified;
+    }
+
+    private static WorkflowPermissions ReadPermissionsMap(
+        List<string> errors,
+        List<string> warnings,
+        YamlMappingNode map,
+        string path)
+    {
+        if (map.Children.Count == 0)
+        {
+            return WorkflowPermissions.None;
+        }
+
+        var originalErrorCount = errors.Count;
+        var scopes = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var (keyNode, valueNode) in map.Children)
+        {
+            var scope = ReadMapKey(errors, keyNode, path);
+            if (scope is null)
+            {
+                continue;
+            }
+
+            var scopePath = $"{path}.{scope}";
+            if (valueNode is not YamlScalarNode scalar)
+            {
+                errors.Add($"{scopePath} must be 'read', 'write', or 'none'.");
+                continue;
+            }
+
+            var value = ReadScalarValue(errors, scalar, scopePath);
+            if (value is null)
+            {
+                continue;
+            }
+
+            if (!SupportedPermissionValues.Contains(value))
+            {
+                errors.Add($"{scopePath} must be 'read', 'write', or 'none'.");
+                continue;
+            }
+
+            if (!KnownPermissionScopes.Contains(scope))
+            {
+                warnings.Add($"{scopePath} is not a known GitHub permission scope. Actio stores it as local metadata.");
+            }
+
+            scopes[scope] = value;
+        }
+
+        if (errors.Count != originalErrorCount)
+        {
+            return WorkflowPermissions.Unspecified;
+        }
+
+        var permissions = new WorkflowPermissions(WorkflowPermissions.ScopedMode, scopes);
+        AddPermissionsWarnings(warnings, path, permissions);
+        return permissions;
+    }
+
+    private static void AddPermissionsWarnings(
+        List<string> warnings,
+        string path,
+        WorkflowPermissions permissions)
+    {
+        if (!permissions.IsSpecified || string.Equals(permissions.Mode, WorkflowPermissions.NoneMode, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (permissions.ExpectsGitHubToken)
+        {
+            warnings.Add($"{path} is parsed as local metadata, but Actio does not create, inject, or enforce GitHub's automatic GITHUB_TOKEN. Use an explicit local secret such as secrets.GITHUB_TOKEN when a workflow step or action needs a token.");
+        }
+
+        if (permissions.RequestsOidcToken)
+        {
+            warnings.Add($"{path}.id-token requests OIDC token access, but Actio does not issue OIDC tokens in local runs.");
+        }
     }
 
     private static void ValidateCompatibilityScalar(
@@ -2489,6 +2613,12 @@ public sealed partial class WorkflowParser
         if (reference.Path.Count == 1 &&
             reference.Path[0] is "event_name" or "workflow" or "workspace" or "run_id" or "job" or "actor" or "triggering_actor")
         {
+            return;
+        }
+
+        if (reference.Path.Count == 1 && string.Equals(reference.Path[0], "token", StringComparison.Ordinal))
+        {
+            errors.Add($"{path} references github.token, but Actio does not create GitHub's automatic GITHUB_TOKEN in local runs. Use an explicit local secret such as secrets.GITHUB_TOKEN when a workflow needs a token.");
             return;
         }
 

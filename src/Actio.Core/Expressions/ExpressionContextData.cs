@@ -47,6 +47,11 @@ public sealed class ExpressionContextData
                     continue;
                 }
 
+                if (root.MissingPropertyMessages.TryGetValue(currentPath, out var missingPropertyMessage))
+                {
+                    return ExpressionReferenceResolution.Failed(missingPropertyMessage);
+                }
+
                 return root.AllowMissingProperties
                     ? ExpressionReferenceResolution.Resolved(ExpressionValue.Null)
                     : ExpressionReferenceResolution.Failed($"Expression context '{currentPath}' is not available in local Actio runs.");
@@ -87,13 +92,15 @@ public sealed record ExpressionContextRoot(
     bool AllowMissingProperties,
     bool IncludeInSafeSnapshot,
     bool Available,
-    string? UnavailableMessage)
+    string? UnavailableMessage,
+    IReadOnlyDictionary<string, string> MissingPropertyMessages)
 {
     public static ExpressionContextRoot AvailableRoot(
         string name,
         JsonNode? value,
         bool allowMissingProperties = false,
-        bool includeInSafeSnapshot = true)
+        bool includeInSafeSnapshot = true,
+        IReadOnlyDictionary<string, string>? missingPropertyMessages = null)
     {
         return new ExpressionContextRoot(
             name,
@@ -101,7 +108,8 @@ public sealed record ExpressionContextRoot(
             allowMissingProperties,
             includeInSafeSnapshot,
             true,
-            null);
+            null,
+            missingPropertyMessages ?? new Dictionary<string, string>());
     }
 
     public static ExpressionContextRoot UnavailableRoot(
@@ -115,6 +123,7 @@ public sealed record ExpressionContextRoot(
             false,
             includeInSafeSnapshot,
             false,
-            message);
+            message,
+            new Dictionary<string, string>());
     }
 }
