@@ -3,6 +3,7 @@ using Actio.Core.Workflows;
 using Actio.Engine.Actions;
 using Actio.Engine.Execution;
 using Actio.Engine.Runs;
+using Actio.Storage;
 
 namespace Actio.Cli.Tests;
 
@@ -234,6 +235,57 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Equal("false", result.Executor.Options.RunTrigger.Inputs["dry-run"]);
         Assert.Equal("staging", result.Executor.Options.RunTrigger.EventPayload.Inputs["environment"]);
         Assert.Equal("false", result.Executor.Options.RunTrigger.EventPayload.Inputs["dry-run"]);
+    }
+
+    [Fact]
+    public void Run_LoadsLocalVarsAndSecretsIntoExecutionOptions()
+    {
+        Directory.CreateDirectory(Path.Combine(_root, ".actio"));
+        File.WriteAllText(Path.Combine(_root, ".actio", "vars.env"), "BUILD_CONFIGURATION=Release");
+        File.WriteAllText(Path.Combine(_root, ".actio", "secrets.env"), "NUGET_TOKEN=local-secret");
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        var result = RunWithFakeExecutor(["ci.yml"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Equal("Release", result.Executor.Options!.Variables["BUILD_CONFIGURATION"]);
+        Assert.Equal("local-secret", result.Executor.Options.Secrets["NUGET_TOKEN"]);
+        Assert.Equal(string.Empty, result.Error);
+    }
+
+    [Fact]
+    public void Run_ReturnsValidationErrorForInvalidLocalValueFile()
+    {
+        Directory.CreateDirectory(Path.Combine(_root, ".actio"));
+        File.WriteAllText(Path.Combine(_root, ".actio", "secrets.env"), "1BAD=value");
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        var result = RunWithFakeExecutor(["ci.yml"]);
+
+        Assert.Equal(ExitCodes.ValidationError, result.ExitCode);
+        Assert.Contains("Workflow validation failed:", result.Error);
+        Assert.Contains("invalid secret name '1BAD'", result.Error);
+        Assert.Null(result.Executor.Options);
     }
 
     [Fact]
@@ -901,6 +953,7 @@ public sealed class CliApplicationTests : IDisposable
         ILocalWebServerLauncher? launcher = null,
         IActionCache? actionCache = null,
         CliOutputFormatter? outputFormatter = null,
+        FileSystemLocalValueProvider? localValueProvider = null,
         Func<string>? createRunId = null)
     {
         return new CliApplication(
@@ -910,6 +963,7 @@ public sealed class CliApplicationTests : IDisposable
             webServerLauncher: launcher ?? new FakeWebServerLauncher(null),
             actionCache: actionCache,
             outputFormatter: outputFormatter,
+            localValueProvider: localValueProvider,
             createRunId: createRunId ?? (() => "run-1"));
     }
 

@@ -13,6 +13,7 @@ internal static class ExecutionExpressionContexts
         WorkflowExecutionOptions options,
         string runId,
         IReadOnlyDictionary<string, string> env,
+        IReadOnlyDictionary<string, string> variables,
         IReadOnlyDictionary<string, string> secrets,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
         IReadOnlyDictionary<string, string> jobStatuses)
@@ -24,6 +25,7 @@ internal static class ExecutionExpressionContexts
             runId,
             options.RunTrigger,
             env,
+            variables,
             secrets,
             options.RunTrigger.Inputs,
             jobOutputs,
@@ -42,6 +44,7 @@ internal static class ExecutionExpressionContexts
         string runId,
         WorkflowRunTrigger runTrigger,
         IReadOnlyDictionary<string, string> env,
+        IReadOnlyDictionary<string, string> variables,
         IReadOnlyDictionary<string, string> secrets,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
         IReadOnlyDictionary<string, string> jobStatuses,
@@ -55,6 +58,7 @@ internal static class ExecutionExpressionContexts
             runId,
             runTrigger,
             env,
+            variables,
             secrets,
             runTrigger.Inputs,
             jobOutputs,
@@ -89,6 +93,16 @@ internal static class ExecutionExpressionContexts
             workspaceRoot);
     }
 
+    public static ExpressionContextData ForWorkflowCallValues(WorkflowExecutionOptions options)
+    {
+        return new ExpressionContextData(
+            CreateUnavailableRoots(includeVariables: false, includeSecrets: false)
+                .Prepend(ExpressionContextRoot.AvailableRoot("inputs", ExpressionContextData.FromStrings(options.RunTrigger.Inputs), allowMissingProperties: false, includeInSafeSnapshot: false))
+                .Prepend(ExpressionContextRoot.AvailableRoot("secrets", ExpressionContextData.FromStrings(options.Secrets), allowMissingProperties: false, includeInSafeSnapshot: false))
+                .Prepend(ExpressionContextRoot.AvailableRoot("vars", ExpressionContextData.FromStrings(options.Variables), allowMissingProperties: false, includeInSafeSnapshot: false)),
+            options.ProjectRoot);
+    }
+
     private static ExpressionContextData Create(
         string workflowName,
         WorkflowJob job,
@@ -96,6 +110,7 @@ internal static class ExecutionExpressionContexts
         string runId,
         WorkflowRunTrigger runTrigger,
         IReadOnlyDictionary<string, string> env,
+        IReadOnlyDictionary<string, string> variables,
         IReadOnlyDictionary<string, string> secrets,
         IReadOnlyDictionary<string, string> inputs,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
@@ -110,6 +125,8 @@ internal static class ExecutionExpressionContexts
         {
             ExpressionContextRoot.AvailableRoot("github", CreateGitHubContext(workflowName, projectRoot, runId, runTrigger, job.Name), includeInSafeSnapshot: false),
             ExpressionContextRoot.AvailableRoot("env", ExpressionContextData.FromStrings(env), allowMissingProperties: true, includeInSafeSnapshot: false),
+            ExpressionContextRoot.AvailableRoot("vars", ExpressionContextData.FromStrings(variables), allowMissingProperties: false, includeInSafeSnapshot: false),
+            ExpressionContextRoot.AvailableRoot("secrets", ExpressionContextData.FromStrings(secrets), allowMissingProperties: false, includeInSafeSnapshot: false),
             ExpressionContextRoot.AvailableRoot("job", CreateJobContext(job, jobStatus), includeInSafeSnapshot: true),
             ExpressionContextRoot.AvailableRoot("matrix", ExpressionContextData.FromStrings(job.Matrix), allowMissingProperties: true, includeInSafeSnapshot: true),
             ExpressionContextRoot.AvailableRoot("runner", CreateRunnerContext(job.RunsOn), includeInSafeSnapshot: true),
@@ -118,18 +135,12 @@ internal static class ExecutionExpressionContexts
             ExpressionContextRoot.AvailableRoot("inputs", ExpressionContextData.FromStrings(inputs), allowMissingProperties: true, includeInSafeSnapshot: false)
         };
 
-        var hasSecrets = secrets.Count > 0;
-        if (hasSecrets)
-        {
-            roots.Add(ExpressionContextRoot.AvailableRoot("secrets", ExpressionContextData.FromStrings(secrets), allowMissingProperties: true, includeInSafeSnapshot: false));
-        }
-
         if (step is not null)
         {
             roots.Add(ExpressionContextRoot.AvailableRoot("step", CreateStepContext(step), includeInSafeSnapshot: true));
         }
 
-        roots.AddRange(CreateUnavailableRoots(includeSecrets: !hasSecrets));
+        roots.AddRange(CreateUnavailableRoots(includeVariables: false, includeSecrets: false));
         return new ExpressionContextData(roots, projectRoot);
     }
 
@@ -260,9 +271,15 @@ internal static class ExecutionExpressionContexts
         return steps;
     }
 
-    private static IEnumerable<ExpressionContextRoot> CreateUnavailableRoots(bool includeSecrets = true)
+    private static IEnumerable<ExpressionContextRoot> CreateUnavailableRoots(
+        bool includeVariables = true,
+        bool includeSecrets = true)
     {
-        yield return ExpressionContextRoot.UnavailableRoot("vars", "Expression context 'vars' is not available until a local vars provider is implemented.");
+        if (includeVariables)
+        {
+            yield return ExpressionContextRoot.UnavailableRoot("vars", "Expression context 'vars' is not available until a local vars provider is implemented.");
+        }
+
         if (includeSecrets)
         {
             yield return ExpressionContextRoot.UnavailableRoot("secrets", "Expression context 'secrets' is not available until a local secrets provider is implemented.");

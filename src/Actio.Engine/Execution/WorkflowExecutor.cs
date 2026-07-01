@@ -266,6 +266,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                     options,
                     runId,
                     MergeEnvironment(workflow.Env, job.Env),
+                    options.Variables,
                     options.Secrets,
                     contextJobOutputs,
                     contextJobStatuses),
@@ -312,6 +313,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             contextJobOutputs,
             contextJobStatuses,
             options.RunTrigger,
+            options.Variables,
             options.Secrets,
             options.ProjectRoot,
             runId,
@@ -431,7 +433,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 failedSteps: 1);
         }
 
-        var binding = BindReusableWorkflowCall(job, workflowCall, calleePath);
+        var binding = BindReusableWorkflowCall(job, workflowCall, calleePath, options);
         if (!binding.Success)
         {
             return CreateReusableWorkflowCallOutcome(
@@ -458,7 +460,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 $"workflow.jobs.{job.Name}",
                 binding.Inputs),
             options.ReusableWorkflowCallStack.Append(calleePath).ToArray(),
-            binding.Secrets);
+            Secrets: binding.Secrets,
+            Variables: options.Variables);
         var nestedResult = await nestedExecutor.ExecuteAsync(
             calleeWorkflow,
             nestedOptions,
@@ -549,11 +552,13 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
     private static ReusableWorkflowCallBinding BindReusableWorkflowCall(
         WorkflowJob job,
         WorkflowCall workflowCall,
-        string calleePath)
+        string calleePath,
+        WorkflowExecutionOptions options)
     {
         var errors = new List<string>();
         var inputs = new Dictionary<string, string>(StringComparer.Ordinal);
         var secrets = new Dictionary<string, string>(StringComparer.Ordinal);
+        var expressionContext = ExecutionExpressionContexts.ForWorkflowCallValues(options);
 
         foreach (var input in workflowCall.Inputs.Values)
         {
@@ -571,8 +576,18 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 continue;
             }
 
-            ValidateReusableWorkflowInputValue(errors, job, calleePath, inputContract, input.Value);
-            inputs[input.Key] = input.Value;
+            var inputValue = InterpolateReusableWorkflowCallValue(
+                errors,
+                $"workflow.jobs.{job.Name}.with.{input.Key}",
+                input.Value,
+                expressionContext);
+            if (inputValue is null)
+            {
+                continue;
+            }
+
+            ValidateReusableWorkflowInputValue(errors, job, calleePath, inputContract, inputValue);
+            inputs[input.Key] = inputValue;
         }
 
         foreach (var input in workflowCall.Inputs.Values)
@@ -596,12 +611,22 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 continue;
             }
 
-            secrets[secret.Key] = secret.Value;
+            var secretValue = InterpolateReusableWorkflowCallValue(
+                errors,
+                $"workflow.jobs.{job.Name}.secrets.{secret.Key}",
+                secret.Value,
+                expressionContext);
+            if (secretValue is null)
+            {
+                continue;
+            }
+
+            secrets[secret.Key] = secretValue;
         }
 
         foreach (var secret in workflowCall.Secrets.Values)
         {
-            if (secret.Required && !secrets.ContainsKey(secret.Name))
+            if (secret.Required && (!secrets.TryGetValue(secret.Name, out var value) || value.Length == 0))
             {
                 errors.Add($"{FormatReusableWorkflowLocation(job, calleePath)} requires workflow_call secret '{secret.Name}', but workflow.jobs.{job.Name}.secrets.{secret.Name} is not set.");
             }
@@ -610,6 +635,30 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         return errors.Count == 0
             ? ReusableWorkflowCallBinding.Resolved(inputs, secrets)
             : ReusableWorkflowCallBinding.Failed(errors);
+    }
+
+    private static string? InterpolateReusableWorkflowCallValue(
+        List<string> errors,
+        string path,
+        string value,
+        ExpressionContextData expressionContext)
+    {
+        var interpolation = ExpressionTemplate.Interpolate(
+            value,
+            new ExpressionEvaluationContext(
+                expressionContext.Resolve,
+                workspaceRoot: expressionContext.WorkspaceRoot));
+        if (interpolation.Success)
+        {
+            return interpolation.Value;
+        }
+
+        foreach (var error in interpolation.Errors)
+        {
+            errors.Add($"{path} could not be evaluated: {error}");
+        }
+
+        return null;
     }
 
     private static bool IsSupportedReusableWorkflowPath(string normalizedUses)

@@ -2271,7 +2271,6 @@ public sealed partial class WorkflowParser
         IReadOnlyList<WorkflowTrigger> triggers)
     {
         var workflowInputNames = CollectWorkflowInputNames(triggers);
-        var workflowSecretNames = CollectWorkflowSecretNames(triggers);
 
         foreach (var job in jobs.Values)
         {
@@ -2286,10 +2285,10 @@ public sealed partial class WorkflowParser
                 continue;
             }
 
-            ValidateExpressionReferences(errors, $"workflow.jobs.{job.Name}.if", expression, job, jobs, workflowInputNames, workflowSecretNames, stepIndex: null);
+            ValidateExpressionReferences(errors, $"workflow.jobs.{job.Name}.if", expression, job, jobs, workflowInputNames, stepIndex: null);
         }
 
-        ValidateStepConditions(errors, jobs, workflowInputNames, workflowSecretNames);
+        ValidateStepConditions(errors, jobs, workflowInputNames);
     }
 
     private static IReadOnlySet<string> CollectWorkflowInputNames(IReadOnlyList<WorkflowTrigger> triggers)
@@ -2318,31 +2317,10 @@ public sealed partial class WorkflowParser
         return inputNames;
     }
 
-    private static IReadOnlySet<string> CollectWorkflowSecretNames(IReadOnlyList<WorkflowTrigger> triggers)
-    {
-        var secretNames = new HashSet<string>(StringComparer.Ordinal);
-
-        foreach (var trigger in triggers)
-        {
-            if (!string.Equals(trigger.EventName, "workflow_call", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            foreach (var secretName in trigger.Call.Secrets.Keys)
-            {
-                secretNames.Add(secretName);
-            }
-        }
-
-        return secretNames;
-    }
-
     private static void ValidateStepConditions(
         List<string> errors,
         IReadOnlyDictionary<string, WorkflowJob> jobs,
-        IReadOnlySet<string> workflowInputNames,
-        IReadOnlySet<string> workflowSecretNames)
+        IReadOnlySet<string> workflowInputNames)
     {
         foreach (var job in jobs.Values)
         {
@@ -2361,7 +2339,7 @@ public sealed partial class WorkflowParser
                     continue;
                 }
 
-                ValidateExpressionReferences(errors, path, expression, job, jobs, workflowInputNames, workflowSecretNames, index);
+                ValidateExpressionReferences(errors, path, expression, job, jobs, workflowInputNames, index);
             }
         }
     }
@@ -2399,7 +2377,6 @@ public sealed partial class WorkflowParser
         WorkflowJob job,
         IReadOnlyDictionary<string, WorkflowJob> jobs,
         IReadOnlySet<string> workflowInputNames,
-        IReadOnlySet<string> workflowSecretNames,
         int? stepIndex)
     {
         var seenReferences = new HashSet<string>(StringComparer.Ordinal);
@@ -2429,18 +2406,13 @@ public sealed partial class WorkflowParser
 
             if (string.Equals(reference.Root, "secrets", StringComparison.Ordinal))
             {
-                if (reference.Path.Count != 1)
-                {
-                    errors.Add($"{path} references unsupported expression context '{reference}'.");
-                    continue;
-                }
+                ValidateSingleSegmentReference(errors, path, reference);
+                continue;
+            }
 
-                var secretName = reference.Path[0];
-                if (!workflowSecretNames.Contains(secretName))
-                {
-                    errors.Add($"{path} references secrets.{secretName}, but no workflow_call secret named '{secretName}' is declared.");
-                }
-
+            if (string.Equals(reference.Root, "vars", StringComparison.Ordinal))
+            {
+                ValidateSingleSegmentReference(errors, path, reference);
                 continue;
             }
 
@@ -2645,7 +2617,7 @@ public sealed partial class WorkflowParser
 
     private static bool IsUnavailableContext(string root)
     {
-        return root is "vars" or "secrets" or "strategy";
+        return root is "strategy";
     }
 
     private static void ValidateMatrixReference(

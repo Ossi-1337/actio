@@ -17,6 +17,7 @@ public sealed class CliApplication
     private readonly ILocalWebServerLauncher _webServerLauncher;
     private readonly IActionCache _actionCache;
     private readonly CliOutputFormatter _outputFormatter;
+    private readonly FileSystemLocalValueProvider _localValueProvider;
     private readonly Func<string> _createRunId;
 
     public CliApplication()
@@ -28,6 +29,7 @@ public sealed class CliApplication
             new LocalWebServerLauncher(),
             new FileSystemActionCache(),
             new CliOutputFormatter(),
+            new FileSystemLocalValueProvider(),
             new FileSystemRunStore().CreateRunId)
     {
     }
@@ -40,6 +42,7 @@ public sealed class CliApplication
         ILocalWebServerLauncher? webServerLauncher = null,
         IActionCache? actionCache = null,
         CliOutputFormatter? outputFormatter = null,
+        FileSystemLocalValueProvider? localValueProvider = null,
         Func<string>? createRunId = null)
     {
         _resolver = resolver;
@@ -49,6 +52,7 @@ public sealed class CliApplication
         _webServerLauncher = webServerLauncher ?? new LocalWebServerLauncher();
         _actionCache = actionCache ?? NullActionCache.Instance;
         _outputFormatter = outputFormatter ?? new CliOutputFormatter();
+        _localValueProvider = localValueProvider ?? new FileSystemLocalValueProvider();
         _createRunId = createRunId ?? new FileSystemRunStore().CreateRunId;
     }
 
@@ -143,6 +147,13 @@ public sealed class CliApplication
             return ExitCodes.ValidationError;
         }
 
+        var localValues = _localValueProvider.Load(resolution.ProjectRoot!);
+        if (!localValues.Success)
+        {
+            WriteErrors(error, localValues.Errors);
+            return ExitCodes.ValidationError;
+        }
+
         var runId = _createRunId();
         var wrotePipelineLink = await WriteViewPipelineLinkAsync(
             resolution.ProjectRoot!,
@@ -163,7 +174,9 @@ public sealed class CliApplication
                 resolution.ProjectRoot!,
                 resolution.WorkflowPath,
                 runId,
-                new WorkflowRunTrigger("workflow_dispatch", "CLI", inputResolution.Inputs)),
+                new WorkflowRunTrigger("workflow_dispatch", "CLI", inputResolution.Inputs),
+                Secrets: localValues.Values.Secrets,
+                Variables: localValues.Values.Variables),
             output,
             error,
             cancellationToken);

@@ -45,6 +45,7 @@ internal sealed class JobExecutor
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
         IReadOnlyDictionary<string, string> jobStatuses,
         WorkflowRunTrigger runTrigger,
+        IReadOnlyDictionary<string, string> workflowVariables,
         IReadOnlyDictionary<string, string> workflowSecrets,
         string projectRoot,
         string runId,
@@ -129,6 +130,7 @@ internal sealed class JobExecutor
                         runId,
                         runTrigger,
                         CreateStepContextEnvironment(workflowEnv, job.Env, environmentUpdates, step.Env),
+                        workflowVariables,
                         workflowSecrets,
                         jobOutputs,
                         jobStatuses,
@@ -171,13 +173,18 @@ internal sealed class JobExecutor
                     index,
                     workflowEnv,
                     runDefaults,
+                    jobOutputs,
+                    jobStatuses,
                     stepOutputs,
                     environmentUpdates,
                     pathEntries,
                     secretMasker,
+                    workflowVariables,
+                    workflowSecrets,
                     projectRoot,
                     runId,
                     runTrigger,
+                    stepStatuses,
                     serviceNetwork,
                     output,
                     error,
@@ -203,7 +210,7 @@ internal sealed class JobExecutor
                 stepRecords.Add(new StepRunRecord(
                     step.Name,
                     stepResult.Status,
-                    stepResult.Command,
+                    secretMasker.Mask(stepResult.Command),
                     stepResult.ExitCode,
                     stepResult.LogPath,
                     stepStartedAt,
@@ -420,13 +427,18 @@ internal sealed class JobExecutor
         int stepIndex,
         IReadOnlyDictionary<string, string> workflowEnv,
         WorkflowRunDefaults runDefaults,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
+        IReadOnlyDictionary<string, string> jobStatuses,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> stepOutputs,
         IReadOnlyDictionary<string, string> environmentUpdates,
         IReadOnlyList<string> pathEntries,
         SecretMasker secretMasker,
+        IReadOnlyDictionary<string, string> workflowVariables,
+        IReadOnlyDictionary<string, string> workflowSecrets,
         string projectRoot,
         string runId,
         WorkflowRunTrigger runTrigger,
+        IReadOnlyDictionary<string, string> stepStatuses,
         JobServiceNetwork? serviceNetwork,
         TextWriter output,
         TextWriter error,
@@ -483,7 +495,23 @@ internal sealed class JobExecutor
 
         try
         {
-            plan = await ResolveStepExecutionAsync(step, projectRoot, stepCancellationToken);
+            plan = await ResolveStepExecutionAsync(
+                workflowName,
+                job,
+                step,
+                stepIndex,
+                workflowEnv,
+                jobOutputs,
+                jobStatuses,
+                stepOutputs,
+                environmentUpdates,
+                workflowVariables,
+                workflowSecrets,
+                projectRoot,
+                runId,
+                runTrigger,
+                stepStatuses,
+                stepCancellationToken);
             if (!plan.Success)
             {
                 return StepExecutionOutcome.FailedWithoutExitCode(step.Uses ?? string.Empty, plan.Errors, collector.LogPath);
@@ -497,6 +525,8 @@ internal sealed class JobExecutor
                 environmentUpdates,
                 pathEntries,
                 step.Env,
+                workflowVariables,
+                workflowSecrets,
                 DefaultEnvironmentVariables.Create(workflowName, job, step, stepIndex, runId, runTrigger),
                 CreateEnvironmentFileVariables(),
                 plan.Environment);
@@ -1160,8 +1190,21 @@ internal sealed class JobExecutor
         => summaryParts.Count == 0 ? null : string.Concat(summaryParts);
 
     private async Task<StepExecutionPlan> ResolveStepExecutionAsync(
+        string workflowName,
+        WorkflowJob job,
         WorkflowStep step,
+        int stepIndex,
+        IReadOnlyDictionary<string, string> workflowEnv,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
+        IReadOnlyDictionary<string, string> jobStatuses,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> stepOutputs,
+        IReadOnlyDictionary<string, string> environmentUpdates,
+        IReadOnlyDictionary<string, string> workflowVariables,
+        IReadOnlyDictionary<string, string> workflowSecrets,
         string projectRoot,
+        string runId,
+        WorkflowRunTrigger runTrigger,
+        IReadOnlyDictionary<string, string> stepStatuses,
         CancellationToken cancellationToken)
     {
         if (step.Run is not null)
@@ -1169,13 +1212,97 @@ internal sealed class JobExecutor
             return StepExecutionPlan.ShellCommand(step.Run);
         }
 
-        var action = await _actionResolver.ResolveAsync(step, projectRoot, cancellationToken);
+        var resolvedWith = ResolveStepWith(
+            workflowName,
+            job,
+            step,
+            stepIndex,
+            workflowEnv,
+            jobOutputs,
+            jobStatuses,
+            stepOutputs,
+            environmentUpdates,
+            workflowVariables,
+            workflowSecrets,
+            projectRoot,
+            runId,
+            runTrigger,
+            stepStatuses);
+        if (!resolvedWith.Success)
+        {
+            return StepExecutionPlan.Failed(resolvedWith.Errors);
+        }
+
+        var resolvedStep = step with { With = resolvedWith.Values };
+        var action = await _actionResolver.ResolveAsync(resolvedStep, projectRoot, cancellationToken);
         if (!action.Success)
         {
             return StepExecutionPlan.Failed(action.Errors);
         }
 
         return CreateStepExecutionPlan(action);
+    }
+
+    private static StepWithResolution ResolveStepWith(
+        string workflowName,
+        WorkflowJob job,
+        WorkflowStep step,
+        int stepIndex,
+        IReadOnlyDictionary<string, string> workflowEnv,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
+        IReadOnlyDictionary<string, string> jobStatuses,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> stepOutputs,
+        IReadOnlyDictionary<string, string> environmentUpdates,
+        IReadOnlyDictionary<string, string> workflowVariables,
+        IReadOnlyDictionary<string, string> workflowSecrets,
+        string projectRoot,
+        string runId,
+        WorkflowRunTrigger runTrigger,
+        IReadOnlyDictionary<string, string> stepStatuses)
+    {
+        if (step.With.Count == 0)
+        {
+            return StepWithResolution.Resolved(step.With);
+        }
+
+        var expressionContext = ExecutionExpressionContexts.ForStep(
+            workflowName,
+            job,
+            step,
+            projectRoot,
+            runId,
+            runTrigger,
+            CreateStepContextEnvironment(workflowEnv, job.Env, environmentUpdates, step.Env),
+            workflowVariables,
+            workflowSecrets,
+            jobOutputs,
+            jobStatuses,
+            stepOutputs,
+            stepStatuses);
+        var evaluationContext = new ExpressionEvaluationContext(
+            expressionContext.Resolve,
+            workspaceRoot: projectRoot);
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        var errors = new List<string>();
+
+        foreach (var item in step.With)
+        {
+            var interpolation = ExpressionTemplate.Interpolate(item.Value, evaluationContext);
+            if (interpolation.Success)
+            {
+                values[item.Key] = interpolation.Value;
+                continue;
+            }
+
+            foreach (var error in interpolation.Errors)
+            {
+                errors.Add($"workflow.jobs.{job.Name}.steps[{stepIndex}].with.{item.Key} could not be evaluated: {error}");
+            }
+        }
+
+        return errors.Count == 0
+            ? StepWithResolution.Resolved(values)
+            : StepWithResolution.Failed(errors);
     }
 
     private static StepExecutionPlan CreateStepExecutionPlan(ActionResolutionResult action)
@@ -1337,6 +1464,8 @@ internal sealed class JobExecutor
         IReadOnlyDictionary<string, string> environmentUpdates,
         IReadOnlyList<string> pathEntries,
         IReadOnlyDictionary<string, string> stepEnv,
+        IReadOnlyDictionary<string, string> workflowVariables,
+        IReadOnlyDictionary<string, string> workflowSecrets,
         IReadOnlyDictionary<string, string> defaultEnv,
         IReadOnlyDictionary<string, string> environmentFileEnv,
         IReadOnlyDictionary<string, string> actionEnv)
@@ -1347,11 +1476,23 @@ internal sealed class JobExecutor
         environment.Merge(environmentUpdates);
         environment.Merge(CreateStepOutputEnvironment(stepOutputs));
         environment.Merge(stepEnv);
+        environment.Merge(CreateLocalValueEnvironment("ACTIO_VAR_", workflowVariables));
+        environment.Merge(CreateLocalValueEnvironment("ACTIO_SECRET_", workflowSecrets));
         environment.ApplyPathEntries(pathEntries);
         environment.MergeDefaultEnvironment(defaultEnv);
         environment.Merge(environmentFileEnv);
         environment.Merge(actionEnv);
         return environment;
+    }
+
+    private static IReadOnlyDictionary<string, string> CreateLocalValueEnvironment(
+        string prefix,
+        IReadOnlyDictionary<string, string> values)
+    {
+        return values.ToDictionary(
+            item => $"{prefix}{ToEnvironmentSegment(item.Key)}",
+            item => item.Value,
+            StringComparer.Ordinal);
     }
 
     private static IReadOnlyList<StepExecutionMount> CreateContainerVolumeMounts(
@@ -1595,6 +1736,18 @@ internal sealed class JobExecutor
     private sealed record CompositeActionOutputResolution(
         IReadOnlyDictionary<string, string> Outputs,
         IReadOnlyList<string> Errors);
+
+    private sealed record StepWithResolution(
+        bool Success,
+        IReadOnlyDictionary<string, string> Values,
+        IReadOnlyList<string> Errors)
+    {
+        public static StepWithResolution Resolved(IReadOnlyDictionary<string, string> values)
+            => new(true, values, []);
+
+        public static StepWithResolution Failed(IReadOnlyList<string> errors)
+            => new(false, new Dictionary<string, string>(), errors);
+    }
 
     private sealed record StepEnvironmentFileCreationResult(
         bool Success,

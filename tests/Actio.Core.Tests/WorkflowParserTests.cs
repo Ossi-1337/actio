@@ -1588,14 +1588,33 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
-    public void Parse_RejectsUnavailableConditionContext()
+    public void Parse_AcceptsLocalSecretsAndVarsConditionContexts()
     {
         var result = Parse(
             """
             name: CI
             jobs:
               test:
-                if: "${{ secrets.TOKEN != '' }}"
+                if: "${{ secrets.TOKEN != '' && vars.RUN_TESTS == 'true' }}"
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    if: "${{ vars.RUN_TESTS == 'true' }}"
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+    }
+
+    [Fact]
+    public void Parse_RejectsNestedLocalSecretReference()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                if: "${{ secrets.NUGET.TOKEN != '' }}"
                 runs-on: ubuntu-latest
                 steps:
                   - name: Test
@@ -1603,8 +1622,7 @@ public sealed class WorkflowParserTests
             """);
 
         Assert.False(result.Success);
-        Assert.Contains(result.Errors, error => error.Contains("secrets", StringComparison.OrdinalIgnoreCase));
-        Assert.Contains(result.Errors, error => error.Contains("no workflow_call secret named 'TOKEN'", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("unsupported expression context 'secrets.NUGET.TOKEN'", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
