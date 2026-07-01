@@ -1,5 +1,6 @@
 using Actio.Core.Workflows;
 using Actio.Engine.Actions;
+using Actio.Engine.Caching;
 using Actio.Engine.Execution;
 using Actio.Engine.Runs;
 using Actio.Runner.Docker;
@@ -16,6 +17,7 @@ public sealed class CliApplication
     private readonly CliParser _cliParser;
     private readonly ILocalWebServerLauncher _webServerLauncher;
     private readonly IActionCache _actionCache;
+    private readonly IDependencyCache _dependencyCache;
     private readonly CliOutputFormatter _outputFormatter;
     private readonly FileSystemLocalValueProvider _localValueProvider;
     private readonly Func<string> _createRunId;
@@ -28,6 +30,7 @@ public sealed class CliApplication
             new CliParser(),
             new LocalWebServerLauncher(),
             new FileSystemActionCache(),
+            new FileSystemDependencyCache(),
             new CliOutputFormatter(),
             new FileSystemLocalValueProvider(),
             new FileSystemRunStore().CreateRunId)
@@ -41,6 +44,7 @@ public sealed class CliApplication
         CliParser? cliParser = null,
         ILocalWebServerLauncher? webServerLauncher = null,
         IActionCache? actionCache = null,
+        IDependencyCache? dependencyCache = null,
         CliOutputFormatter? outputFormatter = null,
         FileSystemLocalValueProvider? localValueProvider = null,
         Func<string>? createRunId = null)
@@ -51,6 +55,7 @@ public sealed class CliApplication
         _cliParser = cliParser ?? new CliParser();
         _webServerLauncher = webServerLauncher ?? new LocalWebServerLauncher();
         _actionCache = actionCache ?? NullActionCache.Instance;
+        _dependencyCache = dependencyCache ?? NullDependencyCache.Instance;
         _outputFormatter = outputFormatter ?? new CliOutputFormatter();
         _localValueProvider = localValueProvider ?? new FileSystemLocalValueProvider();
         _createRunId = createRunId ?? new FileSystemRunStore().CreateRunId;
@@ -106,7 +111,7 @@ public sealed class CliApplication
     private static IWorkflowExecutor CreateDefaultExecutor()
     {
         var runStore = new FileSystemRunStore();
-        return new WorkflowExecutor(new DockerRunnerProvider(), runStore, new FileSystemActionCache());
+        return new WorkflowExecutor(new DockerRunnerProvider(), runStore, new FileSystemActionCache(), new FileSystemDependencyCache());
     }
 
     private async Task<int> RunWorkflowAsync(
@@ -227,10 +232,12 @@ public sealed class CliApplication
         TextWriter error,
         CancellationToken cancellationToken)
     {
-        IReadOnlyList<ActionCacheEntry> entries;
+        IReadOnlyList<ActionCacheEntry> actionEntries;
+        IReadOnlyList<DependencyCacheEntry> dependencyEntries;
         try
         {
-            entries = await _actionCache.ListAsync(cancellationToken);
+            actionEntries = await _actionCache.ListAsync(cancellationToken);
+            dependencyEntries = await _dependencyCache.ListAsync(cancellationToken);
         }
         catch (Exception ex) when (IsRecoverableCacheError(ex))
         {
@@ -238,7 +245,7 @@ public sealed class CliApplication
             return ExitCodes.ValidationError;
         }
 
-        if (entries.Count == 0)
+        if (actionEntries.Count == 0 && dependencyEntries.Count == 0)
         {
             output.WriteLine("No cache entries.");
             return ExitCodes.Success;
@@ -246,23 +253,42 @@ public sealed class CliApplication
 
         output.WriteLine("cache:");
 
-        foreach (var entry in entries)
+        if (actionEntries.Count > 0)
         {
-            output.WriteLine($" - {entry.Kind}:{entry.Uses}");
-            output.WriteLine($"   key: {entry.Key}");
-            output.WriteLine($"   source: {entry.SourcePath}");
-            if (entry.PinnedIdentity is not null)
-            {
-                output.WriteLine($"   pinned: {entry.PinnedIdentity}");
-            }
+            output.WriteLine(" action:");
 
-            if (entry.MutablePart is not null)
+            foreach (var entry in actionEntries)
             {
-                output.WriteLine($"   mutable: {entry.MutablePart}");
-            }
+                output.WriteLine($" - {entry.Kind}:{entry.Uses}");
+                output.WriteLine($"   key: {entry.Key}");
+                output.WriteLine($"   source: {entry.SourcePath}");
+                if (entry.PinnedIdentity is not null)
+                {
+                    output.WriteLine($"   pinned: {entry.PinnedIdentity}");
+                }
 
-            output.WriteLine($"   path: {entry.CachePath}");
-            output.WriteLine($"   last used: {entry.LastUsedAt:O}");
+                if (entry.MutablePart is not null)
+                {
+                    output.WriteLine($"   mutable: {entry.MutablePart}");
+                }
+
+                output.WriteLine($"   path: {entry.CachePath}");
+                output.WriteLine($"   last used: {entry.LastUsedAt:O}");
+            }
+        }
+
+        if (dependencyEntries.Count > 0)
+        {
+            output.WriteLine(" dependency:");
+
+            foreach (var entry in dependencyEntries)
+            {
+                output.WriteLine($" - {entry.Key}");
+                output.WriteLine($"   version: {entry.Version}");
+                output.WriteLine($"   paths: {string.Join(", ", entry.Paths)}");
+                output.WriteLine($"   path: {entry.CachePath}");
+                output.WriteLine($"   last used: {entry.LastUsedAt:O}");
+            }
         }
 
         return ExitCodes.Success;
@@ -277,6 +303,7 @@ public sealed class CliApplication
         try
         {
             removed = await _actionCache.CleanAsync(cancellationToken);
+            removed += await _dependencyCache.CleanAsync(cancellationToken);
         }
         catch (Exception ex) when (IsRecoverableCacheError(ex))
         {

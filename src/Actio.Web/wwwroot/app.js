@@ -498,6 +498,7 @@ function updateWorkflowFileShell(runId) {
 
 function renderSettings() {
   const cacheEntries = state.cache.entries ?? [];
+  const dependencyEntries = state.cache.dependencyEntries ?? [];
   el.settingsView.innerHTML = `
     <section class="summary">
       <div class="summary-head"><h2>Runtime</h2></div>
@@ -516,6 +517,14 @@ function renderSettings() {
       </div>
       ${state.cacheMessage ? `<div class="inline-message">${escapeHtml(state.cacheMessage)}</div>` : ""}
       ${renderCacheEntries(cacheEntries)}
+    </section>
+
+    <section class="summary">
+      <div class="summary-head">
+        <h2>Dependency cache</h2>
+      </div>
+      <div class="inline-message">${escapeHtml(state.cache.dependencyCacheRoot ?? "")}</div>
+      ${renderDependencyCacheEntries(dependencyEntries)}
     </section>
   `;
 
@@ -548,8 +557,32 @@ function renderCacheEntries(entries) {
   `;
 }
 
+function renderDependencyCacheEntries(entries) {
+  if (entries.length === 0) {
+    return `<div class="empty">No dependency cache entries.</div>`;
+  }
+
+  return `
+    <div class="cache-list">
+      ${entries.map(entry => `
+        <article class="cache-row">
+          <div>
+            <div class="cache-title">${escapeHtml(entry.key)}</div>
+            <div class="muted">${escapeHtml((entry.paths ?? []).join(", "))}</div>
+          </div>
+          <div class="cache-meta">
+            <span class="pill">version: ${escapeHtml(entry.version)}</span>
+            <span class="pill">last used: ${formatDate(entry.lastUsedAt)}</span>
+          </div>
+          <div class="muted">${escapeHtml(entry.cachePath)}</div>
+        </article>
+      `).join("")}
+    </div>
+  `;
+}
+
 async function clearCache() {
-  if (!confirm("Clear all Actio action cache entries?")) {
+  if (!confirm("Clear all Actio cache entries?")) {
     return;
   }
 

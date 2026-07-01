@@ -1,5 +1,6 @@
 using Actio.Core.Workflows;
 using Actio.Engine.Actions;
+using Actio.Engine.Caching;
 using Actio.Engine.Runs;
 using Actio.Storage;
 
@@ -379,31 +380,45 @@ public sealed class ActioWebDataServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task GetCacheAsync_ReturnsActionCacheEntries()
+    public async Task GetCacheAsync_ReturnsActionAndDependencyCacheEntries()
     {
         var cache = new FileSystemActionCache(_actioHome);
         await cache.GetOrAddDockerImageActionAsync(
             new DockerImageActionCacheRequest("docker://hello-world:latest", "hello-world:latest", false, "latest"));
+        var dependencyCache = new FileSystemDependencyCache(_actioHome);
+        var packagePath = Path.Combine(_projectRoot, ".nuget", "packages");
+        Directory.CreateDirectory(packagePath);
+        await File.WriteAllTextAsync(Path.Combine(packagePath, "package.txt"), "cached");
+        await dependencyCache.SaveAsync(new DependencyCacheSaveRequest(_projectRoot, "nuget-main", [".nuget/packages"]));
 
         var result = await CreateService().GetCacheAsync();
 
         var entry = Assert.Single(result.Entries);
         Assert.Equal("docker", entry.Kind);
         Assert.Equal("docker://hello-world:latest", entry.Uses);
-        Assert.Contains(Path.Combine("cache", "actions"), result.CacheRoot);
+        var dependencyEntry = Assert.Single(result.DependencyEntries);
+        Assert.Equal("nuget-main", dependencyEntry.Key);
+        Assert.Contains(Path.Combine("cache"), result.CacheRoot);
+        Assert.Contains(Path.Combine("cache", "dependencies"), result.DependencyCacheRoot);
     }
 
     [Fact]
-    public async Task CleanCacheAsync_RemovesActionCacheEntries()
+    public async Task CleanCacheAsync_RemovesActionAndDependencyCacheEntries()
     {
         var cache = new FileSystemActionCache(_actioHome);
         await cache.GetOrAddDockerImageActionAsync(
             new DockerImageActionCacheRequest("docker://hello-world:latest", "hello-world:latest", false, "latest"));
+        var dependencyCache = new FileSystemDependencyCache(_actioHome);
+        var packagePath = Path.Combine(_projectRoot, ".nuget", "packages");
+        Directory.CreateDirectory(packagePath);
+        await File.WriteAllTextAsync(Path.Combine(packagePath, "package.txt"), "cached");
+        await dependencyCache.SaveAsync(new DependencyCacheSaveRequest(_projectRoot, "nuget-main", [".nuget/packages"]));
 
         var result = await CreateService().CleanCacheAsync();
 
-        Assert.Equal(1, result.Removed);
+        Assert.Equal(2, result.Removed);
         Assert.Empty((await cache.ListAsync()));
+        Assert.Empty((await dependencyCache.ListAsync()));
     }
 
     [Fact]
@@ -424,6 +439,7 @@ public sealed class ActioWebDataServiceTests : IDisposable
             new ActioWebOptions(_projectRoot, _actioHome),
             new FileSystemRunStore(_actioHome),
             new FileSystemActionCache(_actioHome),
+            new FileSystemDependencyCache(_actioHome),
             new Actio.Core.Workflows.WorkflowParser(),
             timeProvider);
     }

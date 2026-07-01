@@ -2,6 +2,7 @@ using Actio.Core.Actions;
 using Actio.Core.Expressions;
 using Actio.Core.Workflows;
 using Actio.Engine.Actions;
+using Actio.Engine.Caching;
 using Actio.Engine.Runs;
 using System.Globalization;
 using System.Text.Json.Nodes;
@@ -20,6 +21,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
     private readonly IRunnerProvider _runnerProvider;
     private readonly IRunStore _runStore;
     private readonly IActionCache _actionCache;
+    private readonly IDependencyCache _dependencyCache;
     private readonly Func<int, TimeSpan>? _createJobTimeout;
     private readonly WorkflowParser _workflowParser;
     private readonly ConditionEvaluator _conditionEvaluator;
@@ -29,19 +31,21 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         IRunnerProvider runnerProvider,
         IRunStore? runStore = null,
         IActionCache? actionCache = null,
+        IDependencyCache? dependencyCache = null,
         Func<int, TimeSpan>? createJobTimeout = null)
     {
         _runStore = runStore ?? new NullRunStore();
         _runnerProvider = runnerProvider;
         var cache = actionCache ?? NullActionCache.Instance;
         _actionCache = cache;
+        _dependencyCache = dependencyCache ?? NullDependencyCache.Instance;
         _createJobTimeout = createJobTimeout;
         _workflowParser = new WorkflowParser();
         var githubActionSourceProvider = cache as IGitHubActionSourceProvider ?? NullActionCache.Instance;
         var outputMarkerParser = new OutputMarkerParser();
         _conditionEvaluator = new ConditionEvaluator();
         var actionResolver = new ActionResolver(new ActionParser(), cache, githubActionSourceProvider);
-        _jobExecutor = new JobExecutor(runnerProvider, _runStore, outputMarkerParser, actionResolver, createJobTimeout);
+        _jobExecutor = new JobExecutor(runnerProvider, _runStore, outputMarkerParser, actionResolver, _dependencyCache, createJobTimeout);
     }
 
     public async Task<WorkflowExecutionResult> ExecuteAsync(
@@ -450,6 +454,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             _runnerProvider,
             new NullRunStore(),
             _actionCache,
+            _dependencyCache,
             _createJobTimeout);
         var nestedOptions = new WorkflowExecutionOptions(
             options.ProjectRoot,

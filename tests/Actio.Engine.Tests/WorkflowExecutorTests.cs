@@ -1,5 +1,6 @@
 using Actio.Core.Workflows;
 using Actio.Engine.Actions;
+using Actio.Engine.Caching;
 using Actio.Engine.Execution;
 using Actio.Engine.Runs;
 
@@ -3239,6 +3240,145 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_SavesAndRestoresDependencyCacheAction()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-cache-engine-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectRoot);
+        var packagePath = Path.Combine(projectRoot, ".nuget", "packages");
+        var cache = new RecordingDependencyCache(
+            _ => DependencyCacheRestoreResult.Miss(),
+            request =>
+            {
+                Directory.CreateDirectory(packagePath);
+                File.WriteAllText(Path.Combine(packagePath, "package.txt"), "cached");
+                return DependencyCacheRestoreResult.Restored(CreateDependencyCacheEntry(request.Key), cacheHit: true, matchedRestoreKey: null);
+            });
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Cache packages",
+                        null,
+                        "actions/cache@v4",
+                        Id: "cache",
+                        With: new Dictionary<string, string>
+                        {
+                            ["path"] = ".nuget/packages",
+                            ["key"] = "nuget-main"
+                        }),
+                    new WorkflowStep("Install packages", "dotnet restore", null)
+                ]));
+
+        try
+        {
+            var firstRunner = new FakeRunnerProvider([new FakeRunnerStep(
+                0,
+                onExecute: (environment, _) =>
+                {
+                    Assert.Equal("false", environment["ACTIO_STEP_CACHE_OUTPUT_CACHE_HIT"]);
+                    Directory.CreateDirectory(packagePath);
+                    File.WriteAllText(Path.Combine(packagePath, "package.txt"), "cached");
+                })]);
+
+            var firstResult = await new WorkflowExecutor(firstRunner, dependencyCache: cache).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Directory.Delete(packagePath, recursive: true);
+            var secondRunner = new FakeRunnerProvider([new FakeRunnerStep(
+                0,
+                onExecute: (environment, _) =>
+                {
+                    Assert.Equal("true", environment["ACTIO_STEP_CACHE_OUTPUT_CACHE_HIT"]);
+                    Assert.Equal("cached", File.ReadAllText(Path.Combine(packagePath, "package.txt")));
+                })]);
+
+            var secondResult = await new WorkflowExecutor(secondRunner, dependencyCache: cache).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.True(firstResult.Success, string.Join(Environment.NewLine, firstResult.Errors));
+            Assert.True(secondResult.Success, string.Join(Environment.NewLine, secondResult.Errors));
+            Assert.Single(firstRunner.Requests);
+            Assert.Single(secondRunner.Requests);
+            Assert.Equal("nuget-main", Assert.Single(cache.SaveRequests).Key);
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_RestoresDependencyCacheFromRestoreKey()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-cache-restore-key-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectRoot);
+        var packagePath = Path.Combine(projectRoot, ".nuget", "packages");
+        var cache = new RecordingDependencyCache(_ =>
+        {
+            Directory.CreateDirectory(packagePath);
+            File.WriteAllText(Path.Combine(packagePath, "package.txt"), "cached");
+            return DependencyCacheRestoreResult.Restored(CreateDependencyCacheEntry("nuget-main-abc"), cacheHit: false, matchedRestoreKey: "nuget-main-");
+        });
+
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(
+            0,
+            onExecute: (environment, _) =>
+            {
+                Assert.Equal("false", environment["ACTIO_STEP_CACHE_OUTPUT_CACHE_HIT"]);
+                Assert.Equal("nuget-main-abc", environment["ACTIO_STEP_CACHE_OUTPUT_CACHE_MATCHED_KEY"]);
+                Assert.Equal("cached", File.ReadAllText(Path.Combine(packagePath, "package.txt")));
+            })]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Cache packages",
+                        null,
+                        "actions/cache@v4",
+                        Id: "cache",
+                        With: new Dictionary<string, string>
+                        {
+                            ["path"] = ".nuget/packages",
+                            ["key"] = "nuget-feature-def",
+                            ["restore-keys"] = "nuget-main-"
+                        }),
+                    new WorkflowStep("Use packages", "dotnet test", null)
+                ]));
+
+        try
+        {
+            var result = await new WorkflowExecutor(runner, dependencyCache: cache).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+            Assert.Equal("nuget-feature-def", Assert.Single(cache.SaveRequests).Key);
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ExecuteAsync_UsesLocalVarsAndSecretsInConditionsAndStepEnvironment()
     {
         var runner = new FakeRunnerProvider(
@@ -3870,6 +4010,49 @@ public sealed class WorkflowExecutorTests
         }
     }
 
+    private sealed class RecordingDependencyCache : IDependencyCache
+    {
+        private readonly Queue<Func<DependencyCacheRestoreRequest, DependencyCacheRestoreResult>> _restoreResults;
+
+        public RecordingDependencyCache(params Func<DependencyCacheRestoreRequest, DependencyCacheRestoreResult>[] restoreResults)
+        {
+            _restoreResults = new Queue<Func<DependencyCacheRestoreRequest, DependencyCacheRestoreResult>>(restoreResults);
+        }
+
+        public List<DependencyCacheRestoreRequest> RestoreRequests { get; } = [];
+
+        public List<DependencyCacheSaveRequest> SaveRequests { get; } = [];
+
+        public Task<DependencyCacheRestoreResult> RestoreAsync(
+            DependencyCacheRestoreRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            RestoreRequests.Add(request);
+            var result = _restoreResults.Count == 0
+                ? DependencyCacheRestoreResult.Miss()
+                : _restoreResults.Dequeue().Invoke(request);
+            return Task.FromResult(result);
+        }
+
+        public Task<DependencyCacheSaveResult> SaveAsync(
+            DependencyCacheSaveRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            SaveRequests.Add(request);
+            return Task.FromResult(DependencyCacheSaveResult.SavedEntry(CreateDependencyCacheEntry(request.Key)));
+        }
+
+        public Task<IReadOnlyList<DependencyCacheEntry>> ListAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult<IReadOnlyList<DependencyCacheEntry>>([]);
+        }
+
+        public Task<int> CleanAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(0);
+        }
+    }
+
     private sealed class RecordingActionCache : IActionCache, IGitHubActionSourceProvider
     {
         public List<LocalActionCacheRequest> Requests { get; } = [];
@@ -3955,6 +4138,18 @@ public sealed class WorkflowExecutorTests
         {
             return Task.FromResult(0);
         }
+    }
+
+    private static DependencyCacheEntry CreateDependencyCacheEntry(string key)
+    {
+        var now = DateTimeOffset.UtcNow;
+        return new DependencyCacheEntry(
+            key,
+            "version",
+            [".nuget/packages"],
+            string.Empty,
+            now,
+            now);
     }
 
     private sealed class FakeRunnerStep

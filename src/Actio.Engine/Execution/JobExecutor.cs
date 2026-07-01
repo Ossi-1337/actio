@@ -1,5 +1,7 @@
+using Actio.Core.Actions;
 using Actio.Core.Expressions;
 using Actio.Core.Workflows;
+using Actio.Engine.Caching;
 using Actio.Engine.Runs;
 
 namespace Actio.Engine.Execution;
@@ -18,6 +20,7 @@ internal sealed class JobExecutor
     private readonly OutputMarkerParser _outputMarkerParser;
     private readonly StepEnvironmentFileReader _environmentFileReader;
     private readonly ActionResolver _actionResolver;
+    private readonly IDependencyCache _dependencyCache;
     private readonly ConditionEvaluator _conditionEvaluator;
     private readonly Func<int, TimeSpan> _createTimeout;
 
@@ -26,6 +29,7 @@ internal sealed class JobExecutor
         IRunStore runStore,
         OutputMarkerParser outputMarkerParser,
         ActionResolver actionResolver,
+        IDependencyCache dependencyCache,
         Func<int, TimeSpan>? createJobTimeout = null)
     {
         _runnerProvider = runnerProvider;
@@ -33,6 +37,7 @@ internal sealed class JobExecutor
         _outputMarkerParser = outputMarkerParser;
         _environmentFileReader = new StepEnvironmentFileReader();
         _actionResolver = actionResolver;
+        _dependencyCache = dependencyCache;
         _conditionEvaluator = new ConditionEvaluator();
         _createTimeout = createJobTimeout ?? (minutes => TimeSpan.FromMinutes(minutes));
     }
@@ -69,6 +74,7 @@ internal sealed class JobExecutor
         var stepStatuses = new Dictionary<string, string>(StringComparer.Ordinal);
         var hardFailureSeen = false;
         var artifacts = new List<WorkflowRunArtifact>();
+        var pendingDependencyCacheSaves = new List<DependencyCacheSaveRequest>();
         var runDefaults = workflowDefaults.Merge(job.Defaults);
         using var timeoutTokenSource = CreateTimeoutTokenSource(job, cancellationToken);
         var jobCancellationToken = timeoutTokenSource?.Token ?? cancellationToken;
@@ -199,6 +205,11 @@ internal sealed class JobExecutor
                     stepOutputs[step.Id] = new Dictionary<string, string>(stepResult.Outputs, StringComparer.Ordinal);
                 }
 
+                if (stepResult.PendingDependencyCacheSave is not null)
+                {
+                    pendingDependencyCacheSaves.Add(stepResult.PendingDependencyCacheSave);
+                }
+
                 var continuedFailure = step.ContinueOnError &&
                     stepResult.CountsAsFailedStep &&
                     IsFailureStatus(stepResult.Status);
@@ -242,6 +253,16 @@ internal sealed class JobExecutor
                 }
 
                 successfulSteps++;
+            }
+
+            if (errors.Count == 0)
+            {
+                await SaveDependencyCachesAsync(
+                    pendingDependencyCacheSaves,
+                    job.DisplayName,
+                    output,
+                    errors,
+                    jobCancellationToken);
             }
 
             if (errors.Count == 0)
@@ -515,6 +536,15 @@ internal sealed class JobExecutor
             if (!plan.Success)
             {
                 return StepExecutionOutcome.FailedWithoutExitCode(step.Uses ?? string.Empty, plan.Errors, collector.LogPath);
+            }
+
+            if (plan.Kind == StepExecutionKind.DependencyCacheAction)
+            {
+                return await ExecuteDependencyCacheActionAsync(
+                    plan.DependencyCacheAction!,
+                    projectRoot,
+                    collector,
+                    stepCancellationToken);
             }
 
             var environment = CreateStepEnvironment(
@@ -799,6 +829,104 @@ internal sealed class JobExecutor
             summaryPath,
             JoinSummaries(summaryParts),
             collector.Annotations);
+    }
+
+    private async Task<StepExecutionOutcome> ExecuteDependencyCacheActionAsync(
+        DependencyCacheAction action,
+        string projectRoot,
+        StepOutputCollector collector,
+        CancellationToken cancellationToken)
+    {
+        DependencyCacheRestoreResult restore;
+        try
+        {
+            restore = await _dependencyCache.RestoreAsync(
+                new DependencyCacheRestoreRequest(projectRoot, action.Key, action.RestoreKeys, action.Paths),
+                cancellationToken);
+        }
+        catch (Exception ex) when (StorageError.IsRecoverable(ex))
+        {
+            return StepExecutionOutcome.StorageFailed(
+                StorageError.Format($"restoring dependency cache '{action.Key}'", ex),
+                collector.LogPath);
+        }
+
+        if (!restore.Success)
+        {
+            return StepExecutionOutcome.FailedWithoutExitCode(
+                "actions/cache",
+                restore.Errors,
+                collector.LogPath,
+                CreateDependencyCacheOutputs(action.Key, restore));
+        }
+
+        if (restore.MatchedKey is null)
+        {
+            await collector.WriteOutputLineAsync($"Dependency cache not found for key '{action.Key}'.", cancellationToken);
+        }
+        else if (restore.CacheHit)
+        {
+            await collector.WriteOutputLineAsync($"Dependency cache restored from key '{restore.MatchedKey}'.", cancellationToken);
+        }
+        else
+        {
+            await collector.WriteOutputLineAsync($"Dependency cache restored from key '{restore.MatchedKey}'.", cancellationToken);
+        }
+
+        var pendingSave = restore.CacheHit
+            ? null
+            : new DependencyCacheSaveRequest(projectRoot, action.Key, action.Paths);
+
+        return StepExecutionOutcome.Succeeded(
+            "actions/cache",
+            0,
+            collector.LogPath,
+            CreateDependencyCacheOutputs(action.Key, restore),
+            null,
+            null,
+            annotations: collector.Annotations,
+            pendingDependencyCacheSave: pendingSave);
+    }
+
+    private async Task SaveDependencyCachesAsync(
+        IReadOnlyList<DependencyCacheSaveRequest> pendingSaves,
+        string jobDisplayName,
+        TextWriter output,
+        List<string> errors,
+        CancellationToken cancellationToken)
+    {
+        foreach (var pendingSave in pendingSaves)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            output.WriteLine($"[{jobDisplayName}] Save cache {pendingSave.Key}");
+
+            DependencyCacheSaveResult save;
+            try
+            {
+                save = await _dependencyCache.SaveAsync(pendingSave, cancellationToken);
+            }
+            catch (Exception ex) when (StorageError.IsRecoverable(ex))
+            {
+                errors.Add(StorageError.Format($"saving dependency cache '{pendingSave.Key}'", ex));
+                continue;
+            }
+
+            foreach (var message in save.Messages)
+            {
+                output.WriteLine(message);
+            }
+
+            if (!save.Success)
+            {
+                errors.AddRange(save.Errors);
+                continue;
+            }
+
+            if (save.Saved)
+            {
+                output.WriteLine($"Saved dependency cache '{pendingSave.Key}'.");
+            }
+        }
     }
 
     private async Task<StepExecutionOutcome> ExecuteCompositeRunStepAsync(
@@ -1233,6 +1361,17 @@ internal sealed class JobExecutor
             return StepExecutionPlan.Failed(resolvedWith.Errors);
         }
 
+        var dependencyCacheAction = ResolveDependencyCacheAction(step.Uses, resolvedWith.Values);
+        if (dependencyCacheAction.Success && dependencyCacheAction.Action is not null)
+        {
+            return StepExecutionPlan.DependencyCache(dependencyCacheAction.Action);
+        }
+
+        if (!dependencyCacheAction.Success)
+        {
+            return StepExecutionPlan.Failed(dependencyCacheAction.Errors);
+        }
+
         var resolvedStep = step with { With = resolvedWith.Values };
         var action = await _actionResolver.ResolveAsync(resolvedStep, projectRoot, cancellationToken);
         if (!action.Success)
@@ -1241,6 +1380,96 @@ internal sealed class JobExecutor
         }
 
         return CreateStepExecutionPlan(action);
+    }
+
+    private static DependencyCacheActionResolution ResolveDependencyCacheAction(
+        string? uses,
+        IReadOnlyDictionary<string, string> with)
+    {
+        if (uses is null ||
+            !ActionReference.TryParse(uses, out var reference) ||
+            !reference!.TryGetGitHubAction(out var githubAction) ||
+            !IsDependencyCacheAction(githubAction!))
+        {
+            return DependencyCacheActionResolution.NotDependencyCacheAction;
+        }
+
+        var errors = new List<string>();
+        foreach (var key in with.Keys)
+        {
+            if (key is not "path" and not "key" and not "restore-keys")
+            {
+                errors.Add($"actions/cache with.{key} is not supported yet.");
+            }
+        }
+
+        var cacheKey = ReadRequiredCacheInput(with, "key", errors);
+        var paths = SplitCacheInput(ReadRequiredCacheInput(with, "path", errors));
+        var restoreKeys = SplitCacheInput(ReadOptionalCacheInput(with, "restore-keys"));
+
+        if (paths.Count == 0)
+        {
+            errors.Add("actions/cache with.path is required.");
+        }
+
+        return errors.Count == 0
+            ? DependencyCacheActionResolution.Resolved(new DependencyCacheAction(cacheKey!, restoreKeys, paths))
+            : DependencyCacheActionResolution.Failed(errors);
+    }
+
+    private static bool IsDependencyCacheAction(GitHubActionReference action)
+    {
+        return string.Equals(action.Owner, "actions", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(action.Repository, "cache", StringComparison.OrdinalIgnoreCase) &&
+            string.IsNullOrEmpty(action.ActionPath);
+    }
+
+    private static string? ReadRequiredCacheInput(
+        IReadOnlyDictionary<string, string> with,
+        string name,
+        List<string> errors)
+    {
+        var value = ReadOptionalCacheInput(with, name);
+        if (value is null)
+        {
+            errors.Add($"actions/cache with.{name} is required.");
+        }
+
+        return value;
+    }
+
+    private static string? ReadOptionalCacheInput(
+        IReadOnlyDictionary<string, string> with,
+        string name)
+    {
+        return with.TryGetValue(name, out var value) && !string.IsNullOrWhiteSpace(value)
+            ? value
+            : null;
+    }
+
+    private static IReadOnlyList<string> SplitCacheInput(string? value)
+    {
+        if (value is null)
+        {
+            return [];
+        }
+
+        return value
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(item => !string.IsNullOrWhiteSpace(item))
+            .ToArray();
+    }
+
+    private static IReadOnlyDictionary<string, string> CreateDependencyCacheOutputs(
+        string primaryKey,
+        DependencyCacheRestoreResult restore)
+    {
+        return new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["cache-hit"] = restore.CacheHit ? "true" : "false",
+            ["cache-primary-key"] = primaryKey,
+            ["cache-matched-key"] = restore.MatchedKey ?? string.Empty
+        };
     }
 
     private static StepWithResolution ResolveStepWith(
@@ -1667,7 +1896,8 @@ internal sealed class JobExecutor
         string? SummaryPath,
         string? Summary,
         IReadOnlyList<StepLogAnnotation> Annotations,
-        bool CountsAsFailedStep)
+        bool CountsAsFailedStep,
+        DependencyCacheSaveRequest? PendingDependencyCacheSave)
     {
         public static StepExecutionOutcome Succeeded(
             string command,
@@ -1680,9 +1910,10 @@ internal sealed class JobExecutor
             IReadOnlyList<string>? pathEntries = null,
             string? summaryPath = null,
             string? summary = null,
-            IReadOnlyList<StepLogAnnotation>? annotations = null)
+            IReadOnlyList<StepLogAnnotation>? annotations = null,
+            DependencyCacheSaveRequest? pendingDependencyCacheSave = null)
         {
-            return new StepExecutionOutcome(SuccessStatus, command, exitCode, logPath, shell, workingDirectory, outputs, [], environmentUpdates ?? new Dictionary<string, string>(), pathEntries ?? [], summaryPath, summary, annotations ?? [], false);
+            return new StepExecutionOutcome(SuccessStatus, command, exitCode, logPath, shell, workingDirectory, outputs, [], environmentUpdates ?? new Dictionary<string, string>(), pathEntries ?? [], summaryPath, summary, annotations ?? [], false, pendingDependencyCacheSave);
         }
 
         public static StepExecutionOutcome Failed(
@@ -1699,12 +1930,12 @@ internal sealed class JobExecutor
             string? summary = null,
             IReadOnlyList<StepLogAnnotation>? annotations = null)
         {
-            return new StepExecutionOutcome(FailedStatus, command, exitCode, logPath, shell, workingDirectory, outputs, [error], environmentUpdates ?? new Dictionary<string, string>(), pathEntries ?? [], summaryPath, summary, annotations ?? [], true);
+            return new StepExecutionOutcome(FailedStatus, command, exitCode, logPath, shell, workingDirectory, outputs, [error], environmentUpdates ?? new Dictionary<string, string>(), pathEntries ?? [], summaryPath, summary, annotations ?? [], true, null);
         }
 
         public static StepExecutionOutcome StorageFailed(string error, string? logPath = null)
         {
-            return new StepExecutionOutcome(FailedStatus, string.Empty, null, logPath, null, null, new Dictionary<string, string>(), [error], new Dictionary<string, string>(), [], null, null, [], false);
+            return new StepExecutionOutcome(FailedStatus, string.Empty, null, logPath, null, null, new Dictionary<string, string>(), [error], new Dictionary<string, string>(), [], null, null, [], false, null);
         }
 
         public static StepExecutionOutcome TimedOut(
@@ -1716,7 +1947,7 @@ internal sealed class JobExecutor
             string error,
             IReadOnlyList<StepLogAnnotation>? annotations = null)
         {
-            return new StepExecutionOutcome(TimedOutStatus, command, null, logPath, shell, workingDirectory, outputs, [error], new Dictionary<string, string>(), [], null, null, annotations ?? [], true);
+            return new StepExecutionOutcome(TimedOutStatus, command, null, logPath, shell, workingDirectory, outputs, [error], new Dictionary<string, string>(), [], null, null, annotations ?? [], true, null);
         }
 
         public static StepExecutionOutcome FailedWithoutExitCode(
@@ -1730,7 +1961,7 @@ internal sealed class JobExecutor
             string? summary = null,
             IReadOnlyList<StepLogAnnotation>? annotations = null)
         {
-            return new StepExecutionOutcome(FailedStatus, command, null, logPath, null, null, outputs ?? new Dictionary<string, string>(), errors, environmentUpdates ?? new Dictionary<string, string>(), pathEntries ?? [], summaryPath, summary, annotations ?? [], true);
+            return new StepExecutionOutcome(FailedStatus, command, null, logPath, null, null, outputs ?? new Dictionary<string, string>(), errors, environmentUpdates ?? new Dictionary<string, string>(), pathEntries ?? [], summaryPath, summary, annotations ?? [], true, null);
         }
     }
 
@@ -1768,7 +1999,8 @@ internal sealed class JobExecutor
         CompositeAction,
         DockerImageAction,
         DockerfileAction,
-        JavaScriptAction
+        JavaScriptAction,
+        DependencyCacheAction
     }
 
     private sealed record StepExecutionPlan(
@@ -1787,6 +2019,7 @@ internal sealed class JobExecutor
         string? JavaScriptMain,
         string? JavaScriptPre,
         string? JavaScriptPost,
+        DependencyCacheAction? DependencyCacheAction,
         IReadOnlyDictionary<string, string> Environment,
         IReadOnlyList<StepExecutionMount> AdditionalMounts,
         IReadOnlyList<string> Errors)
@@ -1806,6 +2039,7 @@ internal sealed class JobExecutor
                 null,
                 null,
                 [],
+                null,
                 null,
                 null,
                 null,
@@ -1841,6 +2075,7 @@ internal sealed class JobExecutor
                 null,
                 null,
                 null,
+                null,
                 environment,
                 additionalMounts,
                 []);
@@ -1863,6 +2098,7 @@ internal sealed class JobExecutor
                 dockerImage,
                 dockerEntryPoint,
                 dockerArguments,
+                null,
                 null,
                 null,
                 null,
@@ -1898,6 +2134,7 @@ internal sealed class JobExecutor
                 null,
                 null,
                 null,
+                null,
                 environment,
                 additionalMounts,
                 []);
@@ -1928,8 +2165,33 @@ internal sealed class JobExecutor
                 main,
                 pre,
                 post,
+                null,
                 environment,
                 additionalMounts,
+                []);
+        }
+
+        public static StepExecutionPlan DependencyCache(DependencyCacheAction action)
+        {
+            return new(
+                true,
+                StepExecutionKind.DependencyCacheAction,
+                "actions/cache",
+                [],
+                new Dictionary<string, string>(),
+                new Dictionary<string, string>(),
+                null,
+                null,
+                [],
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                action,
+                new Dictionary<string, string>(),
+                [],
                 []);
         }
 
@@ -1950,9 +2212,24 @@ internal sealed class JobExecutor
                 null,
                 null,
                 null,
+                null,
                 new Dictionary<string, string>(),
                 [],
                 errors);
+    }
+
+    private sealed record DependencyCacheActionResolution(
+        bool Success,
+        DependencyCacheAction? Action,
+        IReadOnlyList<string> Errors)
+    {
+        public static DependencyCacheActionResolution NotDependencyCacheAction { get; } = new(true, null, []);
+
+        public static DependencyCacheActionResolution Resolved(DependencyCacheAction action)
+            => new(true, action, []);
+
+        public static DependencyCacheActionResolution Failed(IReadOnlyList<string> errors)
+            => new(false, null, errors);
     }
 }
 

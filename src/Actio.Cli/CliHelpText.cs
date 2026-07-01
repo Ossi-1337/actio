@@ -88,8 +88,8 @@ public static class CliHelpText
           actio cache clean
 
         Commands:
-          list                 Show local action cache entries.
-          clean                Remove local action cache entries.
+          list                 Show local action and dependency cache entries.
+          clean                Remove local action and dependency cache entries.
 
         Options:
           -h, --help           Show help for the cache command.

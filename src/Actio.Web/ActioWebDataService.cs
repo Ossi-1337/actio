@@ -11,6 +11,7 @@ public sealed class ActioWebDataService
     private readonly ActioWebOptions _options;
     private readonly FileSystemRunStore _runStore;
     private readonly FileSystemActionCache _actionCache;
+    private readonly FileSystemDependencyCache _dependencyCache;
     private readonly WorkflowParser _workflowParser;
     private readonly TimeProvider _timeProvider;
 
@@ -19,6 +20,7 @@ public sealed class ActioWebDataService
             options,
             new FileSystemRunStore(options.ActioHome),
             new FileSystemActionCache(options.ActioHome),
+            new FileSystemDependencyCache(options.ActioHome),
             new WorkflowParser(),
             TimeProvider.System)
     {
@@ -28,12 +30,14 @@ public sealed class ActioWebDataService
         ActioWebOptions options,
         FileSystemRunStore runStore,
         FileSystemActionCache actionCache,
+        FileSystemDependencyCache dependencyCache,
         WorkflowParser workflowParser,
         TimeProvider? timeProvider = null)
     {
         _options = options;
         _runStore = runStore;
         _actionCache = actionCache;
+        _dependencyCache = dependencyCache;
         _workflowParser = workflowParser;
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -44,7 +48,7 @@ public sealed class ActioWebDataService
 
     public string ServerUrl => _options.Url;
 
-    public string CacheRoot => _actionCache.ActionCachePath;
+    public string CacheRoot => Path.Combine(ActioHome, "cache");
 
     public async Task<IReadOnlyList<WorkflowSummary>> GetWorkflowsAsync(CancellationToken cancellationToken = default)
     {
@@ -186,13 +190,19 @@ public sealed class ActioWebDataService
 
     public async Task<CacheResult> GetCacheAsync(CancellationToken cancellationToken = default)
     {
-        var entries = await _actionCache.ListAsync(cancellationToken);
-        return new CacheResult(CacheRoot, entries);
+        var actionEntries = await _actionCache.ListAsync(cancellationToken);
+        var dependencyEntries = await _dependencyCache.ListAsync(cancellationToken);
+        return new CacheResult(
+            CacheRoot,
+            actionEntries,
+            _dependencyCache.DependencyCachePath,
+            dependencyEntries);
     }
 
     public async Task<CacheCleanResult> CleanCacheAsync(CancellationToken cancellationToken = default)
     {
         var removed = await _actionCache.CleanAsync(cancellationToken);
+        removed += await _dependencyCache.CleanAsync(cancellationToken);
         return new CacheCleanResult(removed);
     }
 

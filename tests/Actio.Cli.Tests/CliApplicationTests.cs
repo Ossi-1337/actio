@@ -1,6 +1,7 @@
 using Actio.Cli;
 using Actio.Core.Workflows;
 using Actio.Engine.Actions;
+using Actio.Engine.Caching;
 using Actio.Engine.Execution;
 using Actio.Engine.Runs;
 using Actio.Storage;
@@ -113,16 +114,30 @@ public sealed class CliApplicationTests : IDisposable
                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "v1")
             ]);
+        var dependencyCache = new FakeDependencyCache(
+            [
+                new DependencyCacheEntry(
+                    "nuget-main",
+                    "version-1",
+                    [".nuget/packages"],
+                    "C:\\actio\\cache\\dependencies\\key-1",
+                    DateTimeOffset.Parse("2026-06-23T10:00:00Z"),
+                    DateTimeOffset.Parse("2026-06-23T11:00:00Z"))
+            ]);
         var executor = new FakeWorkflowExecutor(new WorkflowExecutionResult(WorkflowExecutionStatus.Success, 1, 1, []));
 
-        var exitCode = CreateApplication(executor, actionCache: cache).Run(["cache", "list"], _root, output, error);
+        var exitCode = CreateApplication(executor, actionCache: cache, dependencyCache: dependencyCache).Run(["cache", "list"], _root, output, error);
 
         Assert.Equal(ExitCodes.Success, exitCode);
         Assert.Contains("cache:", output.ToString());
+        Assert.Contains("action:", output.ToString());
         Assert.Contains("github:owner/repo/action@v1", output.ToString());
         Assert.Contains("key: key-1", output.ToString());
         Assert.Contains("pinned: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", output.ToString());
         Assert.Contains("mutable: v1", output.ToString());
+        Assert.Contains("dependency:", output.ToString());
+        Assert.Contains("nuget-main", output.ToString());
+        Assert.Contains("paths: .nuget/packages", output.ToString());
         Assert.Equal(string.Empty, error.ToString());
     }
 
@@ -132,13 +147,15 @@ public sealed class CliApplicationTests : IDisposable
         using var output = new StringWriter();
         using var error = new StringWriter();
         var cache = new FakeActionCache([], cleanCount: 2);
+        var dependencyCache = new FakeDependencyCache([], cleanCount: 3);
         var executor = new FakeWorkflowExecutor(new WorkflowExecutionResult(WorkflowExecutionStatus.Success, 1, 1, []));
 
-        var exitCode = CreateApplication(executor, actionCache: cache).Run(["cache", "clean"], _root, output, error);
+        var exitCode = CreateApplication(executor, actionCache: cache, dependencyCache: dependencyCache).Run(["cache", "clean"], _root, output, error);
 
         Assert.Equal(ExitCodes.Success, exitCode);
-        Assert.Equal($"Removed 2 cache entries.{Environment.NewLine}", output.ToString());
+        Assert.Equal($"Removed 5 cache entries.{Environment.NewLine}", output.ToString());
         Assert.True(cache.Cleaned);
+        Assert.True(dependencyCache.Cleaned);
         Assert.Equal(string.Empty, error.ToString());
     }
 
@@ -952,6 +969,7 @@ public sealed class CliApplicationTests : IDisposable
         FakeWorkflowExecutor executor,
         ILocalWebServerLauncher? launcher = null,
         IActionCache? actionCache = null,
+        IDependencyCache? dependencyCache = null,
         CliOutputFormatter? outputFormatter = null,
         FileSystemLocalValueProvider? localValueProvider = null,
         Func<string>? createRunId = null)
@@ -962,6 +980,7 @@ public sealed class CliApplicationTests : IDisposable
             executor,
             webServerLauncher: launcher ?? new FakeWebServerLauncher(null),
             actionCache: actionCache,
+            dependencyCache: dependencyCache,
             outputFormatter: outputFormatter,
             localValueProvider: localValueProvider,
             createRunId: createRunId ?? (() => "run-1"));
@@ -1110,6 +1129,47 @@ public sealed class CliApplicationTests : IDisposable
                 throw _cleanException;
             }
 
+            Cleaned = true;
+            return Task.FromResult(_cleanCount);
+        }
+    }
+
+    private sealed class FakeDependencyCache : IDependencyCache
+    {
+        private readonly IReadOnlyList<DependencyCacheEntry> _entries;
+        private readonly int _cleanCount;
+
+        public FakeDependencyCache(
+            IReadOnlyList<DependencyCacheEntry> entries,
+            int cleanCount = 0)
+        {
+            _entries = entries;
+            _cleanCount = cleanCount;
+        }
+
+        public bool Cleaned { get; private set; }
+
+        public Task<DependencyCacheRestoreResult> RestoreAsync(
+            DependencyCacheRestoreRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            throw new NotSupportedException();
+        }
+
+        public Task<DependencyCacheSaveResult> SaveAsync(
+            DependencyCacheSaveRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            throw new NotSupportedException();
+        }
+
+        public Task<IReadOnlyList<DependencyCacheEntry>> ListAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(_entries);
+        }
+
+        public Task<int> CleanAsync(CancellationToken cancellationToken = default)
+        {
             Cleaned = true;
             return Task.FromResult(_cleanCount);
         }
