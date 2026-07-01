@@ -877,6 +877,36 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_SavesJobEnvironmentMetadata()
+    {
+        var runner = new FakeRunnerProvider([0]);
+        var store = new RecordingRunStore();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "deploy",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Deploy", "./deploy.sh", null)])
+            {
+                Environment = new WorkflowJobEnvironment("production", "https://actio.local/deployments/42")
+            });
+
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var environment = Assert.Single(store.SavedRecords.Last().Jobs).Environment;
+        Assert.NotNull(environment);
+        Assert.Equal("production", environment.Name);
+        Assert.Equal("https://actio.local/deployments/42", environment.Url);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_RunsJobsInDependencyOrder()
     {
         var runner = new FakeRunnerProvider([0, 0]);

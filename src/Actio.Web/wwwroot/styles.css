@@ -596,6 +596,8 @@ pre {
   padding: 5px 9px;
   background: var(--panel-2);
   color: var(--text);
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .pill.status-success {

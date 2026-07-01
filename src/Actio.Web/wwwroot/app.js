@@ -853,6 +853,11 @@ function jobControlItems(job) {
   const items = [];
   const matrix = Object.entries(job.matrix ?? {});
 
+  if (job.environment?.name) {
+    const suffix = job.environment.url ? ` (${job.environment.url})` : "";
+    items.push(`environment ${job.environment.name}${suffix}`);
+  }
+
   if (matrix.length > 0) {
     items.push(`matrix ${matrix.map(([name, value]) => `${name}=${value}`).join(", ")}`);
   }

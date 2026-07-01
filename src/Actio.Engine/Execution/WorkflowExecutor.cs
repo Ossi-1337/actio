@@ -782,7 +782,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             job.ContinueOnError,
             job.Concurrency?.Group,
             job.Concurrency?.CancelInProgress ?? false,
-            job.Matrix);
+            job.Matrix,
+            job.Environment);
 
         return new JobExecutionOutcome(record, successfulSteps, failedSteps, 0);
     }
@@ -872,7 +873,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             job.ContinueOnError,
             job.Concurrency?.Group,
             job.Concurrency?.CancelInProgress ?? false,
-            job.Matrix);
+            job.Matrix,
+            job.Environment);
 
         return new JobExecutionOutcome(record, 0, 0, job.ExecutionStepCount);
     }
@@ -897,7 +899,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             job.ContinueOnError,
             job.Concurrency?.Group,
             job.Concurrency?.CancelInProgress ?? false,
-            job.Matrix);
+            job.Matrix,
+            job.Environment);
 
         return new JobExecutionOutcome(record, 0, 0, job.ExecutionStepCount);
     }

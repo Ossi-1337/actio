@@ -1386,7 +1386,8 @@ internal sealed class JobExecutor
             job.ContinueOnError,
             job.Concurrency?.Group,
             job.Concurrency?.CancelInProgress ?? false,
-            job.Matrix);
+            job.Matrix,
+            job.Environment);
 
         return new JobExecutionOutcome(record, successfulSteps, failedSteps, skippedSteps, continuedSteps);
     }

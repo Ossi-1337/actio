@@ -26,6 +26,7 @@ public sealed partial class WorkflowParser
         "if",
         "runs-on",
         "permissions",
+        "environment",
         "env",
         "defaults",
         "container",
@@ -234,6 +235,12 @@ public sealed partial class WorkflowParser
         "cancel-in-progress"
     };
 
+    private static readonly HashSet<string> JobEnvironmentKeys = new(StringComparer.Ordinal)
+    {
+        "name",
+        "url"
+    };
+
     private static readonly HashSet<string> JobStrategyKeys = new(StringComparer.Ordinal)
     {
         "matrix",
@@ -376,6 +383,7 @@ public sealed partial class WorkflowParser
             var env = ReadOptionalStringMap(errors, jobMap, "env", $"workflow.jobs.{jobName}.env");
             var defaults = ReadRunDefaults(errors, jobMap, "defaults", $"workflow.jobs.{jobName}.defaults");
             var permissions = ReadPermissions(errors, warnings, jobMap, "permissions", $"workflow.jobs.{jobName}.permissions");
+            var environment = ReadJobEnvironment(errors, warnings, jobMap, jobName);
             var container = ReadJobContainer(errors, jobMap, jobName);
             var services = ReadJobServices(errors, jobMap, jobName);
             var timeoutMinutes = ReadOptionalPositiveInt(errors, jobMap, "timeout-minutes", $"workflow.jobs.{jobName}.timeout-minutes");
@@ -409,7 +417,8 @@ public sealed partial class WorkflowParser
                     steps,
                     container,
                     services,
-                    permissions: permissions);
+                    permissions: permissions,
+                    environment: environment);
             }
             else if (uses is not null)
             {
@@ -429,7 +438,8 @@ public sealed partial class WorkflowParser
                     [],
                     [],
                     call: new WorkflowJobCall(uses, with, secrets),
-                    permissions: permissions);
+                    permissions: permissions,
+                    environment: environment);
             }
         }
 
@@ -493,6 +503,7 @@ public sealed partial class WorkflowParser
         foreach (var key in new[]
         {
             "runs-on",
+            "environment",
             "env",
             "defaults",
             "container",
@@ -2121,6 +2132,64 @@ public sealed partial class WorkflowParser
         return groupValue is null
             ? null
             : new WorkflowJobConcurrency(groupValue, cancelInProgress);
+    }
+
+    private static WorkflowJobEnvironment? ReadJobEnvironment(
+        List<string> errors,
+        List<string> warnings,
+        YamlMappingNode jobMap,
+        string jobName)
+    {
+        if (!TryGet(jobMap, "environment", out var node))
+        {
+            return null;
+        }
+
+        var path = $"workflow.jobs.{jobName}.environment";
+        var originalErrorCount = errors.Count;
+
+        if (node is YamlScalarNode scalar)
+        {
+            var name = ReadScalarValue(errors, scalar, path);
+            if (name is null)
+            {
+                return null;
+            }
+
+            AddJobEnvironmentWarningIfValid(errors, originalErrorCount, warnings, path);
+            return new WorkflowJobEnvironment(name);
+        }
+
+        if (node is YamlMappingNode environmentMap)
+        {
+            AddUnknownKeyErrors(errors, environmentMap, JobEnvironmentKeys, path);
+            var name = ReadRequiredScalar(errors, environmentMap, "name", $"{path}.name");
+            var url = ReadOptionalScalar(errors, environmentMap, "url", $"{path}.url");
+
+            if (errors.Count != originalErrorCount)
+            {
+                return null;
+            }
+
+            AddJobEnvironmentWarningIfValid(errors, originalErrorCount, warnings, path);
+            return new WorkflowJobEnvironment(name!, url);
+        }
+
+        errors.Add($"{path} must be a string or a mapping.");
+        return null;
+    }
+
+    private static void AddJobEnvironmentWarningIfValid(
+        IReadOnlyCollection<string> errors,
+        int originalErrorCount,
+        List<string> warnings,
+        string path)
+    {
+        AddWarningIfNoNewErrors(
+            errors,
+            originalErrorCount,
+            warnings,
+            $"{path} is parsed as local deployment environment metadata, but Actio does not enforce GitHub environment protection rules, approvals, environment secrets, or environment variables.");
     }
 
     private static WorkflowJobStrategy ReadJobStrategy(

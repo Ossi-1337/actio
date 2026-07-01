@@ -1,3 +1,4 @@
+using Actio.Core.Workflows;
 using Actio.Engine.Actions;
 using Actio.Engine.Runs;
 using Actio.Storage;
@@ -140,6 +141,25 @@ public sealed class ActioWebDataServiceTests : IDisposable
         Assert.NotNull(run);
         Assert.Equal("Running", run.Status);
         Assert.Equal(9000, run.DurationMilliseconds);
+    }
+
+    [Fact]
+    public async Task GetRunAsync_ReturnsJobEnvironmentMetadata()
+    {
+        var workflowPath = WriteWorkflow("deploy.yml", "Deploy");
+        await SaveRunAsync(CreateRun(
+            "run-1",
+            "Deploy",
+            workflowPath,
+            environment: new WorkflowJobEnvironment("production", "https://actio.local/deployments/42")));
+
+        var run = await CreateService().GetRunAsync("run-1");
+
+        Assert.NotNull(run);
+        var environment = Assert.Single(run.Jobs).Environment;
+        Assert.NotNull(environment);
+        Assert.Equal("production", environment.Name);
+        Assert.Equal("https://actio.local/deployments/42", environment.Url);
     }
 
     [Fact]
@@ -467,7 +487,8 @@ public sealed class ActioWebDataServiceTests : IDisposable
         string? jobId = null,
         string? stepId = null,
         string? stepSummary = null,
-        IReadOnlyList<StepLogAnnotation>? annotations = null)
+        IReadOnlyList<StepLogAnnotation>? annotations = null,
+        WorkflowJobEnvironment? environment = null)
     {
         var start = startedAt ?? DateTimeOffset.UtcNow;
         var finish = finishedAt ?? start;
@@ -498,7 +519,8 @@ public sealed class ActioWebDataServiceTests : IDisposable
                     [new StepRunRecord("Test", status, "dotnet test", 0, logPath, start, finish, durationMilliseconds, stepId, Summary: stepSummary, Annotations: annotations)],
                     artifact,
                     [],
-                    jobId)
+                    jobId,
+                    Environment: environment)
             ],
             [],
             artifact,

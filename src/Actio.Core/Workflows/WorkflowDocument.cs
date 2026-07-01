@@ -139,6 +139,10 @@ public sealed record WorkflowJobConcurrency(
     string Group,
     bool CancelInProgress);
 
+public sealed record WorkflowJobEnvironment(
+    string Name,
+    string? Url = null);
+
 public sealed record WorkflowJobStrategy(
     WorkflowJobMatrix Matrix,
     bool FailFast = true,
@@ -330,7 +334,8 @@ public sealed record WorkflowJob
         WorkflowJobContainer? container = null,
         IReadOnlyDictionary<string, WorkflowJobService>? services = null,
         WorkflowJobCall? call = null,
-        WorkflowPermissions? permissions = null)
+        WorkflowPermissions? permissions = null,
+        WorkflowJobEnvironment? environment = null)
     {
         Name = name;
         BaseName = name;
@@ -353,6 +358,7 @@ public sealed record WorkflowJob
         Steps = steps;
         Call = call;
         Permissions = permissions ?? WorkflowPermissions.Unspecified;
+        Environment = environment;
     }
 
     public string Name { get; init; }
@@ -396,6 +402,8 @@ public sealed record WorkflowJob
     public WorkflowJobCall? Call { get; init; }
 
     public WorkflowPermissions Permissions { get; init; }
+
+    public WorkflowJobEnvironment? Environment { get; init; }
 
     public bool IsReusableWorkflowCall => Call is not null;
 

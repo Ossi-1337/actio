@@ -1,3 +1,5 @@
+using Actio.Core.Workflows;
+
 namespace Actio.Engine.Runs;
 
 public sealed record JobRunRecord(
@@ -18,7 +20,8 @@ public sealed record JobRunRecord(
     bool ContinueOnError = false,
     string? ConcurrencyGroup = null,
     bool ConcurrencyCancelInProgress = false,
-    IReadOnlyDictionary<string, string>? Matrix = null)
+    IReadOnlyDictionary<string, string>? Matrix = null,
+    WorkflowJobEnvironment? Environment = null)
 {
     public string Id { get; init; } = Id ?? Name;
 
@@ -31,4 +34,6 @@ public sealed record JobRunRecord(
     public bool ConcurrencyCancelInProgress { get; init; } = ConcurrencyCancelInProgress;
 
     public IReadOnlyDictionary<string, string> Matrix { get; init; } = Matrix ?? new Dictionary<string, string>();
+
+    public WorkflowJobEnvironment? Environment { get; init; } = Environment;
 }

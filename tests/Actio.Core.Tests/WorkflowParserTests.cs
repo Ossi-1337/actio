@@ -342,6 +342,73 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
+    public void Parse_AcceptsJobEnvironmentMetadata()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              deploy:
+                runs-on: ubuntu-latest
+                environment:
+                  name: production
+                  url: https://actio.local/deployments/42
+                steps:
+                  - name: Deploy
+                    run: ./deploy.sh
+              smoke:
+                runs-on: ubuntu-latest
+                environment: staging
+                steps:
+                  - name: Smoke
+                    run: ./smoke.sh
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var deployEnvironment = result.Workflow!.Jobs["deploy"].Environment;
+        Assert.NotNull(deployEnvironment);
+        Assert.Equal("production", deployEnvironment.Name);
+        Assert.Equal("https://actio.local/deployments/42", deployEnvironment.Url);
+        var smokeEnvironment = result.Workflow.Jobs["smoke"].Environment;
+        Assert.NotNull(smokeEnvironment);
+        Assert.Equal("staging", smokeEnvironment.Name);
+        Assert.Null(smokeEnvironment.Url);
+        Assert.Contains(result.Warnings, warning => warning.Contains("workflow.jobs.deploy.environment", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Warnings, warning => warning.Contains("environment protection rules", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Parse_RejectsInvalidJobEnvironmentMetadata()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              deploy:
+                runs-on: ubuntu-latest
+                environment:
+                  url: https://actio.local/deployments/42
+                  reviewers:
+                    - oskar
+                steps:
+                  - name: Deploy
+                    run: ./deploy.sh
+              smoke:
+                runs-on: ubuntu-latest
+                environment:
+                  - staging
+                steps:
+                  - name: Smoke
+                    run: ./smoke.sh
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.deploy.environment.reviewers is not supported.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.deploy.environment.name is required.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.smoke.environment must be a string or a mapping.");
+    }
+
+    [Fact]
     public void Parse_AcceptsJobContainer()
     {
         var result = Parse(
