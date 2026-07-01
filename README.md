@@ -1,11 +1,32 @@
 # Actio
 
-Actio is a local-first workflow runner inspired by GitHub Actions.
+Actio is a local-first workflow runner for YAML pipelines, inspired by GitHub Actions and designed for fast feedback on your own machine.
 
-Current status: early implementation. The CLI can run YAML workflows from `.workflows/`, execute `run:` steps in Docker, run local reusable workflow calls, run local composite, Docker image, public GitHub composite, basic Node 20 JavaScript, and Dockerfile actions, use `ACTIO_GITHUB_TOKEN` for private GitHub action downloads, load local vars/secrets from ignored `.actio/` files and environment overrides, parse workflow/job `permissions` metadata without creating GitHub's automatic `GITHUB_TOKEN`, parse reusable `workflow_call` workflow definitions, persist run history/logs/artifacts under `ACTIO_HOME`, inspect local action cache entries, and show runs in a localhost web UI.
+## Status
+
+Actio is in early development. It can run workflows from `.workflows/`, execute Docker-backed steps and supported actions, persist local run history, logs, and artifacts, and show runs in a lightweight localhost web UI.
+
+Actio does not create GitHub's automatic `GITHUB_TOKEN`. Workflows that need tokens should use explicit local secrets.
+
+## Requirements
+
+- .NET 10 SDK
+- Docker
+
+## Usage
+
+Run a workflow:
 
 ```bash
 dotnet run --project src/Actio.Cli -- run ci.yml
+```
+
+Common commands:
+
+```bash
+dotnet run --project src/Actio.Cli -- --help
 dotnet run --project src/Actio.Cli -- cache list
 dotnet run --project src/Actio.Cli -- web
 ```
+
+Workflow files live in `.workflows/` at the project root.
