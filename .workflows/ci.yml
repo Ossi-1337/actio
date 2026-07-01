@@ -7,27 +7,233 @@ on:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_NOLOGO: true
+
 jobs:
-  validate:
-    name: Validate solution
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      cli_src: ${{ steps.filter.outputs.cli_src }}
+      cli_tests: ${{ steps.filter.outputs.cli_tests }}
+      core_src: ${{ steps.filter.outputs.core_src }}
+      core_tests: ${{ steps.filter.outputs.core_tests }}
+      engine_src: ${{ steps.filter.outputs.engine_src }}
+      engine_tests: ${{ steps.filter.outputs.engine_tests }}
+      runner_docker_src: ${{ steps.filter.outputs.runner_docker_src }}
+      runner_docker_tests: ${{ steps.filter.outputs.runner_docker_tests }}
+      storage_src: ${{ steps.filter.outputs.storage_src }}
+      storage_tests: ${{ steps.filter.outputs.storage_tests }}
+      web_src: ${{ steps.filter.outputs.web_src }}
+      web_tests: ${{ steps.filter.outputs.web_tests }}
+      shared: ${{ steps.filter.outputs.shared }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect changed areas
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            cli_src:
+              - 'src/Actio.Cli/**'
+            cli_tests:
+              - 'tests/Actio.Cli.Tests/**'
+            core_src:
+              - 'src/Actio.Core/**'
+            core_tests:
+              - 'tests/Actio.Core.Tests/**'
+            engine_src:
+              - 'src/Actio.Engine/**'
+            engine_tests:
+              - 'tests/Actio.Engine.Tests/**'
+            runner_docker_src:
+              - 'src/Actio.Runner.Docker/**'
+            runner_docker_tests:
+              - 'tests/Actio.Runner.Docker.Tests/**'
+            storage_src:
+              - 'src/Actio.Storage/**'
+            storage_tests:
+              - 'tests/Actio.Storage.Tests/**'
+            web_src:
+              - 'src/Actio.Web/**'
+            web_tests:
+              - 'tests/Actio.Web.Tests/**'
+            shared:
+              - '.workflows/**'
+              - 'Actio.slnx'
+              - '*.props'
+              - '*.targets'
+              - '*.config'
+              - '.editorconfig'
+              - '.gitattributes'
+              - 'Directory.Build.*'
+              - 'Directory.Packages.props'
+              - 'global.json'
+              - 'NuGet.config'
+
+  format:
+    name: Format
+    needs: changes
+    if: >-
+      ${{
+        needs.changes.outputs.shared == 'true' ||
+        needs.changes.outputs.cli_src == 'true' ||
+        needs.changes.outputs.cli_tests == 'true' ||
+        needs.changes.outputs.core_src == 'true' ||
+        needs.changes.outputs.core_tests == 'true' ||
+        needs.changes.outputs.engine_src == 'true' ||
+        needs.changes.outputs.engine_tests == 'true' ||
+        needs.changes.outputs.runner_docker_src == 'true' ||
+        needs.changes.outputs.runner_docker_tests == 'true' ||
+        needs.changes.outputs.storage_src == 'true' ||
+        needs.changes.outputs.storage_tests == 'true' ||
+        needs.changes.outputs.web_src == 'true' ||
+        needs.changes.outputs.web_tests == 'true'
+      }}
     runs-on: ubuntu-latest
     container:
       image: mcr.microsoft.com/dotnet/sdk:10.0
     steps:
-      - name: Validate
-        run: |
-          set -e
-          work=/tmp/actio-ci
-          rm -rf "$work"
-          mkdir -p "$work"
-          tar \
-            --exclude='.git' \
-            --exclude='.actio' \
-            --exclude='*/bin' \
-            --exclude='*/obj' \
-            -cf - . | tar -C "$work" -xf -
-          cd "$work"
-          dotnet restore Actio.slnx
-          dotnet build Actio.slnx --no-restore
-          dotnet test Actio.slnx --no-build
-          dotnet format Actio.slnx --verify-no-changes --no-restore
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore
+        run: dotnet restore Actio.slnx
+
+      - name: Verify formatting
+        run: dotnet format Actio.slnx --verify-no-changes --no-restore
+
+  test_core:
+    name: Test Core
+    needs: changes
+    if: >-
+      ${{
+        needs.changes.outputs.shared == 'true' ||
+        needs.changes.outputs.core_src == 'true' ||
+        needs.changes.outputs.core_tests == 'true'
+      }}
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/dotnet/sdk:10.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Core tests
+        run: dotnet test tests/Actio.Core.Tests/Actio.Core.Tests.csproj --configuration Release
+
+  test_engine:
+    name: Test Engine
+    needs: changes
+    if: >-
+      ${{
+        needs.changes.outputs.shared == 'true' ||
+        needs.changes.outputs.core_src == 'true' ||
+        needs.changes.outputs.engine_src == 'true' ||
+        needs.changes.outputs.engine_tests == 'true'
+      }}
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/dotnet/sdk:10.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Engine tests
+        run: dotnet test tests/Actio.Engine.Tests/Actio.Engine.Tests.csproj --configuration Release
+
+  test_runner_docker:
+    name: Test Docker Runner
+    needs: changes
+    if: >-
+      ${{
+        needs.changes.outputs.shared == 'true' ||
+        needs.changes.outputs.core_src == 'true' ||
+        needs.changes.outputs.engine_src == 'true' ||
+        needs.changes.outputs.runner_docker_src == 'true' ||
+        needs.changes.outputs.runner_docker_tests == 'true'
+      }}
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/dotnet/sdk:10.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Docker Runner tests
+        run: dotnet test tests/Actio.Runner.Docker.Tests/Actio.Runner.Docker.Tests.csproj --configuration Release
+
+  test_storage:
+    name: Test Storage
+    needs: changes
+    if: >-
+      ${{
+        needs.changes.outputs.shared == 'true' ||
+        needs.changes.outputs.core_src == 'true' ||
+        needs.changes.outputs.engine_src == 'true' ||
+        needs.changes.outputs.storage_src == 'true' ||
+        needs.changes.outputs.storage_tests == 'true'
+      }}
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/dotnet/sdk:10.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Storage tests
+        run: dotnet test tests/Actio.Storage.Tests/Actio.Storage.Tests.csproj --configuration Release
+
+  test_web:
+    name: Test Web
+    needs: changes
+    if: >-
+      ${{
+        needs.changes.outputs.shared == 'true' ||
+        needs.changes.outputs.core_src == 'true' ||
+        needs.changes.outputs.engine_src == 'true' ||
+        needs.changes.outputs.storage_src == 'true' ||
+        needs.changes.outputs.web_src == 'true' ||
+        needs.changes.outputs.web_tests == 'true'
+      }}
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/dotnet/sdk:10.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Web tests
+        run: dotnet test tests/Actio.Web.Tests/Actio.Web.Tests.csproj --configuration Release
+
+  test_cli:
+    name: Test CLI
+    needs: changes
+    if: >-
+      ${{
+        needs.changes.outputs.shared == 'true' ||
+        needs.changes.outputs.cli_src == 'true' ||
+        needs.changes.outputs.cli_tests == 'true' ||
+        needs.changes.outputs.core_src == 'true' ||
+        needs.changes.outputs.engine_src == 'true' ||
+        needs.changes.outputs.runner_docker_src == 'true' ||
+        needs.changes.outputs.storage_src == 'true' ||
+        needs.changes.outputs.web_src == 'true'
+      }}
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/dotnet/sdk:10.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run CLI tests
+        run: dotnet test tests/Actio.Cli.Tests/Actio.Cli.Tests.csproj --configuration Release
