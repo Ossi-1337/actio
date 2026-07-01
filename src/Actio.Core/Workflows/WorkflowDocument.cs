@@ -17,7 +17,7 @@ public sealed record WorkflowDocument(
 
     public WorkflowRunDefaults Defaults { get; init; } = Defaults ?? WorkflowRunDefaults.Empty;
 
-    public int StepCount => Jobs.Values.Sum(job => job.Steps.Count);
+    public int StepCount => Jobs.Values.Sum(job => job.ExecutionStepCount);
 
     public bool IsReusableOnly => Triggers.Count > 0
         && Triggers.All(trigger => string.Equals(trigger.EventName, "workflow_call", StringComparison.Ordinal));
@@ -294,7 +294,8 @@ public sealed record WorkflowJob
         IReadOnlyList<WorkflowArtifact> artifacts,
         IReadOnlyList<WorkflowStep> steps,
         WorkflowJobContainer? container = null,
-        IReadOnlyDictionary<string, WorkflowJobService>? services = null)
+        IReadOnlyDictionary<string, WorkflowJobService>? services = null,
+        WorkflowJobCall? call = null)
     {
         Name = name;
         BaseName = name;
@@ -315,6 +316,7 @@ public sealed record WorkflowJob
         Outputs = outputs;
         Artifacts = artifacts;
         Steps = steps;
+        Call = call;
     }
 
     public string Name { get; init; }
@@ -354,7 +356,18 @@ public sealed record WorkflowJob
     public IReadOnlyList<WorkflowArtifact> Artifacts { get; init; }
 
     public IReadOnlyList<WorkflowStep> Steps { get; init; }
+
+    public WorkflowJobCall? Call { get; init; }
+
+    public bool IsReusableWorkflowCall => Call is not null;
+
+    public int ExecutionStepCount => IsReusableWorkflowCall ? 1 : Steps.Count;
 }
+
+public sealed record WorkflowJobCall(
+    string Uses,
+    IReadOnlyDictionary<string, string> With,
+    IReadOnlyDictionary<string, string> Secrets);
 
 public sealed record WorkflowArtifact(
     string Name,

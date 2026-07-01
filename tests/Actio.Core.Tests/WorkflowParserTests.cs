@@ -1051,6 +1051,113 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
+    public void Parse_AcceptsReusableWorkflowCallerJob()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              build:
+                uses: ./.workflows/reusable-build.yml
+                with:
+                  configuration: Release
+                secrets:
+                  nuget-token: local-token
+              publish:
+                needs: build
+                if: "${{ needs.build.outputs.package-path == 'dist/app.zip' }}"
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Publish
+                    run: echo publish
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var build = result.Workflow!.Jobs["build"];
+        Assert.True(build.IsReusableWorkflowCall);
+        Assert.Equal("reusable-workflow", build.RunsOn);
+        Assert.Equal("./.workflows/reusable-build.yml", build.Call!.Uses);
+        Assert.Equal("Release", build.Call.With["configuration"]);
+        Assert.Equal("local-token", build.Call.Secrets["nuget-token"]);
+        Assert.Empty(build.Steps);
+        Assert.Equal(1, build.ExecutionStepCount);
+    }
+
+    [Fact]
+    public void Parse_RejectsInvalidReusableWorkflowCallerJobShape()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              build:
+                uses: ./.workflows/reusable-build.yml
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Build
+                    run: dotnet build
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.build.runs-on cannot be used when the job calls a reusable workflow with uses.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.build.steps cannot be used when the job calls a reusable workflow with uses.");
+    }
+
+    [Fact]
+    public void Parse_RejectsRemoteReusableWorkflowCallerJob()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              build:
+                uses: owner/repo/.github/workflows/build.yml@v1
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.build.uses supports only local reusable workflow references in this milestone.");
+    }
+
+    [Fact]
+    public void Parse_RejectsReusableWorkflowSecretInheritance()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              build:
+                uses: ./.workflows/reusable-build.yml
+                secrets: inherit
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.build.secrets: inherit is not supported for local reusable workflow calls.");
+    }
+
+    [Fact]
+    public void Parse_AcceptsDeclaredWorkflowCallSecretsInConditions()
+    {
+        var result = Parse(
+            """
+            name: Reusable Build
+            on:
+              workflow_call:
+                secrets:
+                  token:
+                    required: true
+            jobs:
+              build:
+                if: "${{ secrets.token != '' }}"
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Build
+                    run: dotnet build
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+    }
+
+    [Fact]
     public void Parse_AcceptsScheduleCronMetadata()
     {
         var result = Parse(
@@ -1497,7 +1604,7 @@ public sealed class WorkflowParserTests
 
         Assert.False(result.Success);
         Assert.Contains(result.Errors, error => error.Contains("secrets", StringComparison.OrdinalIgnoreCase));
-        Assert.Contains(result.Errors, error => error.Contains("not available", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("no workflow_call secret named 'TOKEN'", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

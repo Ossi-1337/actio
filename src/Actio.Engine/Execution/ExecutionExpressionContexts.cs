@@ -13,6 +13,7 @@ internal static class ExecutionExpressionContexts
         WorkflowExecutionOptions options,
         string runId,
         IReadOnlyDictionary<string, string> env,
+        IReadOnlyDictionary<string, string> secrets,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
         IReadOnlyDictionary<string, string> jobStatuses)
     {
@@ -23,6 +24,7 @@ internal static class ExecutionExpressionContexts
             runId,
             options.RunTrigger,
             env,
+            secrets,
             options.RunTrigger.Inputs,
             jobOutputs,
             jobStatuses,
@@ -40,6 +42,7 @@ internal static class ExecutionExpressionContexts
         string runId,
         WorkflowRunTrigger runTrigger,
         IReadOnlyDictionary<string, string> env,
+        IReadOnlyDictionary<string, string> secrets,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
         IReadOnlyDictionary<string, string> jobStatuses,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> stepOutputs,
@@ -52,6 +55,7 @@ internal static class ExecutionExpressionContexts
             runId,
             runTrigger,
             env,
+            secrets,
             runTrigger.Inputs,
             jobOutputs,
             jobStatuses,
@@ -92,6 +96,7 @@ internal static class ExecutionExpressionContexts
         string runId,
         WorkflowRunTrigger runTrigger,
         IReadOnlyDictionary<string, string> env,
+        IReadOnlyDictionary<string, string> secrets,
         IReadOnlyDictionary<string, string> inputs,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
         IReadOnlyDictionary<string, string> jobStatuses,
@@ -113,12 +118,18 @@ internal static class ExecutionExpressionContexts
             ExpressionContextRoot.AvailableRoot("inputs", ExpressionContextData.FromStrings(inputs), allowMissingProperties: true, includeInSafeSnapshot: false)
         };
 
+        var hasSecrets = secrets.Count > 0;
+        if (hasSecrets)
+        {
+            roots.Add(ExpressionContextRoot.AvailableRoot("secrets", ExpressionContextData.FromStrings(secrets), allowMissingProperties: true, includeInSafeSnapshot: false));
+        }
+
         if (step is not null)
         {
             roots.Add(ExpressionContextRoot.AvailableRoot("step", CreateStepContext(step), includeInSafeSnapshot: true));
         }
 
-        roots.AddRange(CreateUnavailableRoots());
+        roots.AddRange(CreateUnavailableRoots(includeSecrets: !hasSecrets));
         return new ExpressionContextData(roots, projectRoot);
     }
 
@@ -249,10 +260,14 @@ internal static class ExecutionExpressionContexts
         return steps;
     }
 
-    private static IEnumerable<ExpressionContextRoot> CreateUnavailableRoots()
+    private static IEnumerable<ExpressionContextRoot> CreateUnavailableRoots(bool includeSecrets = true)
     {
         yield return ExpressionContextRoot.UnavailableRoot("vars", "Expression context 'vars' is not available until a local vars provider is implemented.");
-        yield return ExpressionContextRoot.UnavailableRoot("secrets", "Expression context 'secrets' is not available until a local secrets provider is implemented.");
+        if (includeSecrets)
+        {
+            yield return ExpressionContextRoot.UnavailableRoot("secrets", "Expression context 'secrets' is not available until a local secrets provider is implemented.");
+        }
+
         yield return ExpressionContextRoot.UnavailableRoot("strategy", "Expression context 'strategy' is not available until matrix strategy metadata support is implemented.");
     }
 

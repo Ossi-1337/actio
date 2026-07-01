@@ -33,6 +33,9 @@ public sealed partial class WorkflowParser
         "continue-on-error",
         "concurrency",
         "strategy",
+        "uses",
+        "with",
+        "secrets",
         "outputs",
         "artifacts",
         "steps"
@@ -332,7 +335,10 @@ public sealed partial class WorkflowParser
             var displayName = ReadOptionalScalar(errors, jobMap, "name", $"workflow.jobs.{jobName}.name");
             var needs = ReadNeeds(errors, jobMap, $"workflow.jobs.{jobName}.needs");
             var condition = ReadOptionalScalar(errors, jobMap, "if", $"workflow.jobs.{jobName}.if");
-            var runsOn = ReadRequiredScalar(errors, jobMap, "runs-on", $"workflow.jobs.{jobName}.runs-on");
+            var uses = ReadOptionalScalar(errors, jobMap, "uses", $"workflow.jobs.{jobName}.uses");
+            var runsOn = uses is null
+                ? ReadRequiredScalar(errors, jobMap, "runs-on", $"workflow.jobs.{jobName}.runs-on")
+                : null;
             var env = ReadOptionalStringMap(errors, jobMap, "env", $"workflow.jobs.{jobName}.env");
             var defaults = ReadRunDefaults(errors, jobMap, "defaults", $"workflow.jobs.{jobName}.defaults");
             var container = ReadJobContainer(errors, jobMap, jobName);
@@ -343,7 +349,11 @@ public sealed partial class WorkflowParser
             var strategy = ReadJobStrategy(errors, jobMap, jobName);
             var outputs = ReadOptionalStringMap(errors, jobMap, "outputs", $"workflow.jobs.{jobName}.outputs");
             var artifacts = ReadArtifacts(errors, jobMap, jobName);
-            var steps = ReadSteps(errors, warnings, jobMap, jobName);
+            var steps = uses is null ? ReadSteps(errors, warnings, jobMap, jobName) : [];
+            var with = ReadOptionalStringMap(errors, jobMap, "with", $"workflow.jobs.{jobName}.with");
+            var secrets = ReadJobSecrets(errors, jobMap, jobName);
+
+            ValidateJobCallShape(errors, jobMap, jobName, uses, with, secrets);
 
             if (runsOn is not null)
             {
@@ -365,10 +375,106 @@ public sealed partial class WorkflowParser
                     container,
                     services);
             }
+            else if (uses is not null)
+            {
+                jobs[jobName] = new WorkflowJob(
+                    jobName,
+                    displayName,
+                    needs,
+                    condition,
+                    "reusable-workflow",
+                    new Dictionary<string, string>(),
+                    WorkflowRunDefaults.Empty,
+                    null,
+                    continueOnError,
+                    null,
+                    WorkflowJobStrategy.Empty,
+                    new Dictionary<string, string>(),
+                    [],
+                    [],
+                    call: new WorkflowJobCall(uses, with, secrets));
+            }
         }
 
         ValidateNeeds(errors, jobs);
         return jobs;
+    }
+
+    private static IReadOnlyDictionary<string, string> ReadJobSecrets(
+        List<string> errors,
+        YamlMappingNode jobMap,
+        string jobName)
+    {
+        var path = $"workflow.jobs.{jobName}.secrets";
+        if (!TryGet(jobMap, "secrets", out var secretsNode))
+        {
+            return new Dictionary<string, string>();
+        }
+
+        if (secretsNode is YamlScalarNode scalar)
+        {
+            var value = ReadScalarValue(errors, scalar, path);
+            errors.Add(string.Equals(value, "inherit", StringComparison.Ordinal)
+                ? $"{path}: inherit is not supported for local reusable workflow calls."
+                : $"{path} must be a mapping.");
+            return new Dictionary<string, string>();
+        }
+
+        if (secretsNode is not YamlMappingNode secretsMap)
+        {
+            errors.Add($"{path} must be a mapping.");
+            return new Dictionary<string, string>();
+        }
+
+        return ReadStringMapEntries(errors, secretsMap, path);
+    }
+
+    private static void ValidateJobCallShape(
+        List<string> errors,
+        YamlMappingNode jobMap,
+        string jobName,
+        string? uses,
+        IReadOnlyDictionary<string, string> with,
+        IReadOnlyDictionary<string, string> secrets)
+    {
+        if (uses is null)
+        {
+            if (with.Count > 0)
+            {
+                errors.Add($"workflow.jobs.{jobName}.with is supported only on reusable workflow call jobs.");
+            }
+
+            if (secrets.Count > 0)
+            {
+                errors.Add($"workflow.jobs.{jobName}.secrets is supported only on reusable workflow call jobs.");
+            }
+
+            return;
+        }
+
+        var callPath = $"workflow.jobs.{jobName}";
+        foreach (var key in new[]
+        {
+            "runs-on",
+            "env",
+            "defaults",
+            "container",
+            "services",
+            "timeout-minutes",
+            "concurrency",
+            "strategy",
+            "outputs",
+            "artifacts",
+            "steps"
+        })
+        {
+            if (TryGet(jobMap, key, out _))
+            {
+                errors.Add($"{callPath}.{key} cannot be used when the job calls a reusable workflow with uses.");
+            }
+        }
+
+        ValidateLocalReusableWorkflowReference(errors, uses, $"{callPath}.uses");
     }
 
     private static IReadOnlyList<string> ReadNeeds(List<string> errors, YamlMappingNode jobMap, string path)
@@ -608,6 +714,31 @@ public sealed partial class WorkflowParser
         if (reference.IsMutable)
         {
             warnings.Add(FormatMutableReferenceWarning(itemPath, reference));
+        }
+    }
+
+    private static void ValidateLocalReusableWorkflowReference(
+        List<string> errors,
+        string uses,
+        string path)
+    {
+        var normalized = uses.Replace('\\', '/');
+        if (!normalized.StartsWith("./", StringComparison.Ordinal))
+        {
+            errors.Add($"{path} supports only local reusable workflow references in this milestone.");
+            return;
+        }
+
+        if (!normalized.EndsWith(".yml", StringComparison.OrdinalIgnoreCase) &&
+            !normalized.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase))
+        {
+            errors.Add($"{path} must reference a .yml or .yaml workflow file.");
+        }
+
+        if (!normalized.StartsWith("./.workflows/", StringComparison.Ordinal) &&
+            !normalized.StartsWith("./.github/workflows/", StringComparison.Ordinal))
+        {
+            errors.Add($"{path} must reference a workflow under .workflows/ or .github/workflows/.");
         }
     }
 
@@ -1451,6 +1582,14 @@ public sealed partial class WorkflowParser
             return new Dictionary<string, string>();
         }
 
+        return ReadStringMapEntries(errors, valueMap, path);
+    }
+
+    private static IReadOnlyDictionary<string, string> ReadStringMapEntries(
+        List<string> errors,
+        YamlMappingNode valueMap,
+        string path)
+    {
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
 
         foreach (var (keyNode, valueNode) in valueMap.Children)
@@ -2132,6 +2271,7 @@ public sealed partial class WorkflowParser
         IReadOnlyList<WorkflowTrigger> triggers)
     {
         var workflowInputNames = CollectWorkflowInputNames(triggers);
+        var workflowSecretNames = CollectWorkflowSecretNames(triggers);
 
         foreach (var job in jobs.Values)
         {
@@ -2146,10 +2286,10 @@ public sealed partial class WorkflowParser
                 continue;
             }
 
-            ValidateExpressionReferences(errors, $"workflow.jobs.{job.Name}.if", expression, job, jobs, workflowInputNames, stepIndex: null);
+            ValidateExpressionReferences(errors, $"workflow.jobs.{job.Name}.if", expression, job, jobs, workflowInputNames, workflowSecretNames, stepIndex: null);
         }
 
-        ValidateStepConditions(errors, jobs, workflowInputNames);
+        ValidateStepConditions(errors, jobs, workflowInputNames, workflowSecretNames);
     }
 
     private static IReadOnlySet<string> CollectWorkflowInputNames(IReadOnlyList<WorkflowTrigger> triggers)
@@ -2178,10 +2318,31 @@ public sealed partial class WorkflowParser
         return inputNames;
     }
 
+    private static IReadOnlySet<string> CollectWorkflowSecretNames(IReadOnlyList<WorkflowTrigger> triggers)
+    {
+        var secretNames = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var trigger in triggers)
+        {
+            if (!string.Equals(trigger.EventName, "workflow_call", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            foreach (var secretName in trigger.Call.Secrets.Keys)
+            {
+                secretNames.Add(secretName);
+            }
+        }
+
+        return secretNames;
+    }
+
     private static void ValidateStepConditions(
         List<string> errors,
         IReadOnlyDictionary<string, WorkflowJob> jobs,
-        IReadOnlySet<string> workflowInputNames)
+        IReadOnlySet<string> workflowInputNames,
+        IReadOnlySet<string> workflowSecretNames)
     {
         foreach (var job in jobs.Values)
         {
@@ -2200,7 +2361,7 @@ public sealed partial class WorkflowParser
                     continue;
                 }
 
-                ValidateExpressionReferences(errors, path, expression, job, jobs, workflowInputNames, index);
+                ValidateExpressionReferences(errors, path, expression, job, jobs, workflowInputNames, workflowSecretNames, index);
             }
         }
     }
@@ -2238,6 +2399,7 @@ public sealed partial class WorkflowParser
         WorkflowJob job,
         IReadOnlyDictionary<string, WorkflowJob> jobs,
         IReadOnlySet<string> workflowInputNames,
+        IReadOnlySet<string> workflowSecretNames,
         int? stepIndex)
     {
         var seenReferences = new HashSet<string>(StringComparer.Ordinal);
@@ -2260,6 +2422,23 @@ public sealed partial class WorkflowParser
                 if (!workflowInputNames.Contains(inputName))
                 {
                     errors.Add($"{path} references inputs.{inputName}, but no workflow_dispatch or workflow_call input named '{inputName}' is declared.");
+                }
+
+                continue;
+            }
+
+            if (string.Equals(reference.Root, "secrets", StringComparison.Ordinal))
+            {
+                if (reference.Path.Count != 1)
+                {
+                    errors.Add($"{path} references unsupported expression context '{reference}'.");
+                    continue;
+                }
+
+                var secretName = reference.Path[0];
+                if (!workflowSecretNames.Contains(secretName))
+                {
+                    errors.Add($"{path} references secrets.{secretName}, but no workflow_call secret named '{secretName}' is declared.");
                 }
 
                 continue;

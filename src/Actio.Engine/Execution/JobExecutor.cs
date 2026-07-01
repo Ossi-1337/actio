@@ -45,6 +45,7 @@ internal sealed class JobExecutor
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
         IReadOnlyDictionary<string, string> jobStatuses,
         WorkflowRunTrigger runTrigger,
+        IReadOnlyDictionary<string, string> workflowSecrets,
         string projectRoot,
         string runId,
         TextWriter output,
@@ -75,6 +76,11 @@ internal sealed class JobExecutor
         DateTimeOffset? currentStepStartedAt = null;
         JobServiceNetwork? serviceNetwork = null;
         var servicesStopped = false;
+
+        foreach (var secret in workflowSecrets.Values)
+        {
+            secretMasker.Add(secret);
+        }
 
         if (!_runnerProvider.SupportsRunner(job.RunsOn))
         {
@@ -123,6 +129,7 @@ internal sealed class JobExecutor
                         runId,
                         runTrigger,
                         CreateStepContextEnvironment(workflowEnv, job.Env, environmentUpdates, step.Env),
+                        workflowSecrets,
                         jobOutputs,
                         jobStatuses,
                         stepOutputs,

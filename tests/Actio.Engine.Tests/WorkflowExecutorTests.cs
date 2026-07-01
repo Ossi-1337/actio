@@ -2999,6 +2999,214 @@ public sealed class WorkflowExecutorTests
         Assert.Contains(result.Errors, error => error.Contains("repository not found", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public async Task ExecuteAsync_CallsLocalReusableWorkflowAndExposesOutputs()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-reusable-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(projectRoot, ".workflows"));
+        File.WriteAllText(
+            Path.Combine(projectRoot, ".workflows", "reusable-build.yml"),
+            """
+            name: Reusable Build
+            on:
+              workflow_call:
+                inputs:
+                  configuration:
+                    required: true
+                    type: string
+                secrets:
+                  token:
+                    required: true
+                outputs:
+                  package-path:
+                    value: "${{ jobs.build.outputs.package-path }}"
+            jobs:
+              build:
+                if: "${{ secrets.token != '' }}"
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Build
+                    run: dotnet build
+            """);
+
+        try
+        {
+            var runner = new FakeRunnerProvider(
+                [
+                    new FakeRunnerStep(0, ["secret is super-token", "actio.output package-path=dist/Release.zip"]),
+                    new FakeRunnerStep(0)
+                ]);
+            var workflow = CreateWorkflow(
+                CreateReusableWorkflowCallJob(
+                    "build",
+                    "./.workflows/reusable-build.yml",
+                    new Dictionary<string, string> { ["configuration"] = "Release" },
+                    new Dictionary<string, string> { ["token"] = "super-token" }),
+                new WorkflowJob(
+                    "consume",
+                    ["build"],
+                    "${{ needs.build.outputs.package-path == 'dist/Release.zip' }}",
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Consume package", "echo consume", null)]));
+
+            using var output = new StringWriter();
+            var result = await new WorkflowExecutor(runner).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot, Path.Combine(projectRoot, ".workflows", "caller.yml"), "run-reusable"),
+                output,
+                TextWriter.Null);
+
+            Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+            Assert.Equal(2, result.SuccessfulSteps);
+            Assert.Equal(2, result.TotalSteps);
+            Assert.Equal(["build", "consume"], runner.Requests.Select(request => request.JobName));
+            Assert.Contains(result.Outputs, item =>
+                item.JobName == "build" &&
+                item.Name == "package-path" &&
+                item.Value == "dist/Release.zip");
+            Assert.Contains("secret is ***", output.ToString());
+            Assert.DoesNotContain("super-token", output.ToString());
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_FailsReusableWorkflowCallWhenRequiredInputIsMissing()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-reusable-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(projectRoot, ".workflows"));
+        File.WriteAllText(
+            Path.Combine(projectRoot, ".workflows", "reusable-build.yml"),
+            """
+            name: Reusable Build
+            on:
+              workflow_call:
+                inputs:
+                  configuration:
+                    required: true
+                    type: string
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Build
+                    run: dotnet build
+            """);
+
+        try
+        {
+            var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+            var workflow = CreateWorkflow(
+                CreateReusableWorkflowCallJob(
+                    "build",
+                    "./.workflows/reusable-build.yml",
+                    new Dictionary<string, string>(),
+                    new Dictionary<string, string>()));
+
+            var result = await new WorkflowExecutor(runner).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.False(result.Success);
+            Assert.Empty(runner.Requests);
+            Assert.Contains(result.Errors, error =>
+                error.Contains("workflow.jobs.build.uses './.workflows/reusable-build.yml' -> callee", StringComparison.Ordinal) &&
+                error.Contains("requires workflow_call input 'configuration'", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_AllowsMissingOptionalReusableWorkflowSecret()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-reusable-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(projectRoot, ".workflows"));
+        File.WriteAllText(
+            Path.Combine(projectRoot, ".workflows", "optional-secret.yml"),
+            """
+            name: Optional Secret
+            on:
+              workflow_call:
+                secrets:
+                  token:
+                    required: false
+            jobs:
+              check:
+                if: "${{ secrets.token == '' }}"
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Check
+                    run: echo optional
+            """);
+
+        try
+        {
+            var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+            var workflow = CreateWorkflow(
+                CreateReusableWorkflowCallJob(
+                    "check_secret",
+                    "./.workflows/optional-secret.yml",
+                    new Dictionary<string, string>(),
+                    new Dictionary<string, string>()));
+
+            var result = await new WorkflowExecutor(runner).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+            Assert.Single(runner.Requests);
+            Assert.Equal("check", runner.Requests[0].JobName);
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_RejectsReusableWorkflowOutsideWorkflowFolders()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-reusable-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectRoot);
+        File.WriteAllText(Path.Combine(projectRoot, "reusable.yml"), "name: Reusable");
+
+        try
+        {
+            var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+            var workflow = CreateWorkflow(
+                CreateReusableWorkflowCallJob(
+                    "build",
+                    "./reusable.yml",
+                    new Dictionary<string, string>(),
+                    new Dictionary<string, string>()));
+
+            var result = await new WorkflowExecutor(runner).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.False(result.Success);
+            Assert.Empty(runner.Requests);
+            Assert.Contains(result.Errors, error => error.Contains("must reference a workflow under .workflows/ or .github/workflows/", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
     private static WorkflowDocument CreateWorkflow(params WorkflowJob[] jobs)
     {
         return new WorkflowDocument(
@@ -3008,6 +3216,30 @@ public sealed class WorkflowExecutorTests
                 ["DOTNET_NOLOGO"] = "true"
             },
             jobs.ToDictionary(job => job.Name, StringComparer.Ordinal));
+    }
+
+    private static WorkflowJob CreateReusableWorkflowCallJob(
+        string name,
+        string uses,
+        IReadOnlyDictionary<string, string> with,
+        IReadOnlyDictionary<string, string> secrets)
+    {
+        return new WorkflowJob(
+            name,
+            null,
+            [],
+            null,
+            "reusable-workflow",
+            new Dictionary<string, string>(),
+            WorkflowRunDefaults.Empty,
+            null,
+            false,
+            null,
+            WorkflowJobStrategy.Empty,
+            new Dictionary<string, string>(),
+            [],
+            [],
+            call: new WorkflowJobCall(uses, with, secrets));
     }
 
     private static WorkflowJob CreateMatrixJob(

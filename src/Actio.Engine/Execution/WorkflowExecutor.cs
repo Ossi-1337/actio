@@ -3,6 +3,8 @@ using Actio.Core.Expressions;
 using Actio.Core.Workflows;
 using Actio.Engine.Actions;
 using Actio.Engine.Runs;
+using System.Globalization;
+using System.Text.Json.Nodes;
 
 namespace Actio.Engine.Execution;
 
@@ -13,8 +15,13 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
     private const string RunningStatus = "Running";
     private const string SkippedStatus = "Skipped";
     private const string TimedOutStatus = "TimedOut";
+    private const int MaxReusableWorkflowDepth = 10;
 
+    private readonly IRunnerProvider _runnerProvider;
     private readonly IRunStore _runStore;
+    private readonly IActionCache _actionCache;
+    private readonly Func<int, TimeSpan>? _createJobTimeout;
+    private readonly WorkflowParser _workflowParser;
     private readonly ConditionEvaluator _conditionEvaluator;
     private readonly JobExecutor _jobExecutor;
 
@@ -25,7 +32,11 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         Func<int, TimeSpan>? createJobTimeout = null)
     {
         _runStore = runStore ?? new NullRunStore();
+        _runnerProvider = runnerProvider;
         var cache = actionCache ?? NullActionCache.Instance;
+        _actionCache = cache;
+        _createJobTimeout = createJobTimeout;
+        _workflowParser = new WorkflowParser();
         var githubActionSourceProvider = cache as IGitHubActionSourceProvider ?? NullActionCache.Instance;
         var outputMarkerParser = new OutputMarkerParser();
         _conditionEvaluator = new ConditionEvaluator();
@@ -44,7 +55,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         var synchronizedError = TextWriter.Synchronized(error);
         var runId = options.RunId ?? _runStore.CreateRunId();
         var expansion = MatrixJobExpander.Expand(workflow.Jobs);
-        var totalSteps = expansion.Jobs.Values.Sum(job => job.Steps.Count);
+        var totalSteps = expansion.Jobs.Values.Sum(job => job.ExecutionStepCount);
         RunStoragePaths storagePaths;
 
         try
@@ -255,6 +266,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                     options,
                     runId,
                     MergeEnvironment(workflow.Env, job.Env),
+                    options.Secrets,
                     contextJobOutputs,
                     contextJobStatuses),
                 contextJobStatuses,
@@ -276,21 +288,36 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             }
         }
 
-        return skipReason is null
-            ? await _jobExecutor.ExecuteAsync(
-                workflow.Name,
+        if (skipReason is not null)
+        {
+            return CreateSkippedJobOutcome(job, skipReason);
+        }
+
+        if (job.Call is not null)
+        {
+            return await ExecuteReusableWorkflowCallAsync(
                 job,
-                workflow.Env,
-                workflow.Defaults,
-                contextJobOutputs,
-                contextJobStatuses,
-                options.RunTrigger,
-                options.ProjectRoot,
+                options,
                 runId,
                 output,
                 error,
-                cancellationToken)
-            : CreateSkippedJobOutcome(job, skipReason);
+                cancellationToken);
+        }
+
+        return await _jobExecutor.ExecuteAsync(
+            workflow.Name,
+            job,
+            workflow.Env,
+            workflow.Defaults,
+            contextJobOutputs,
+            contextJobStatuses,
+            options.RunTrigger,
+            options.Secrets,
+            options.ProjectRoot,
+            runId,
+            output,
+            error,
+            cancellationToken);
     }
 
     private async Task<IReadOnlyList<PlannedJobOutcome>> ExecuteMatrixJobGroupAsync(
@@ -348,6 +375,382 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         }
 
         return outcomes;
+    }
+
+    private async Task<JobExecutionOutcome> ExecuteReusableWorkflowCallAsync(
+        WorkflowJob job,
+        WorkflowExecutionOptions options,
+        string runId,
+        TextWriter output,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        var startedAt = DateTimeOffset.UtcNow;
+        output.WriteLine($"[{job.DisplayName}] Call reusable workflow");
+
+        var pathResolution = ResolveReusableWorkflowPath(job, options);
+        if (!pathResolution.Success)
+        {
+            return CreateReusableWorkflowCallOutcome(
+                job,
+                FailedStatus,
+                startedAt,
+                new Dictionary<string, string>(),
+                pathResolution.Errors,
+                successfulSteps: 0,
+                failedSteps: 1);
+        }
+
+        var calleePath = pathResolution.Path!;
+        var parseResult = _workflowParser.ParseFile(calleePath);
+        if (!parseResult.Success)
+        {
+            return CreateReusableWorkflowCallOutcome(
+                job,
+                FailedStatus,
+                startedAt,
+                new Dictionary<string, string>(),
+                PrefixReusableWorkflowErrors(job, calleePath, parseResult.Errors),
+                successfulSteps: 0,
+                failedSteps: 1);
+        }
+
+        var calleeWorkflow = parseResult.Workflow!;
+        var workflowCall = calleeWorkflow.Triggers
+            .FirstOrDefault(trigger => string.Equals(trigger.EventName, "workflow_call", StringComparison.Ordinal))
+            ?.Call;
+        if (workflowCall is null)
+        {
+            return CreateReusableWorkflowCallOutcome(
+                job,
+                FailedStatus,
+                startedAt,
+                new Dictionary<string, string>(),
+                [$"{FormatReusableWorkflowLocation(job, calleePath)} does not declare on.workflow_call."],
+                successfulSteps: 0,
+                failedSteps: 1);
+        }
+
+        var binding = BindReusableWorkflowCall(job, workflowCall, calleePath);
+        if (!binding.Success)
+        {
+            return CreateReusableWorkflowCallOutcome(
+                job,
+                FailedStatus,
+                startedAt,
+                new Dictionary<string, string>(),
+                binding.Errors,
+                successfulSteps: 0,
+                failedSteps: 1);
+        }
+
+        var nestedExecutor = new WorkflowExecutor(
+            _runnerProvider,
+            new NullRunStore(),
+            _actionCache,
+            _createJobTimeout);
+        var nestedOptions = new WorkflowExecutionOptions(
+            options.ProjectRoot,
+            calleePath,
+            runId,
+            new WorkflowRunTrigger(
+                "workflow_call",
+                $"workflow.jobs.{job.Name}",
+                binding.Inputs),
+            options.ReusableWorkflowCallStack.Append(calleePath).ToArray(),
+            binding.Secrets);
+        var nestedResult = await nestedExecutor.ExecuteAsync(
+            calleeWorkflow,
+            nestedOptions,
+            output,
+            error,
+            cancellationToken);
+        var errors = new List<string>();
+
+        if (!nestedResult.Success)
+        {
+            errors.AddRange(PrefixReusableWorkflowErrors(job, calleePath, nestedResult.Errors));
+        }
+
+        var outputs = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (errors.Count == 0)
+        {
+            var outputResolution = ResolveReusableWorkflowOutputs(job, calleePath, workflowCall, nestedResult.Outputs, options.ProjectRoot);
+            foreach (var outputValue in outputResolution.Outputs)
+            {
+                outputs[outputValue.Key] = outputValue.Value;
+            }
+
+            errors.AddRange(outputResolution.Errors);
+        }
+
+        var failed = errors.Count > 0;
+        return CreateReusableWorkflowCallOutcome(
+            job,
+            failed ? FailedStatus : SuccessStatus,
+            startedAt,
+            outputs,
+            errors,
+            successfulSteps: failed ? 0 : 1,
+            failedSteps: failed ? 1 : 0);
+    }
+
+    private static ReusableWorkflowPathResolution ResolveReusableWorkflowPath(
+        WorkflowJob job,
+        WorkflowExecutionOptions options)
+    {
+        var uses = job.Call!.Uses;
+        var normalizedUses = uses.Replace('\\', '/');
+        if (!normalizedUses.StartsWith("./", StringComparison.Ordinal))
+        {
+            return ReusableWorkflowPathResolution.Failed(
+                [$"workflow.jobs.{job.Name}.uses supports only local reusable workflow references in this milestone."]);
+        }
+
+        if (!IsSupportedReusableWorkflowPath(normalizedUses))
+        {
+            return ReusableWorkflowPathResolution.Failed(
+                [$"workflow.jobs.{job.Name}.uses '{uses}' must reference a workflow under .workflows/ or .github/workflows/ with a .yml or .yaml extension."]);
+        }
+
+        var fullPath = Path.GetFullPath(Path.Combine(options.ProjectRoot, normalizedUses[2..]));
+        var projectRoot = Path.GetFullPath(options.ProjectRoot);
+        var rootWithSeparator = projectRoot.EndsWith(Path.DirectorySeparatorChar)
+            ? projectRoot
+            : $"{projectRoot}{Path.DirectorySeparatorChar}";
+
+        if (!fullPath.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase))
+        {
+            return ReusableWorkflowPathResolution.Failed(
+                [$"workflow.jobs.{job.Name}.uses '{uses}' must stay inside the project root."]);
+        }
+
+        if (options.ReusableWorkflowCallStack.Contains(fullPath, StringComparer.OrdinalIgnoreCase))
+        {
+            return ReusableWorkflowPathResolution.Failed(
+                [$"workflow.jobs.{job.Name}.uses '{uses}' creates a reusable workflow call cycle."]);
+        }
+
+        if (options.ReusableWorkflowCallStack.Count >= MaxReusableWorkflowDepth)
+        {
+            return ReusableWorkflowPathResolution.Failed(
+                [$"workflow.jobs.{job.Name}.uses '{uses}' exceeds the reusable workflow call depth limit of {MaxReusableWorkflowDepth}."]);
+        }
+
+        if (!File.Exists(fullPath))
+        {
+            return ReusableWorkflowPathResolution.Failed(
+                [$"workflow.jobs.{job.Name}.uses '{uses}' was not found at '{fullPath}'."]);
+        }
+
+        return ReusableWorkflowPathResolution.Resolved(fullPath);
+    }
+
+    private static ReusableWorkflowCallBinding BindReusableWorkflowCall(
+        WorkflowJob job,
+        WorkflowCall workflowCall,
+        string calleePath)
+    {
+        var errors = new List<string>();
+        var inputs = new Dictionary<string, string>(StringComparer.Ordinal);
+        var secrets = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var input in workflowCall.Inputs.Values)
+        {
+            if (input.Default is not null)
+            {
+                inputs[input.Name] = input.Default;
+            }
+        }
+
+        foreach (var input in job.Call!.With)
+        {
+            if (!workflowCall.Inputs.TryGetValue(input.Key, out var inputContract))
+            {
+                errors.Add($"{FormatReusableWorkflowLocation(job, calleePath)} does not declare workflow_call input '{input.Key}'.");
+                continue;
+            }
+
+            ValidateReusableWorkflowInputValue(errors, job, calleePath, inputContract, input.Value);
+            inputs[input.Key] = input.Value;
+        }
+
+        foreach (var input in workflowCall.Inputs.Values)
+        {
+            if (input.Required && !inputs.ContainsKey(input.Name))
+            {
+                errors.Add($"{FormatReusableWorkflowLocation(job, calleePath)} requires workflow_call input '{input.Name}', but workflow.jobs.{job.Name}.with.{input.Name} is not set.");
+            }
+        }
+
+        foreach (var secret in workflowCall.Secrets.Values)
+        {
+            secrets[secret.Name] = string.Empty;
+        }
+
+        foreach (var secret in job.Call.Secrets)
+        {
+            if (!workflowCall.Secrets.ContainsKey(secret.Key))
+            {
+                errors.Add($"{FormatReusableWorkflowLocation(job, calleePath)} does not declare workflow_call secret '{secret.Key}'.");
+                continue;
+            }
+
+            secrets[secret.Key] = secret.Value;
+        }
+
+        foreach (var secret in workflowCall.Secrets.Values)
+        {
+            if (secret.Required && !secrets.ContainsKey(secret.Name))
+            {
+                errors.Add($"{FormatReusableWorkflowLocation(job, calleePath)} requires workflow_call secret '{secret.Name}', but workflow.jobs.{job.Name}.secrets.{secret.Name} is not set.");
+            }
+        }
+
+        return errors.Count == 0
+            ? ReusableWorkflowCallBinding.Resolved(inputs, secrets)
+            : ReusableWorkflowCallBinding.Failed(errors);
+    }
+
+    private static bool IsSupportedReusableWorkflowPath(string normalizedUses)
+    {
+        var hasSupportedRoot =
+            normalizedUses.StartsWith("./.workflows/", StringComparison.Ordinal) ||
+            normalizedUses.StartsWith("./.github/workflows/", StringComparison.Ordinal);
+        var hasSupportedExtension =
+            normalizedUses.EndsWith(".yml", StringComparison.OrdinalIgnoreCase) ||
+            normalizedUses.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase);
+
+        return hasSupportedRoot && hasSupportedExtension;
+    }
+
+    private static void ValidateReusableWorkflowInputValue(
+        List<string> errors,
+        WorkflowJob job,
+        string calleePath,
+        WorkflowCallInput input,
+        string value)
+    {
+        if (string.Equals(input.Type, "boolean", StringComparison.Ordinal) &&
+            !bool.TryParse(value, out _))
+        {
+            errors.Add($"{FormatReusableWorkflowLocation(job, calleePath)} input '{input.Name}' expects a boolean value.");
+            return;
+        }
+
+        if (string.Equals(input.Type, "number", StringComparison.Ordinal) &&
+            !decimal.TryParse(value, NumberStyles.Number, CultureInfo.InvariantCulture, out _))
+        {
+            errors.Add($"{FormatReusableWorkflowLocation(job, calleePath)} input '{input.Name}' expects a number value.");
+        }
+    }
+
+    private static ReusableWorkflowOutputResolution ResolveReusableWorkflowOutputs(
+        WorkflowJob job,
+        string calleePath,
+        WorkflowCall workflowCall,
+        IReadOnlyList<WorkflowRunOutput> runOutputs,
+        string projectRoot)
+    {
+        var outputs = new Dictionary<string, string>(StringComparer.Ordinal);
+        var errors = new List<string>();
+        var context = new ExpressionContextData(
+            [
+                ExpressionContextRoot.AvailableRoot(
+                    "jobs",
+                    CreateReusableWorkflowJobsContext(runOutputs),
+                    allowMissingProperties: true,
+                    includeInSafeSnapshot: false)
+            ],
+            projectRoot);
+        var evaluationContext = new ExpressionEvaluationContext(context.Resolve, workspaceRoot: projectRoot);
+
+        foreach (var output in workflowCall.Outputs.Values)
+        {
+            var interpolation = ExpressionTemplate.Interpolate(output.Value, evaluationContext);
+            if (interpolation.Success)
+            {
+                outputs[output.Name] = interpolation.Value;
+                continue;
+            }
+
+            errors.AddRange(interpolation.Errors.Select(error =>
+                $"{FormatReusableWorkflowLocation(job, calleePath)} output '{output.Name}' could not be evaluated: {error}"));
+        }
+
+        return new ReusableWorkflowOutputResolution(outputs, errors);
+    }
+
+    private static JsonObject CreateReusableWorkflowJobsContext(IReadOnlyList<WorkflowRunOutput> runOutputs)
+    {
+        var jobs = new JsonObject();
+        foreach (var group in runOutputs.GroupBy(output => output.JobName, StringComparer.Ordinal))
+        {
+            jobs[group.Key] = new JsonObject
+            {
+                ["outputs"] = ExpressionContextData.FromStrings(
+                    group.ToDictionary(output => output.Name, output => output.Value, StringComparer.Ordinal))
+            };
+        }
+
+        return jobs;
+    }
+
+    private static JobExecutionOutcome CreateReusableWorkflowCallOutcome(
+        WorkflowJob job,
+        string status,
+        DateTimeOffset startedAt,
+        IReadOnlyDictionary<string, string> outputs,
+        IReadOnlyList<string> errors,
+        int successfulSteps,
+        int failedSteps)
+    {
+        var finishedAt = DateTimeOffset.UtcNow;
+        var step = new StepRunRecord(
+            "Call reusable workflow",
+            status,
+            job.Call!.Uses,
+            null,
+            null,
+            startedAt,
+            finishedAt,
+            ToDurationMilliseconds(startedAt, finishedAt));
+        var record = new JobRunRecord(
+            job.DisplayName,
+            status,
+            job.RunsOn,
+            job.Needs,
+            job.If,
+            startedAt,
+            finishedAt,
+            ToDurationMilliseconds(startedAt, finishedAt),
+            outputs,
+            [step],
+            [],
+            errors,
+            job.Name,
+            job.TimeoutMinutes,
+            job.ContinueOnError,
+            job.Concurrency?.Group,
+            job.Concurrency?.CancelInProgress ?? false,
+            job.Matrix);
+
+        return new JobExecutionOutcome(record, successfulSteps, failedSteps, 0);
+    }
+
+    private static IReadOnlyList<string> PrefixReusableWorkflowErrors(
+        WorkflowJob job,
+        string calleePath,
+        IReadOnlyList<string> errors)
+    {
+        return errors
+            .Select(error => $"{FormatReusableWorkflowLocation(job, calleePath)}: {error}")
+            .ToArray();
+    }
+
+    private static string FormatReusableWorkflowLocation(WorkflowJob job, string calleePath)
+    {
+        return $"workflow.jobs.{job.Name}.uses '{job.Call!.Uses}' -> callee '{calleePath}'";
     }
 
     private static bool IsFailFastFailure(PlannedJobOutcome outcome)
@@ -412,7 +815,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             null,
             0,
             new Dictionary<string, string>(),
-            JobExecutor.CreateSkippedStepRecords(job.Steps),
+            CreateSkippedStepRecords(job),
             [],
             [reason],
             job.Name,
@@ -422,7 +825,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             job.Concurrency?.CancelInProgress ?? false,
             job.Matrix);
 
-        return new JobExecutionOutcome(record, 0, 0, job.Steps.Count);
+        return new JobExecutionOutcome(record, 0, 0, job.ExecutionStepCount);
     }
 
     private static JobExecutionOutcome CreateFailedSkippedJobOutcome(WorkflowJob job, string error)
@@ -437,7 +840,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             null,
             0,
             new Dictionary<string, string>(),
-            JobExecutor.CreateSkippedStepRecords(job.Steps),
+            CreateSkippedStepRecords(job),
             [],
             [error],
             job.Name,
@@ -447,7 +850,17 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             job.Concurrency?.CancelInProgress ?? false,
             job.Matrix);
 
-        return new JobExecutionOutcome(record, 0, 0, job.Steps.Count);
+        return new JobExecutionOutcome(record, 0, 0, job.ExecutionStepCount);
+    }
+
+    private static IReadOnlyList<StepRunRecord> CreateSkippedStepRecords(WorkflowJob job)
+    {
+        if (job.Call is null)
+        {
+            return JobExecutor.CreateSkippedStepRecords(job.Steps);
+        }
+
+        return [new StepRunRecord("Call reusable workflow", SkippedStatus, job.Call.Uses, null, null, null, null, 0)];
     }
 
     private static string? GetDependencySkipReason(
@@ -627,4 +1040,43 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
     private sealed record PlannedJobOutcome(
         WorkflowJob Job,
         JobExecutionOutcome Outcome);
+
+    private sealed record ReusableWorkflowPathResolution(
+        bool Success,
+        string? Path,
+        IReadOnlyList<string> Errors)
+    {
+        public static ReusableWorkflowPathResolution Resolved(string path)
+            => new(true, path, []);
+
+        public static ReusableWorkflowPathResolution Failed(IReadOnlyList<string> errors)
+            => new(false, null, errors);
+    }
+
+    private sealed record ReusableWorkflowCallBinding(
+        bool Success,
+        IReadOnlyDictionary<string, string> Inputs,
+        IReadOnlyDictionary<string, string> Secrets,
+        IReadOnlyList<string> Errors)
+    {
+        public static ReusableWorkflowCallBinding Resolved(
+            IReadOnlyDictionary<string, string> inputs,
+            IReadOnlyDictionary<string, string> secrets)
+        {
+            return new ReusableWorkflowCallBinding(true, inputs, secrets, []);
+        }
+
+        public static ReusableWorkflowCallBinding Failed(IReadOnlyList<string> errors)
+        {
+            return new ReusableWorkflowCallBinding(
+                false,
+                new Dictionary<string, string>(),
+                new Dictionary<string, string>(),
+                errors);
+        }
+    }
+
+    private sealed record ReusableWorkflowOutputResolution(
+        IReadOnlyDictionary<string, string> Outputs,
+        IReadOnlyList<string> Errors);
 }
