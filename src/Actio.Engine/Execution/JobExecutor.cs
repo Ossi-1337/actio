@@ -589,6 +589,11 @@ internal sealed class JobExecutor
                 DefaultEnvironmentVariables.Create(workflowName, job, step, stepIndex, runId, runTrigger),
                 CreateEnvironmentFileVariables(),
                 plan.Environment);
+            var oidcFailure = CreateOidcEnvironmentFailure(environment, GetStepCommand(plan, step), collector.LogPath);
+            if (oidcFailure is not null)
+            {
+                return oidcFailure;
+            }
 
             if (plan.Kind == StepExecutionKind.CompositeAction)
             {
@@ -1154,6 +1159,12 @@ internal sealed class JobExecutor
             environmentUpdates,
             pathEntries,
             CreateEnvironmentFileVariables());
+        var oidcFailure = CreateOidcEnvironmentFailure(environment, actionStep.Command!, collector.LogPath);
+        if (oidcFailure is not null)
+        {
+            return oidcFailure;
+        }
+
         var additionalMounts = plan.AdditionalMounts
             .Concat([new StepExecutionMount(environmentFiles.DirectoryPath, StepEnvironmentFileContainerDirectory, ReadOnly: false)])
             .ToArray();
@@ -1314,6 +1325,12 @@ internal sealed class JobExecutor
         var environmentFiles = environmentFilesResult.Files!;
         var actionEnvironment = new Dictionary<string, string>(environment, StringComparer.Ordinal);
         actionEnvironment.Merge(CreateEnvironmentFileVariables());
+        var oidcFailure = CreateOidcEnvironmentFailure(actionEnvironment, GetStepCommand(nestedPlan, step), collector.LogPath);
+        if (oidcFailure is not null)
+        {
+            return oidcFailure;
+        }
+
         var additionalMounts = nestedPlan.AdditionalMounts
             .Concat([new StepExecutionMount(environmentFiles.DirectoryPath, StepEnvironmentFileContainerDirectory, ReadOnly: false)])
             .ToArray();
@@ -2072,6 +2089,20 @@ internal sealed class JobExecutor
         environment.Merge(environmentFileEnv);
         environment.Merge(actionEnv);
         return environment;
+    }
+
+    private static string GetStepCommand(StepExecutionPlan plan, WorkflowStep step)
+        => plan.Command ?? step.Run ?? step.Uses ?? string.Empty;
+
+    private static StepExecutionOutcome? CreateOidcEnvironmentFailure(
+        IReadOnlyDictionary<string, string> environment,
+        string command,
+        string? logPath)
+    {
+        var errors = OidcTokenPolicy.ValidateEnvironment(environment);
+        return errors.Count == 0
+            ? null
+            : StepExecutionOutcome.FailedWithoutExitCode(command, errors, logPath);
     }
 
     private static IReadOnlyDictionary<string, string> CreateLocalValueEnvironment(

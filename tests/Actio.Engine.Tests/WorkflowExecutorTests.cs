@@ -453,6 +453,117 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_DoesNotExposeOidcRequestEnvironmentWhenIdTokenPermissionIsRequested()
+    {
+        var runner = new FakeRunnerProvider([0]);
+        var workflow = new WorkflowDocument(
+            "Deploy",
+            new Dictionary<string, string>(),
+            new Dictionary<string, WorkflowJob>
+            {
+                ["deploy"] = new WorkflowJob(
+                    "deploy",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [
+                        new WorkflowStep("Deploy", "echo deploy", null)
+                    ])
+            },
+            [],
+            WorkflowRunDefaults.Empty,
+            new WorkflowPermissions(
+                WorkflowPermissions.ScopedMode,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["id-token"] = "write"
+                }));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var request = Assert.Single(runner.Requests);
+        Assert.False(request.Environment.ContainsKey("ACTIONS_ID_TOKEN_REQUEST_URL"));
+        Assert.False(request.Environment.ContainsKey("ACTIONS_ID_TOKEN_REQUEST_TOKEN"));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_FailsBeforeRunnerWhenOidcRequestEnvironmentIsProvided()
+    {
+        var runner = new FakeRunnerProvider(Array.Empty<int>());
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "deploy",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Deploy",
+                        "echo deploy",
+                        null,
+                        Env: new Dictionary<string, string>
+                        {
+                            ["ACTIONS_ID_TOKEN_REQUEST_URL"] = "https://token.actions.githubusercontent.com"
+                        })
+                ]));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Empty(runner.Requests);
+        Assert.Contains(result.Errors, error => error.Contains("ACTIONS_ID_TOKEN_REQUEST_URL", StringComparison.Ordinal));
+        Assert.Contains(result.Errors, error => error.Contains("does not issue OIDC tokens", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_FailsBeforeNextStepWhenOidcRequestEnvironmentIsWrittenToGitHubEnv()
+    {
+        var runner = new FakeRunnerProvider(
+            [
+                new FakeRunnerStep(
+                    0,
+                    onExecute: (environment, mounts) => WriteEnvironmentFile(
+                        environment,
+                        mounts,
+                        "GITHUB_ENV",
+                        "ACTIONS_ID_TOKEN_REQUEST_TOKEN=local-token\n"))
+            ]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "deploy",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep("Prepare", "echo prepare", null),
+                    new WorkflowStep("Deploy", "echo deploy", null)
+                ]));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Single(runner.Requests);
+        Assert.Contains(result.Errors, error => error.Contains("ACTIONS_ID_TOKEN_REQUEST_TOKEN", StringComparison.Ordinal));
+        Assert.Contains(result.Errors, error => error.Contains("trusted OIDC issuer", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public async Task ExecuteAsync_ExposesStepOutputsToLaterStepEnvironment()
     {
         var runner = new FakeRunnerProvider(
@@ -4289,6 +4400,8 @@ public sealed class WorkflowExecutorTests
         Assert.Equal(workflowName, environment["GITHUB_WORKFLOW"]);
         Assert.Equal("/workspace", environment["GITHUB_WORKSPACE"]);
         Assert.False(environment.ContainsKey("GITHUB_TOKEN"));
+        Assert.False(environment.ContainsKey("ACTIONS_ID_TOKEN_REQUEST_URL"));
+        Assert.False(environment.ContainsKey("ACTIONS_ID_TOKEN_REQUEST_TOKEN"));
         Assert.False(string.IsNullOrWhiteSpace(environment["RUNNER_ARCH"]));
         Assert.Equal("docker", environment["RUNNER_ENVIRONMENT"]);
         Assert.Equal("ubuntu-latest", environment["RUNNER_NAME"]);
