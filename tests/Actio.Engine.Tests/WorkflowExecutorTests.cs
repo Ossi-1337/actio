@@ -3050,6 +3050,96 @@ public sealed class WorkflowExecutorTests
         Assert.Contains(result.Errors, error => error.Contains("checkout@v4 with inputs is not supported", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public async Task ExecuteAsync_FailsGitHubScriptBeforeDownloadingGitHubAction()
+    {
+        var runner = new FakeRunnerProvider(Array.Empty<int>());
+        var cache = new RecordingActionCache();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Run script",
+                        null,
+                        "actions/github-script@v7",
+                        With: new Dictionary<string, string>
+                        {
+                            ["script"] = "return true;"
+                        })
+                ]));
+
+        var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(Environment.CurrentDirectory),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Empty(cache.GitHubSourceRequests);
+        Assert.Empty(runner.JavaScriptActionRequests);
+        Assert.Empty(runner.Requests);
+        Assert.Contains(result.Errors, error => error.Contains("does not support actions/github-script yet", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("GitHub API client context", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("GITHUB_TOKEN", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_FailsNestedGitHubScriptBeforeDownloadingGitHubAction()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-github-script-nested-{Guid.NewGuid():N}");
+        var actionRoot = Path.Combine(projectRoot, ".actio", "actions", "script-parent");
+        Directory.CreateDirectory(actionRoot);
+        await File.WriteAllTextAsync(
+            Path.Combine(actionRoot, "action.yml"),
+            """
+            name: Script parent
+            runs:
+              using: composite
+              steps:
+                - name: Run script
+                  uses: actions/github-script@v7
+                  with:
+                    script: return true;
+            """);
+
+        try
+        {
+            var runner = new FakeRunnerProvider(Array.Empty<int>());
+            var cache = new RecordingActionCache();
+            var workflow = CreateWorkflow(
+                new WorkflowJob(
+                    "test",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Use parent", null, "./.actio/actions/script-parent")]));
+
+            var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.False(result.Success);
+            Assert.Empty(cache.GitHubSourceRequests);
+            Assert.Empty(runner.JavaScriptActionRequests);
+            Assert.Empty(runner.Requests);
+            Assert.Contains(result.Errors, error => error.Contains("does not support actions/github-script yet", StringComparison.OrdinalIgnoreCase));
+            Assert.Contains(result.Errors, error => error.Contains("GitHub API client context", StringComparison.OrdinalIgnoreCase));
+            Assert.Contains(result.Errors, error => error.Contains("GITHUB_TOKEN", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData("actions/setup-node@v4", "node-version", "20.11.x", "node --version", "actions/setup-node")]
     [InlineData("actions/setup-python@v5", "python-version", "3.12", "python3", "actions/setup-python")]

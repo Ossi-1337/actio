@@ -1477,6 +1477,27 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
+    public void Parse_AcceptsGitHubScriptAndWarnsForMutableRef()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Run script
+                    uses: actions/github-script@v7
+                    with:
+                      script: return true;
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Contains(result.Warnings, warning => warning.Contains("mutable GitHub ref 'v7'", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal("actions/github-script@v7", result.Workflow!.Jobs["test"].Steps[0].Uses);
+    }
+
+    [Fact]
     public void Parse_RejectsCheckoutWithUnsupportedWith()
     {
         var result = Parse(

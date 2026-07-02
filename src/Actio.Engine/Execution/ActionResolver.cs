@@ -11,6 +11,7 @@ internal sealed class ActionResolver
     private const string ActionContainerPath = "/actio/action";
     private const string DockerfileImageRepository = "actio/action";
     private const string CheckoutShimCommand = "printf '%s\\n' 'Actio checkout shim: workspace is already available at /workspace.'";
+    private const string GitHubScriptUnsupportedMessage = "actions/github-script is recognized, but Actio does not support actions/github-script yet. Actio does not provide a GitHub API client context and does not create GitHub's automatic GITHUB_TOKEN in local runs. Future support must require explicit local token configuration and a repository mutation policy.";
     private const int MaxNestedActionDepth = 10;
 
     private readonly ActionParser _parser;
@@ -218,6 +219,11 @@ internal sealed class ActionResolver
             return ActionResolutionResult.Failed([$"uses '{uses}' is not a valid GitHub action reference."]);
         }
 
+        if (IsGitHubScriptAction(githubAction!))
+        {
+            return ActionResolutionResult.Failed([GitHubScriptUnsupportedMessage]);
+        }
+
         if (IsCheckoutShim(githubAction!))
         {
             if (with.Count > 0)
@@ -293,6 +299,13 @@ internal sealed class ActionResolver
             string.Equals(action.Repository, "checkout", StringComparison.OrdinalIgnoreCase) &&
             string.IsNullOrEmpty(action.ActionPath) &&
             string.Equals(action.Ref, "v4", StringComparison.Ordinal);
+    }
+
+    private static bool IsGitHubScriptAction(GitHubActionReference action)
+    {
+        return string.Equals(action.Owner, "actions", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(action.Repository, "github-script", StringComparison.OrdinalIgnoreCase) &&
+            string.IsNullOrEmpty(action.ActionPath);
     }
 
     private static ActionPathResult ResolveLocalActionPath(string uses, string localReferenceRoot)
