@@ -3,7 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Text.RegularExpressions;
+using Actio.Core.Patterns;
 
 namespace Actio.Core.Expressions;
 
@@ -250,11 +250,11 @@ public static class ExpressionBuiltInFunctions
             throw new ArgumentException($"hashFiles() pattern '{pattern}' must be relative and stay inside the workspace.");
         }
 
-        var regex = GlobRegex(normalizedPattern);
+        var matcher = WorkflowPatternMatcher.Compile(normalizedPattern);
         foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
         {
             var relativePath = Path.GetRelativePath(root, file).Replace('\\', '/');
-            if (!regex.IsMatch(relativePath))
+            if (!matcher.IsMatch(relativePath))
             {
                 continue;
             }
@@ -268,49 +268,6 @@ public static class ExpressionBuiltInFunctions
                 files.Remove(relativePath);
             }
         }
-    }
-
-    private static Regex GlobRegex(string pattern)
-    {
-        var builder = new StringBuilder("^");
-
-        for (var index = 0; index < pattern.Length; index++)
-        {
-            var current = pattern[index];
-            if (current == '*')
-            {
-                if (index + 1 < pattern.Length && pattern[index + 1] == '*')
-                {
-                    if (index + 2 < pattern.Length && pattern[index + 2] == '/')
-                    {
-                        builder.Append("(?:.*/)?");
-                        index += 2;
-                    }
-                    else
-                    {
-                        builder.Append(".*");
-                        index++;
-                    }
-                }
-                else
-                {
-                    builder.Append("[^/]*");
-                }
-
-                continue;
-            }
-
-            builder.Append(current == '?' ? "[^/]" : Regex.Escape(current.ToString()));
-        }
-
-        builder.Append('$');
-        var options = RegexOptions.CultureInvariant;
-        if (OperatingSystem.IsWindows())
-        {
-            options |= RegexOptions.IgnoreCase;
-        }
-
-        return new Regex(builder.ToString(), options);
     }
 
     private static string NormalizePattern(string pattern)

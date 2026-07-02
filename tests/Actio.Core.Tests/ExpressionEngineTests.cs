@@ -66,12 +66,14 @@ public sealed class ExpressionEngineTests
     {
         var root = Path.Combine(Path.GetTempPath(), $"actio-expression-tests-{Guid.NewGuid():N}");
         Directory.CreateDirectory(Path.Combine(root, "src"));
+        Directory.CreateDirectory(Path.Combine(root, "src", "nested"));
         await File.WriteAllTextAsync(Path.Combine(root, "src", "app.txt"), "hello");
+        await File.WriteAllTextAsync(Path.Combine(root, "src", "nested", "app.cs"), "code");
         await File.WriteAllTextAsync(Path.Combine(root, "src", "skip.log"), "skip");
 
         try
         {
-            var parseResult = ExpressionParser.ParseTemplateExpression("${{ hashFiles('src/app.txt') != '' && hashFiles('**/app.txt') != '' && hashFiles('src/*', '!src/*.log') == hashFiles('src/app.txt') && hashFiles('**/*.missing') == '' }}");
+            var parseResult = ExpressionParser.ParseTemplateExpression("${{ hashFiles('src/app.txt') != '' && hashFiles('**/app.txt') != '' && hashFiles('src/*', '!src/*.log') == hashFiles('src/app.txt') && hashFiles('src/+.txt') == hashFiles('src/app.txt') && hashFiles('src\\app.txt') == hashFiles('src/app.txt') && hashFiles('**/*.cs') != '' && hashFiles('**/*.missing') == '' }}");
 
             Assert.True(parseResult.Success, string.Join(Environment.NewLine, parseResult.Errors));
 

@@ -1,5 +1,4 @@
-using System.Text;
-using System.Text.RegularExpressions;
+using Actio.Core.Patterns;
 
 namespace Actio.Core.Workflows;
 
@@ -116,13 +115,13 @@ public static class WorkflowTriggerFilterEvaluator
 
         if (filters.Paths.Count > 0)
         {
-            return changedPaths.Any(path => WorkflowGlobMatcher.MatchesOrdered(filters.Paths, path))
+            return changedPaths.Any(path => WorkflowPatternMatcher.MatchesOrdered(filters.Paths, path))
                 ? Yes("at least one changed path matched the path filters.")
                 : No("no changed paths matched the path filters.");
         }
 
         if (filters.PathsIgnore.Count > 0 &&
-            changedPaths.All(path => WorkflowGlobMatcher.MatchesOrdered(filters.PathsIgnore, path)))
+            changedPaths.All(path => WorkflowPatternMatcher.MatchesOrdered(filters.PathsIgnore, path)))
         {
             return No("all changed paths matched the path ignore filters.");
         }
@@ -136,12 +135,12 @@ public static class WorkflowTriggerFilterEvaluator
         IReadOnlyList<string> ignorePatterns,
         string kind)
     {
-        if (includePatterns.Count > 0 && !WorkflowGlobMatcher.MatchesOrdered(includePatterns, value))
+        if (includePatterns.Count > 0 && !WorkflowPatternMatcher.MatchesOrdered(includePatterns, value))
         {
             return No($"{kind} '{value}' did not match the configured {kind} filters.");
         }
 
-        if (ignorePatterns.Count > 0 && WorkflowGlobMatcher.MatchesOrdered(ignorePatterns, value))
+        if (ignorePatterns.Count > 0 && WorkflowPatternMatcher.MatchesOrdered(ignorePatterns, value))
         {
             return No($"{kind} '{value}' matched the configured {kind} ignore filters.");
         }
@@ -154,75 +153,4 @@ public static class WorkflowTriggerFilterEvaluator
 
     private static WorkflowTriggerFilterDecision No(string reason)
         => new(false, reason);
-}
-
-internal static class WorkflowGlobMatcher
-{
-    public static bool MatchesOrdered(IReadOnlyList<string> patterns, string value)
-    {
-        var matches = false;
-
-        foreach (var pattern in patterns)
-        {
-            var normalizedPattern = Normalize(pattern);
-            var isNegative = normalizedPattern.StartsWith('!');
-            var patternText = isNegative ? normalizedPattern[1..] : normalizedPattern;
-
-            if (patternText.Length == 0)
-            {
-                continue;
-            }
-
-            if (!Matches(patternText, value))
-            {
-                continue;
-            }
-
-            matches = !isNegative;
-        }
-
-        return matches;
-    }
-
-    private static bool Matches(string pattern, string value)
-    {
-        var expression = "^" + ConvertGlobToRegex(Normalize(pattern)) + "$";
-        return Regex.IsMatch(Normalize(value), expression, RegexOptions.CultureInvariant);
-    }
-
-    private static string ConvertGlobToRegex(string pattern)
-    {
-        var builder = new StringBuilder();
-
-        for (var index = 0; index < pattern.Length; index++)
-        {
-            var current = pattern[index];
-
-            if (current == '*')
-            {
-                if (index + 1 < pattern.Length && pattern[index + 1] == '*')
-                {
-                    builder.Append(".*");
-                    index++;
-                    continue;
-                }
-
-                builder.Append("[^/]*");
-                continue;
-            }
-
-            if (current == '?')
-            {
-                builder.Append("[^/]");
-                continue;
-            }
-
-            builder.Append(Regex.Escape(current.ToString()));
-        }
-
-        return builder.ToString();
-    }
-
-    private static string Normalize(string value)
-        => value.Replace('\\', '/');
 }

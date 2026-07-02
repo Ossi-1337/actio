@@ -8,7 +8,7 @@ public sealed class WorkflowTriggerFilterEvaluatorTests
     public void Evaluate_MatchesBranchIncludeFilter()
     {
         var trigger = CreateTrigger(new WorkflowTriggerFilters(
-            ["main", "releases/**"],
+            ["main", "releases/**", "feature/+"],
             [],
             [],
             [],
@@ -18,8 +18,12 @@ public sealed class WorkflowTriggerFilterEvaluatorTests
         var decision = WorkflowTriggerFilterEvaluator.Evaluate(
             trigger,
             new WorkflowTriggerFilterContext("push", Branch: "releases/1.0"));
+        var featureDecision = WorkflowTriggerFilterEvaluator.Evaluate(
+            trigger,
+            new WorkflowTriggerFilterContext("push", Branch: "feature/login"));
 
         Assert.True(decision.Matches, decision.Reason);
+        Assert.True(featureDecision.Matches, featureDecision.Reason);
     }
 
     [Fact]
@@ -106,7 +110,7 @@ public sealed class WorkflowTriggerFilterEvaluatorTests
             [],
             [],
             [],
-            ["src/**", "!src/docs/**"],
+            [@"src\**", "!src/docs/**"],
             []));
 
         var accepted = WorkflowTriggerFilterEvaluator.Evaluate(
