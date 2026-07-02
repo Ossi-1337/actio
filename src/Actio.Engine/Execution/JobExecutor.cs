@@ -4,6 +4,7 @@ using Actio.Core.Workflows;
 using Actio.Engine.Artifacts;
 using Actio.Engine.Caching;
 using Actio.Engine.Runs;
+using Actio.Engine.Setup;
 
 namespace Actio.Engine.Execution;
 
@@ -1571,6 +1572,17 @@ internal sealed class JobExecutor
             return StepExecutionPlan.Failed(artifactAction.Errors);
         }
 
+        var setupAction = SetupActionResolver.Resolve(step.Uses, resolvedWith.Values);
+        if (setupAction.Success && setupAction.Action is not null)
+        {
+            return StepExecutionPlan.ShellCommand(SetupActionCommandBuilder.Build(setupAction.Action));
+        }
+
+        if (!setupAction.Success)
+        {
+            return StepExecutionPlan.Failed(setupAction.Errors);
+        }
+
         var resolvedStep = step with { With = resolvedWith.Values };
         var action = await _actionResolver.ResolveAsync(resolvedStep, projectRoot, cancellationToken);
         if (!action.Success)
@@ -2631,6 +2643,7 @@ internal sealed class JobExecutor
         public static ArtifactActionResolution Failed(IReadOnlyList<string> errors)
             => new(false, null, errors);
     }
+
 }
 
 file static class DictionaryExtensions

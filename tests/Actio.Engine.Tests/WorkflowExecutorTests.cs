@@ -3050,6 +3050,222 @@ public sealed class WorkflowExecutorTests
         Assert.Contains(result.Errors, error => error.Contains("checkout@v4 with inputs is not supported", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Theory]
+    [InlineData("actions/setup-node@v4", "node-version", "20.11.x", "node --version", "actions/setup-node")]
+    [InlineData("actions/setup-python@v5", "python-version", "3.12", "python3", "actions/setup-python")]
+    [InlineData("actions/setup-java@v4", "java-version", "17", "java -version", "actions/setup-java")]
+    [InlineData("actions/setup-go@v5", "go-version", "1.23.x", "go version", "actions/setup-go")]
+    [InlineData("actions/setup-dotnet@v4", "dotnet-version", "10.0.x", "dotnet --version", "actions/setup-dotnet")]
+    public async Task ExecuteAsync_RunsSetupActionShimsWithoutDownloadingGitHubAction(
+        string uses,
+        string versionInput,
+        string requestedVersion,
+        string expectedVersionCommand,
+        string expectedActionName)
+    {
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+        var cache = new RecordingActionCache();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Setup runtime",
+                        null,
+                        uses,
+                        With: new Dictionary<string, string>
+                        {
+                            [versionInput] = requestedVersion
+                        })
+                ]));
+
+        var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(Environment.CurrentDirectory),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Empty(cache.GitHubSourceRequests);
+        var request = Assert.Single(runner.Requests);
+        Assert.Contains(expectedActionName, request.Command, StringComparison.Ordinal);
+        Assert.Contains(expectedVersionCommand, request.Command, StringComparison.Ordinal);
+        Assert.Contains(requestedVersion, request.Command, StringComparison.Ordinal);
+        Assert.Contains("requested $ACTIO_SETUP_TOOL version", request.Command, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_SetupJavaShimAcceptsDistributionAsRunnerImageExpectation()
+    {
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Setup Java",
+                        null,
+                        "actions/setup-java@v4",
+                        With: new Dictionary<string, string>
+                        {
+                            ["java-version"] = "21",
+                            ["distribution"] = "temurin"
+                        })
+                ]));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(Environment.CurrentDirectory),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var request = Assert.Single(runner.Requests);
+        Assert.Contains("distribution 'temurin'", request.Command, StringComparison.Ordinal);
+        Assert.Contains("runner image", request.Command, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_SetupShimAcceptsMissingVersionAsAnyInstalledVersion()
+    {
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Setup Python", null, "actions/setup-python@v5")]));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(Environment.CurrentDirectory),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var request = Assert.Single(runner.Requests);
+        Assert.Contains("actions/setup-python", request.Command, StringComparison.Ordinal);
+        Assert.DoesNotContain("requested $ACTIO_SETUP_TOOL version", request.Command, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("lts/*")]
+    [InlineData("20..1")]
+    public async Task ExecuteAsync_FailsSetupShimWhenVersionSyntaxIsUnsupported(string requestedVersion)
+    {
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+        var cache = new RecordingActionCache();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Setup Node",
+                        null,
+                        "actions/setup-node@v4",
+                        With: new Dictionary<string, string>
+                        {
+                            ["node-version"] = requestedVersion
+                        })
+                ]));
+
+        var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(Environment.CurrentDirectory),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Empty(cache.GitHubSourceRequests);
+        Assert.Empty(runner.Requests);
+        Assert.Contains(result.Errors, error => error.Contains($"version '{requestedVersion}' is not supported", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_FailsSetupShimWhenCacheInputIsProvided()
+    {
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+        var cache = new RecordingActionCache();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Setup Node",
+                        null,
+                        "actions/setup-node@v4",
+                        With: new Dictionary<string, string>
+                        {
+                            ["node-version"] = "20",
+                            ["cache"] = "npm"
+                        })
+                ]));
+
+        var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(Environment.CurrentDirectory),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Empty(cache.GitHubSourceRequests);
+        Assert.Empty(runner.Requests);
+        Assert.Contains(result.Errors, error => error.Contains("with.cache is not supported", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("actions/cache", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_FailsSetupShimWhenGeneratedVersionCheckFails()
+    {
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(1)]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Setup Node",
+                        null,
+                        "actions/setup-node@v4",
+                        With: new Dictionary<string, string>
+                        {
+                            ["node-version"] = "20"
+                        })
+                ]));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(Environment.CurrentDirectory),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error.Contains("Setup Node failed with exit code 1", StringComparison.Ordinal));
+        var request = Assert.Single(runner.Requests);
+        Assert.Contains("requested $ACTIO_SETUP_TOOL version '20'", request.Command, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task ExecuteAsync_RunsGitHubJavaScriptAction()
     {
@@ -3079,7 +3295,7 @@ public sealed class WorkflowExecutorTests
                     new ActionCacheEntry(
                         "key",
                         "github",
-                        "actions/setup-node@v4",
+                        "example/javascript-action@v1",
                         actionPath,
                         new string('b', 40),
                         actionRoot,
@@ -3097,9 +3313,9 @@ public sealed class WorkflowExecutorTests
                     new Dictionary<string, string>(),
                     [
                         new WorkflowStep(
-                            "Use setup-node",
+                            "Use JavaScript action",
                             null,
-                            "actions/setup-node@v4",
+                            "example/javascript-action@v1",
                             With: new Dictionary<string, string>
                             {
                                 ["name"] = "Remote"
