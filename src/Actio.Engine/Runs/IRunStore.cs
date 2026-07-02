@@ -29,5 +29,21 @@ public interface IRunStore
         IReadOnlyList<WorkflowArtifact> artifacts,
         CancellationToken cancellationToken = default);
 
+    Task<ArtifactSaveResult> SaveArtifactAsync(
+        string runId,
+        string jobName,
+        string projectRoot,
+        string artifactName,
+        IReadOnlyList<string> paths,
+        int? retentionDays = null,
+        CancellationToken cancellationToken = default);
+
+    Task<ArtifactDownloadResult> RestoreArtifactsAsync(
+        string projectRoot,
+        IReadOnlyList<WorkflowRunArtifact> artifacts,
+        string destinationPath,
+        bool useArtifactNameSubdirectories,
+        CancellationToken cancellationToken = default);
+
     Task SaveRunRecordAsync(WorkflowRunRecord runRecord, CancellationToken cancellationToken = default);
 }

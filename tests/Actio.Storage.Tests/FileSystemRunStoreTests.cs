@@ -227,6 +227,156 @@ public sealed class FileSystemRunStoreTests : IDisposable
         Assert.Contains(Path.Combine("artifacts", runId, "test", "coverage"), artifact.StoredPath);
     }
 
+    [Fact]
+    public async Task SaveArtifactAsync_CopiesMultiplePathsAndStoresRetentionMetadata()
+    {
+        var projectRoot = Path.Combine(_root, "repo");
+        Directory.CreateDirectory(projectRoot);
+        await File.WriteAllTextAsync(Path.Combine(projectRoot, "coverage.txt"), "coverage");
+        Directory.CreateDirectory(Path.Combine(projectRoot, "logs"));
+        await File.WriteAllTextAsync(Path.Combine(projectRoot, "logs", "test.log"), "log");
+
+        var store = new FileSystemRunStore(Path.Combine(_root, "actio-home"));
+        var runId = "run-upload-artifact";
+        await store.InitializeRunAsync(runId);
+
+        var result = await store.SaveArtifactAsync(
+            runId,
+            "test",
+            projectRoot,
+            "bundle",
+            ["coverage.txt", "logs"],
+            retentionDays: 7);
+
+        Assert.Empty(result.Errors);
+        var artifact = Assert.Single(result.Artifacts);
+        Assert.Equal(7, artifact.RetentionDays);
+        Assert.True(Directory.Exists(artifact.StoredPath));
+        Assert.True(File.Exists(Path.Combine(artifact.StoredPath, "coverage.txt")));
+        Assert.True(File.Exists(Path.Combine(artifact.StoredPath, "test.log")));
+    }
+
+    [Fact]
+    public async Task SaveArtifactAsync_RejectsPathsOutsideProjectRoot()
+    {
+        var projectRoot = Path.Combine(_root, "repo");
+        var outsideRoot = Path.Combine(_root, "outside");
+        Directory.CreateDirectory(projectRoot);
+        Directory.CreateDirectory(outsideRoot);
+        await File.WriteAllTextAsync(Path.Combine(outsideRoot, "secret.txt"), "secret");
+
+        var store = new FileSystemRunStore(Path.Combine(_root, "actio-home"));
+        await store.InitializeRunAsync("run-outside-upload");
+
+        var result = await store.SaveArtifactAsync(
+            "run-outside-upload",
+            "test",
+            projectRoot,
+            "secret",
+            [Path.Combine("..", "outside", "secret.txt")]);
+
+        Assert.Empty(result.Artifacts);
+        Assert.Contains(result.Errors, error => error.Contains("must stay inside the project root", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task RestoreArtifactsAsync_RestoresNamedFileArtifactToDestination()
+    {
+        var projectRoot = Path.Combine(_root, "repo");
+        Directory.CreateDirectory(projectRoot);
+        var reportPath = Path.Combine(projectRoot, "coverage.txt");
+        await File.WriteAllTextAsync(reportPath, "coverage");
+
+        var store = new FileSystemRunStore(Path.Combine(_root, "actio-home"));
+        var runId = "run-restore-artifact";
+        await store.InitializeRunAsync(runId);
+        var save = await store.SaveArtifactsAsync(
+            runId,
+            "test",
+            projectRoot,
+            [new WorkflowArtifact("coverage", "coverage.txt")]);
+        File.Delete(reportPath);
+
+        var restore = await store.RestoreArtifactsAsync(
+            projectRoot,
+            save.Artifacts,
+            "downloaded",
+            useArtifactNameSubdirectories: false);
+
+        Assert.Empty(restore.Errors);
+        Assert.True(File.Exists(Path.Combine(projectRoot, "downloaded", "coverage.txt")));
+    }
+
+    [Fact]
+    public async Task RestoreArtifactsAsync_RestoresAllArtifactsWithSubdirectories()
+    {
+        var projectRoot = Path.Combine(_root, "repo");
+        Directory.CreateDirectory(projectRoot);
+        await File.WriteAllTextAsync(Path.Combine(projectRoot, "coverage.txt"), "coverage");
+        await File.WriteAllTextAsync(Path.Combine(projectRoot, "summary.txt"), "summary");
+
+        var store = new FileSystemRunStore(Path.Combine(_root, "actio-home"));
+        var runId = "run-restore-all-artifacts";
+        await store.InitializeRunAsync(runId);
+        var first = await store.SaveArtifactsAsync(
+            runId,
+            "test",
+            projectRoot,
+            [new WorkflowArtifact("coverage", "coverage.txt")]);
+        var second = await store.SaveArtifactsAsync(
+            runId,
+            "test",
+            projectRoot,
+            [new WorkflowArtifact("summary", "summary.txt")]);
+
+        var restore = await store.RestoreArtifactsAsync(
+            projectRoot,
+            first.Artifacts.Concat(second.Artifacts).ToArray(),
+            "downloaded",
+            useArtifactNameSubdirectories: true);
+
+        Assert.Empty(restore.Errors);
+        Assert.True(File.Exists(Path.Combine(projectRoot, "downloaded", "coverage", "coverage.txt")));
+        Assert.True(File.Exists(Path.Combine(projectRoot, "downloaded", "summary", "summary.txt")));
+    }
+
+    [Fact]
+    public async Task RestoreArtifactsAsync_RejectsDestinationOutsideProjectRoot()
+    {
+        var projectRoot = Path.Combine(_root, "repo");
+        Directory.CreateDirectory(projectRoot);
+        var store = new FileSystemRunStore(Path.Combine(_root, "actio-home"));
+        await store.InitializeRunAsync("run-outside-restore");
+
+        var result = await store.RestoreArtifactsAsync(
+            projectRoot,
+            [],
+            Path.Combine("..", "outside"),
+            useArtifactNameSubdirectories: false);
+
+        Assert.Empty(result.RestoredPaths);
+        Assert.Contains(result.Errors, error => error.Contains("must stay inside the project root", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task RestoreArtifactsAsync_FailsWhenStoredPathIsMissing()
+    {
+        var projectRoot = Path.Combine(_root, "repo");
+        Directory.CreateDirectory(projectRoot);
+        var store = new FileSystemRunStore(Path.Combine(_root, "actio-home"));
+        await store.InitializeRunAsync("run-missing-stored-artifact");
+        var missingPath = Path.Combine(store.ArtifactsPath, "run-missing-stored-artifact", "test", "report", "report.txt");
+
+        var result = await store.RestoreArtifactsAsync(
+            projectRoot,
+            [new WorkflowRunArtifact("test", "report", "report.txt", missingPath)],
+            "downloaded",
+            useArtifactNameSubdirectories: false);
+
+        Assert.Empty(result.RestoredPaths);
+        Assert.Contains(result.Errors, error => error.Contains("does not exist", StringComparison.Ordinal));
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_root))

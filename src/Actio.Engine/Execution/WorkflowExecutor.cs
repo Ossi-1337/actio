@@ -141,6 +141,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                             actualJobStatuses,
                             jobOutputs,
                             expansion.JobNamesByBaseName,
+                            runArtifacts,
                             synchronizedOutput,
                             synchronizedError,
                             cancellationToken))]
@@ -153,6 +154,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                         actualJobStatuses,
                         jobOutputs,
                         expansion.JobNamesByBaseName,
+                        runArtifacts,
                         synchronizedOutput,
                         synchronizedError,
                         cancellationToken);
@@ -172,7 +174,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                         IsUnsuccessfulJobStatus(outcome.Outcome.Job.Status) && !toleratedFailure
                             ? outcome.Outcome.Job.Errors
                             : []);
-                    runArtifacts.AddRange(outcome.Outcome.Job.Artifacts);
+                    AddArtifactsOrDuplicateErrors(runArtifacts, outcome.Outcome.Job.Artifacts, errors);
                     runOutputs.AddRange(outcome.Outcome.Job.Outputs.Select(item =>
                         new WorkflowRunOutput(outcome.Job.Name, item.Key, item.Value)));
 
@@ -253,6 +255,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         IReadOnlyDictionary<string, string> actualJobStatuses,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
         IReadOnlyDictionary<string, IReadOnlyList<string>> jobNamesByBaseName,
+        IReadOnlyList<WorkflowRunArtifact> availableArtifacts,
         TextWriter output,
         TextWriter error,
         CancellationToken cancellationToken)
@@ -319,6 +322,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             options.RunTrigger,
             options.Variables,
             options.Secrets,
+            availableArtifacts,
             options.ProjectRoot,
             runId,
             output,
@@ -335,6 +339,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         IReadOnlyDictionary<string, string> actualJobStatuses,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> jobOutputs,
         IReadOnlyDictionary<string, IReadOnlyList<string>> jobNamesByBaseName,
+        IReadOnlyList<WorkflowRunArtifact> availableArtifacts,
         TextWriter output,
         TextWriter error,
         CancellationToken cancellationToken)
@@ -359,6 +364,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                         actualJobStatuses,
                         jobOutputs,
                         jobNamesByBaseName,
+                        availableArtifacts,
                         output,
                         error,
                         cancellationToken))));
@@ -812,6 +818,27 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
     {
         return !outcome.Job.ContinueOnError &&
             IsUnsuccessfulJobStatus(outcome.Outcome.Job.Status);
+    }
+
+    private static void AddArtifactsOrDuplicateErrors(
+        List<WorkflowRunArtifact> runArtifacts,
+        IReadOnlyList<WorkflowRunArtifact> newArtifacts,
+        List<string> errors)
+    {
+        var artifactNames = runArtifacts
+            .Select(artifact => artifact.Name)
+            .ToHashSet(StringComparer.Ordinal);
+
+        foreach (var artifact in newArtifacts)
+        {
+            if (!artifactNames.Add(artifact.Name))
+            {
+                errors.Add($"artifact '{artifact.Name}' was saved more than once in this run.");
+                continue;
+            }
+
+            runArtifacts.Add(artifact);
+        }
     }
 
     private static WorkflowRunRecord CreateRunRecord(

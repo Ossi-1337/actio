@@ -54,6 +54,28 @@ public sealed class NullRunStore : IRunStore
         return Task.FromResult(new ArtifactSaveResult([], []));
     }
 
+    public Task<ArtifactSaveResult> SaveArtifactAsync(
+        string runId,
+        string jobName,
+        string projectRoot,
+        string artifactName,
+        IReadOnlyList<string> paths,
+        int? retentionDays = null,
+        CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(new ArtifactSaveResult([], []));
+    }
+
+    public Task<ArtifactDownloadResult> RestoreArtifactsAsync(
+        string projectRoot,
+        IReadOnlyList<WorkflowRunArtifact> artifacts,
+        string destinationPath,
+        bool useArtifactNameSubdirectories,
+        CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(new ArtifactDownloadResult([], []));
+    }
+
     public Task SaveRunRecordAsync(
         WorkflowRunRecord runRecord,
         CancellationToken cancellationToken = default)

@@ -417,7 +417,8 @@ public sealed record WorkflowJobCall(
 
 public sealed record WorkflowArtifact(
     string Name,
-    string Path);
+    string Path,
+    int? RetentionDays = null);
 
 public sealed record WorkflowStep(
     string Name,

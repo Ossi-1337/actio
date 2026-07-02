@@ -4,4 +4,5 @@ public sealed record WorkflowRunArtifact(
     string JobName,
     string Name,
     string SourcePath,
-    string StoredPath);
+    string StoredPath,
+    int? RetentionDays = null);

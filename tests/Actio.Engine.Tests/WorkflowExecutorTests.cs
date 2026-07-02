@@ -3319,6 +3319,304 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_UploadArtifactActionSavesArtifactWithoutJavaScriptExecution()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-upload-artifact-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectRoot);
+        await File.WriteAllTextAsync(Path.Combine(projectRoot, "report.txt"), "report");
+        var runner = new FakeRunnerProvider(Array.Empty<int>());
+        var store = new RecordingRunStore();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Upload report",
+                        null,
+                        "actions/upload-artifact@v4",
+                        With: new Dictionary<string, string>
+                        {
+                            ["name"] = "test-report",
+                            ["path"] = "report.txt",
+                            ["retention-days"] = "5"
+                        })
+                ]));
+
+        try
+        {
+            var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+            var artifact = Assert.Single(result.Artifacts);
+            Assert.Equal("test-report", artifact.Name);
+            Assert.Equal(5, artifact.RetentionDays);
+            Assert.Empty(runner.Requests);
+            Assert.Empty(runner.JavaScriptActionRequests);
+            Assert.Empty(runner.DockerActionRequests);
+            Assert.Empty(runner.DockerfileActionRequests);
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_DownloadArtifactActionRestoresArtifactFromPreviousJob()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-download-artifact-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectRoot);
+        await File.WriteAllTextAsync(Path.Combine(projectRoot, "report.txt"), "report");
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(
+            0,
+            onExecute: (_, _) =>
+            {
+                var downloadedPath = Path.Combine(projectRoot, "downloaded", "report.txt");
+                Assert.True(File.Exists(downloadedPath));
+                Assert.Equal("report", File.ReadAllText(downloadedPath));
+            })]);
+        var store = new RecordingRunStore();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "upload",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Upload report",
+                        null,
+                        "actions/upload-artifact@v4",
+                        With: new Dictionary<string, string>
+                        {
+                            ["name"] = "test-report",
+                            ["path"] = "report.txt"
+                        })
+                ]),
+            new WorkflowJob(
+                "download",
+                ["upload"],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Download report",
+                        null,
+                        "actions/download-artifact@v4",
+                        With: new Dictionary<string, string>
+                        {
+                            ["name"] = "test-report",
+                            ["path"] = "downloaded"
+                        }),
+                    new WorkflowStep("Inspect report", "cat downloaded/report.txt", null)
+                ]));
+
+        try
+        {
+            var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+            Assert.Single(runner.Requests);
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_DownloadArtifactActionCanRestoreEarlierSameJobUpload()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-same-job-artifact-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectRoot);
+        await File.WriteAllTextAsync(Path.Combine(projectRoot, "report.txt"), "report");
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(
+            0,
+            onExecute: (_, _) => Assert.True(File.Exists(Path.Combine(projectRoot, "downloaded", "report.txt"))))]);
+        var store = new RecordingRunStore();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Upload report",
+                        null,
+                        "actions/upload-artifact@v4",
+                        With: new Dictionary<string, string>
+                        {
+                            ["name"] = "test-report",
+                            ["path"] = "report.txt"
+                        }),
+                    new WorkflowStep(
+                        "Download report",
+                        null,
+                        "actions/download-artifact@v4",
+                        With: new Dictionary<string, string>
+                        {
+                            ["name"] = "test-report",
+                            ["path"] = "downloaded"
+                        }),
+                    new WorkflowStep("Inspect report", "cat downloaded/report.txt", null)
+                ]));
+
+        try
+        {
+            var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_UploadArtifactActionFailsWhenPathIsMissing()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-missing-upload-artifact-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectRoot);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Upload report",
+                        null,
+                        "actions/upload-artifact@v4",
+                        With: new Dictionary<string, string>
+                        {
+                            ["name"] = "test-report",
+                            ["path"] = "missing.txt"
+                        })
+                ]));
+
+        try
+        {
+            var result = await new WorkflowExecutor(new FakeRunnerProvider(Array.Empty<int>()), new RecordingRunStore()).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.False(result.Success);
+            Assert.Contains(result.Errors, error => error.Contains("missing.txt", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_DownloadArtifactActionFailsWhenArtifactIsMissing()
+    {
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Download report",
+                        null,
+                        "actions/download-artifact@v4",
+                        With: new Dictionary<string, string>
+                        {
+                            ["name"] = "test-report"
+                        })
+                ]));
+
+        var result = await new WorkflowExecutor(new FakeRunnerProvider(Array.Empty<int>()), new RecordingRunStore()).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error.Contains("was not found in this run", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_UploadArtifactActionFailsWhenArtifactNameIsDuplicated()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-duplicate-artifact-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectRoot);
+        await File.WriteAllTextAsync(Path.Combine(projectRoot, "report.txt"), "report");
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Upload report",
+                        null,
+                        "actions/upload-artifact@v4",
+                        With: new Dictionary<string, string>
+                        {
+                            ["name"] = "test-report",
+                            ["path"] = "report.txt"
+                        }),
+                    new WorkflowStep(
+                        "Upload report again",
+                        null,
+                        "actions/upload-artifact@v4",
+                        With: new Dictionary<string, string>
+                        {
+                            ["name"] = "test-report",
+                            ["path"] = "report.txt"
+                        })
+                ]));
+
+        try
+        {
+            var result = await new WorkflowExecutor(new FakeRunnerProvider(Array.Empty<int>()), new RecordingRunStore()).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.False(result.Success);
+            Assert.Contains(result.Errors, error => error.Contains("already exists in this run", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ExecuteAsync_RestoresDependencyCacheFromRestoreKey()
     {
         var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-cache-restore-key-{Guid.NewGuid():N}");
@@ -3922,6 +4220,28 @@ public sealed class WorkflowExecutorTests
             return Task.FromResult(new ArtifactSaveResult([], []));
         }
 
+        public Task<ArtifactSaveResult> SaveArtifactAsync(
+            string runId,
+            string jobName,
+            string projectRoot,
+            string artifactName,
+            IReadOnlyList<string> paths,
+            int? retentionDays = null,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new ArtifactSaveResult([], []));
+        }
+
+        public Task<ArtifactDownloadResult> RestoreArtifactsAsync(
+            string projectRoot,
+            IReadOnlyList<WorkflowRunArtifact> artifacts,
+            string destinationPath,
+            bool useArtifactNameSubdirectories,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(new ArtifactDownloadResult([], []));
+        }
+
         public Task SaveRunRecordAsync(WorkflowRunRecord runRecord, CancellationToken cancellationToken = default)
         {
             return Task.CompletedTask;
@@ -3971,13 +4291,119 @@ public sealed class WorkflowExecutorTests
             IReadOnlyList<WorkflowArtifact> artifacts,
             CancellationToken cancellationToken = default)
         {
-            return Task.FromResult(new ArtifactSaveResult([], []));
+            var savedArtifacts = new List<WorkflowRunArtifact>();
+            var errors = new List<string>();
+            foreach (var artifact in artifacts)
+            {
+                var result = SaveArtifact(jobName, projectRoot, artifact.Name, [artifact.Path], artifact.RetentionDays);
+                savedArtifacts.AddRange(result.Artifacts);
+                errors.AddRange(result.Errors);
+            }
+
+            return Task.FromResult(new ArtifactSaveResult(savedArtifacts, errors));
+        }
+
+        public Task<ArtifactSaveResult> SaveArtifactAsync(
+            string runId,
+            string jobName,
+            string projectRoot,
+            string artifactName,
+            IReadOnlyList<string> paths,
+            int? retentionDays = null,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(SaveArtifact(jobName, projectRoot, artifactName, paths, retentionDays));
+        }
+
+        public Task<ArtifactDownloadResult> RestoreArtifactsAsync(
+            string projectRoot,
+            IReadOnlyList<WorkflowRunArtifact> artifacts,
+            string destinationPath,
+            bool useArtifactNameSubdirectories,
+            CancellationToken cancellationToken = default)
+        {
+            var restoredPaths = new List<string>();
+            var errors = new List<string>();
+            var destinationRoot = Path.GetFullPath(Path.Combine(projectRoot, destinationPath));
+
+            foreach (var artifact in artifacts)
+            {
+                if (!File.Exists(artifact.StoredPath) && !Directory.Exists(artifact.StoredPath))
+                {
+                    errors.Add($"artifact '{artifact.Name}' stored path '{artifact.StoredPath}' does not exist.");
+                    continue;
+                }
+
+                var targetDirectory = useArtifactNameSubdirectories
+                    ? Path.Combine(destinationRoot, artifact.Name)
+                    : destinationRoot;
+
+                if (File.Exists(artifact.StoredPath))
+                {
+                    Directory.CreateDirectory(targetDirectory);
+                    var targetPath = Path.Combine(targetDirectory, Path.GetFileName(artifact.StoredPath));
+                    File.Copy(artifact.StoredPath, targetPath, overwrite: true);
+                    restoredPaths.Add(targetPath);
+                    continue;
+                }
+
+                CopyDirectory(artifact.StoredPath, targetDirectory);
+                restoredPaths.Add(targetDirectory);
+            }
+
+            return Task.FromResult(new ArtifactDownloadResult(restoredPaths, errors));
         }
 
         public Task SaveRunRecordAsync(WorkflowRunRecord runRecord, CancellationToken cancellationToken = default)
         {
             SavedRecords.Add(runRecord);
             return Task.CompletedTask;
+        }
+
+        private ArtifactSaveResult SaveArtifact(
+            string jobName,
+            string projectRoot,
+            string artifactName,
+            IReadOnlyList<string> paths,
+            int? retentionDays)
+        {
+            var errors = new List<string>();
+            var sourcePaths = new List<string>();
+            foreach (var path in paths)
+            {
+                var sourcePath = Path.GetFullPath(Path.Combine(projectRoot, path));
+                if (!File.Exists(sourcePath) && !Directory.Exists(sourcePath))
+                {
+                    errors.Add($"actions/upload-artifact '{artifactName}' path '{path}' does not exist.");
+                    continue;
+                }
+
+                sourcePaths.Add(sourcePath);
+            }
+
+            if (errors.Count > 0)
+            {
+                return new ArtifactSaveResult([], errors);
+            }
+
+            var storedPath = sourcePaths.Count == 1
+                ? sourcePaths[0]
+                : projectRoot;
+            var artifact = new WorkflowRunArtifact(jobName, artifactName, storedPath, storedPath, retentionDays);
+            return new ArtifactSaveResult([artifact], []);
+        }
+
+        private static void CopyDirectory(string sourceDirectory, string targetDirectory)
+        {
+            Directory.CreateDirectory(targetDirectory);
+
+            foreach (var sourceFile in Directory.EnumerateFiles(sourceDirectory, "*", SearchOption.AllDirectories))
+            {
+                var relativePath = Path.GetRelativePath(sourceDirectory, sourceFile);
+                var targetFile = Path.Combine(targetDirectory, relativePath);
+                Directory.CreateDirectory(Path.GetDirectoryName(targetFile)!);
+                File.Copy(sourceFile, targetFile, overwrite: true);
+            }
         }
     }
 

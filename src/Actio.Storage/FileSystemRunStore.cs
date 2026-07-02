@@ -119,43 +119,103 @@ public sealed class FileSystemRunStore : IRunStore
     {
         var savedArtifacts = new List<WorkflowRunArtifact>();
         var errors = new List<string>();
-        var fullProjectRoot = Path.GetFullPath(projectRoot);
 
         foreach (var artifact in artifacts)
         {
-            var sourcePath = Path.GetFullPath(Path.Combine(fullProjectRoot, artifact.Path));
-            if (!IsUnderRoot(sourcePath, fullProjectRoot))
-            {
-                errors.Add($"workflow.jobs.{jobName}.artifacts.{artifact.Name} path must stay inside the project root.");
-                continue;
-            }
-
-            if (!File.Exists(sourcePath) && !Directory.Exists(sourcePath))
-            {
-                errors.Add($"workflow.jobs.{jobName}.artifacts.{artifact.Name} path '{artifact.Path}' does not exist.");
-                continue;
-            }
-
-            var artifactDirectory = Path.Combine(
-                ArtifactsPath,
-                SanitizePathSegment(runId),
-                SanitizePathSegment(jobName),
-                SanitizePathSegment(artifact.Name));
-
-            if (File.Exists(sourcePath))
-            {
-                Directory.CreateDirectory(artifactDirectory);
-                var storedPath = Path.Combine(artifactDirectory, Path.GetFileName(sourcePath));
-                File.Copy(sourcePath, storedPath, overwrite: true);
-                savedArtifacts.Add(new WorkflowRunArtifact(jobName, artifact.Name, sourcePath, storedPath));
-                continue;
-            }
-
-            CopyDirectory(sourcePath, artifactDirectory);
-            savedArtifacts.Add(new WorkflowRunArtifact(jobName, artifact.Name, sourcePath, artifactDirectory));
+            var result = SaveArtifactCore(
+                runId,
+                jobName,
+                projectRoot,
+                artifact.Name,
+                [artifact.Path],
+                artifact.RetentionDays,
+                $"workflow.jobs.{jobName}.artifacts.{artifact.Name}");
+            savedArtifacts.AddRange(result.Artifacts);
+            errors.AddRange(result.Errors);
         }
 
         return Task.FromResult(new ArtifactSaveResult(savedArtifacts, errors));
+    }
+
+    public Task<ArtifactSaveResult> SaveArtifactAsync(
+        string runId,
+        string jobName,
+        string projectRoot,
+        string artifactName,
+        IReadOnlyList<string> paths,
+        int? retentionDays = null,
+        CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(SaveArtifactCore(
+            runId,
+            jobName,
+            projectRoot,
+            artifactName,
+            paths,
+            retentionDays,
+            $"actions/upload-artifact '{artifactName}'"));
+    }
+
+    public Task<ArtifactDownloadResult> RestoreArtifactsAsync(
+        string projectRoot,
+        IReadOnlyList<WorkflowRunArtifact> artifacts,
+        string destinationPath,
+        bool useArtifactNameSubdirectories,
+        CancellationToken cancellationToken = default)
+    {
+        var restoredPaths = new List<string>();
+        var errors = new List<string>();
+        var fullProjectRoot = Path.GetFullPath(projectRoot);
+        var fullDestinationPath = Path.GetFullPath(Path.Combine(fullProjectRoot, destinationPath));
+
+        if (!IsUnderRoot(fullDestinationPath, fullProjectRoot))
+        {
+            return Task.FromResult(new ArtifactDownloadResult(
+                [],
+                [$"actions/download-artifact path '{destinationPath}' must stay inside the project root."]));
+        }
+
+        if (File.Exists(fullDestinationPath))
+        {
+            return Task.FromResult(new ArtifactDownloadResult(
+                [],
+                [$"actions/download-artifact path '{destinationPath}' must be a directory."]));
+        }
+
+        var fullArtifactsPath = Path.GetFullPath(ArtifactsPath);
+        foreach (var artifact in artifacts)
+        {
+            var storedPath = Path.GetFullPath(artifact.StoredPath);
+            if (!IsUnderRoot(storedPath, fullArtifactsPath))
+            {
+                errors.Add($"artifact '{artifact.Name}' stored path must stay inside Actio artifact storage.");
+                continue;
+            }
+
+            if (!File.Exists(storedPath) && !Directory.Exists(storedPath))
+            {
+                errors.Add($"artifact '{artifact.Name}' stored path '{artifact.StoredPath}' does not exist.");
+                continue;
+            }
+
+            var targetDirectory = useArtifactNameSubdirectories
+                ? Path.Combine(fullDestinationPath, SanitizePathSegment(artifact.Name))
+                : fullDestinationPath;
+
+            if (File.Exists(storedPath))
+            {
+                Directory.CreateDirectory(targetDirectory);
+                var targetPath = Path.Combine(targetDirectory, Path.GetFileName(storedPath));
+                File.Copy(storedPath, targetPath, overwrite: true);
+                restoredPaths.Add(targetPath);
+                continue;
+            }
+
+            CopyDirectory(storedPath, targetDirectory);
+            restoredPaths.Add(targetDirectory);
+        }
+
+        return Task.FromResult(new ArtifactDownloadResult(restoredPaths, errors));
     }
 
     public async Task SaveRunRecordAsync(
@@ -251,6 +311,82 @@ public sealed class FileSystemRunStore : IRunStore
         return records
             .OrderByDescending(record => record.StartedAt)
             .ToArray();
+    }
+
+    private ArtifactSaveResult SaveArtifactCore(
+        string runId,
+        string jobName,
+        string projectRoot,
+        string artifactName,
+        IReadOnlyList<string> paths,
+        int? retentionDays,
+        string errorPrefix)
+    {
+        var errors = new List<string>();
+        var sourcePaths = new List<string>();
+        var fullProjectRoot = Path.GetFullPath(projectRoot);
+
+        if (paths.Count == 0)
+        {
+            return new ArtifactSaveResult([], [$"{errorPrefix} path is required."]);
+        }
+
+        foreach (var path in paths)
+        {
+            var sourcePath = Path.GetFullPath(Path.Combine(fullProjectRoot, path));
+            if (!IsUnderRoot(sourcePath, fullProjectRoot))
+            {
+                errors.Add($"{errorPrefix} path '{path}' must stay inside the project root.");
+                continue;
+            }
+
+            if (!File.Exists(sourcePath) && !Directory.Exists(sourcePath))
+            {
+                errors.Add($"{errorPrefix} path '{path}' does not exist.");
+                continue;
+            }
+
+            sourcePaths.Add(sourcePath);
+        }
+
+        if (errors.Count > 0)
+        {
+            return new ArtifactSaveResult([], errors);
+        }
+
+        var artifactDirectory = Path.Combine(
+            ArtifactsPath,
+            SanitizePathSegment(runId),
+            SanitizePathSegment(jobName),
+            SanitizePathSegment(artifactName));
+        string? storedPath = null;
+
+        foreach (var sourcePath in sourcePaths)
+        {
+            if (File.Exists(sourcePath))
+            {
+                Directory.CreateDirectory(artifactDirectory);
+                var targetPath = Path.Combine(artifactDirectory, Path.GetFileName(sourcePath));
+                File.Copy(sourcePath, targetPath, overwrite: true);
+                storedPath ??= sourcePaths.Count == 1 ? targetPath : artifactDirectory;
+                continue;
+            }
+
+            CopyDirectory(sourcePath, artifactDirectory);
+            storedPath = artifactDirectory;
+        }
+
+        var sourcePathRecord = sourcePaths.Count == 1
+            ? sourcePaths[0]
+            : fullProjectRoot;
+        var artifact = new WorkflowRunArtifact(
+            jobName,
+            artifactName,
+            sourcePathRecord,
+            storedPath ?? artifactDirectory,
+            retentionDays);
+
+        return new ArtifactSaveResult([artifact], []);
     }
 
     private static void CopyDirectory(string sourceDirectory, string targetDirectory)

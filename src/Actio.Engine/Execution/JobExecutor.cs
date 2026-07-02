@@ -1,6 +1,7 @@
 using Actio.Core.Actions;
 using Actio.Core.Expressions;
 using Actio.Core.Workflows;
+using Actio.Engine.Artifacts;
 using Actio.Engine.Caching;
 using Actio.Engine.Runs;
 
@@ -52,6 +53,7 @@ internal sealed class JobExecutor
         WorkflowRunTrigger runTrigger,
         IReadOnlyDictionary<string, string> workflowVariables,
         IReadOnlyDictionary<string, string> workflowSecrets,
+        IReadOnlyList<WorkflowRunArtifact> availableArtifacts,
         string projectRoot,
         string runId,
         TextWriter output,
@@ -187,6 +189,8 @@ internal sealed class JobExecutor
                     secretMasker,
                     workflowVariables,
                     workflowSecrets,
+                    availableArtifacts,
+                    artifacts,
                     projectRoot,
                     runId,
                     runTrigger,
@@ -210,6 +214,7 @@ internal sealed class JobExecutor
                     pendingDependencyCacheSaves.Add(stepResult.PendingDependencyCacheSave);
                 }
 
+                artifacts.AddRange(stepResult.Artifacts);
                 var continuedFailure = step.ContinueOnError &&
                     stepResult.CountsAsFailedStep &&
                     IsFailureStatus(stepResult.Status);
@@ -263,6 +268,14 @@ internal sealed class JobExecutor
                     output,
                     errors,
                     jobCancellationToken);
+            }
+
+            if (errors.Count == 0)
+            {
+                errors.AddRange(FindDuplicateArtifactNameErrors(
+                    availableArtifacts.Concat(artifacts),
+                    job.Artifacts.Select(artifact => artifact.Name),
+                    $"workflow.jobs.{job.Name}.artifacts"));
             }
 
             if (errors.Count == 0)
@@ -456,6 +469,8 @@ internal sealed class JobExecutor
         SecretMasker secretMasker,
         IReadOnlyDictionary<string, string> workflowVariables,
         IReadOnlyDictionary<string, string> workflowSecrets,
+        IReadOnlyList<WorkflowRunArtifact> availableArtifacts,
+        IReadOnlyList<WorkflowRunArtifact> jobArtifacts,
         string projectRoot,
         string runId,
         WorkflowRunTrigger runTrigger,
@@ -543,6 +558,19 @@ internal sealed class JobExecutor
                 return await ExecuteDependencyCacheActionAsync(
                     plan.DependencyCacheAction!,
                     projectRoot,
+                    collector,
+                    stepCancellationToken);
+            }
+
+            if (plan.Kind == StepExecutionKind.ArtifactAction)
+            {
+                return await ExecuteArtifactActionAsync(
+                    plan.ArtifactAction!,
+                    job.Name,
+                    projectRoot,
+                    runId,
+                    availableArtifacts,
+                    jobArtifacts,
                     collector,
                     stepCancellationToken);
             }
@@ -886,6 +914,166 @@ internal sealed class JobExecutor
             null,
             annotations: collector.Annotations,
             pendingDependencyCacheSave: pendingSave);
+    }
+
+    private async Task<StepExecutionOutcome> ExecuteArtifactActionAsync(
+        ArtifactAction action,
+        string jobName,
+        string projectRoot,
+        string runId,
+        IReadOnlyList<WorkflowRunArtifact> availableArtifacts,
+        IReadOnlyList<WorkflowRunArtifact> jobArtifacts,
+        StepOutputCollector collector,
+        CancellationToken cancellationToken)
+    {
+        return action.Kind == ArtifactActionKind.Upload
+            ? await ExecuteUploadArtifactActionAsync(
+                action,
+                jobName,
+                projectRoot,
+                runId,
+                availableArtifacts,
+                jobArtifacts,
+                collector,
+                cancellationToken)
+            : await ExecuteDownloadArtifactActionAsync(
+                action,
+                projectRoot,
+                availableArtifacts,
+                jobArtifacts,
+                collector,
+                cancellationToken);
+    }
+
+    private async Task<StepExecutionOutcome> ExecuteUploadArtifactActionAsync(
+        ArtifactAction action,
+        string jobName,
+        string projectRoot,
+        string runId,
+        IReadOnlyList<WorkflowRunArtifact> availableArtifacts,
+        IReadOnlyList<WorkflowRunArtifact> jobArtifacts,
+        StepOutputCollector collector,
+        CancellationToken cancellationToken)
+    {
+        var artifactName = action.Name!;
+        var duplicateErrors = FindDuplicateArtifactNameErrors(
+            availableArtifacts.Concat(jobArtifacts),
+            [artifactName],
+            "actions/upload-artifact");
+        if (duplicateErrors.Count > 0)
+        {
+            return StepExecutionOutcome.FailedWithoutExitCode(
+                "actions/upload-artifact",
+                duplicateErrors,
+                collector.LogPath,
+                annotations: collector.Annotations);
+        }
+
+        ArtifactSaveResult save;
+        try
+        {
+            save = await _runStore.SaveArtifactAsync(
+                runId,
+                jobName,
+                projectRoot,
+                artifactName,
+                action.Paths,
+                action.RetentionDays,
+                cancellationToken);
+        }
+        catch (Exception ex) when (StorageError.IsRecoverable(ex))
+        {
+            return StepExecutionOutcome.StorageFailed(
+                StorageError.Format($"saving artifact '{artifactName}'", ex),
+                collector.LogPath);
+        }
+
+        if (save.Errors.Count > 0)
+        {
+            return StepExecutionOutcome.FailedWithoutExitCode(
+                "actions/upload-artifact",
+                save.Errors,
+                collector.LogPath,
+                annotations: collector.Annotations);
+        }
+
+        await collector.WriteOutputLineAsync($"Artifact '{artifactName}' uploaded.", cancellationToken);
+
+        return StepExecutionOutcome.Succeeded(
+            "actions/upload-artifact",
+            0,
+            collector.LogPath,
+            collector.CapturedOutputs,
+            null,
+            null,
+            annotations: collector.Annotations,
+            artifacts: save.Artifacts);
+    }
+
+    private async Task<StepExecutionOutcome> ExecuteDownloadArtifactActionAsync(
+        ArtifactAction action,
+        string projectRoot,
+        IReadOnlyList<WorkflowRunArtifact> availableArtifacts,
+        IReadOnlyList<WorkflowRunArtifact> jobArtifacts,
+        StepOutputCollector collector,
+        CancellationToken cancellationToken)
+    {
+        var artifacts = availableArtifacts.Concat(jobArtifacts).ToArray();
+        var selectedArtifacts = action.Name is null
+            ? artifacts
+            : artifacts.Where(artifact => string.Equals(artifact.Name, action.Name, StringComparison.Ordinal)).ToArray();
+
+        if (selectedArtifacts.Length == 0)
+        {
+            var message = action.Name is null
+                ? "actions/download-artifact found no artifacts in this run."
+                : $"actions/download-artifact artifact '{action.Name}' was not found in this run.";
+            return StepExecutionOutcome.FailedWithoutExitCode(
+                "actions/download-artifact",
+                [message],
+                collector.LogPath,
+                annotations: collector.Annotations);
+        }
+
+        ArtifactDownloadResult download;
+        try
+        {
+            download = await _runStore.RestoreArtifactsAsync(
+                projectRoot,
+                selectedArtifacts,
+                action.DestinationPath,
+                useArtifactNameSubdirectories: action.Name is null,
+                cancellationToken);
+        }
+        catch (Exception ex) when (StorageError.IsRecoverable(ex))
+        {
+            return StepExecutionOutcome.StorageFailed(
+                StorageError.Format("restoring artifacts", ex),
+                collector.LogPath);
+        }
+
+        if (download.Errors.Count > 0)
+        {
+            return StepExecutionOutcome.FailedWithoutExitCode(
+                "actions/download-artifact",
+                download.Errors,
+                collector.LogPath,
+                annotations: collector.Annotations);
+        }
+
+        foreach (var restoredPath in download.RestoredPaths)
+        {
+            await collector.WriteOutputLineAsync($"Artifact restored: {restoredPath}", cancellationToken);
+        }
+
+        return StepExecutionOutcome.Succeeded(
+            "actions/download-artifact",
+            0,
+            collector.LogPath,
+            collector.CapturedOutputs,
+            null,
+            null,
+            annotations: collector.Annotations);
     }
 
     private async Task SaveDependencyCachesAsync(
@@ -1372,6 +1560,17 @@ internal sealed class JobExecutor
             return StepExecutionPlan.Failed(dependencyCacheAction.Errors);
         }
 
+        var artifactAction = ResolveArtifactAction(step.Uses, resolvedWith.Values);
+        if (artifactAction.Success && artifactAction.Action is not null)
+        {
+            return StepExecutionPlan.Artifact(artifactAction.Action);
+        }
+
+        if (!artifactAction.Success)
+        {
+            return StepExecutionPlan.Failed(artifactAction.Errors);
+        }
+
         var resolvedStep = step with { With = resolvedWith.Values };
         var action = await _actionResolver.ResolveAsync(resolvedStep, projectRoot, cancellationToken);
         if (!action.Success)
@@ -1424,6 +1623,75 @@ internal sealed class JobExecutor
             string.IsNullOrEmpty(action.ActionPath);
     }
 
+    private static ArtifactActionResolution ResolveArtifactAction(
+        string? uses,
+        IReadOnlyDictionary<string, string> with)
+    {
+        if (uses is null ||
+            !ActionReference.TryParse(uses, out var reference) ||
+            !reference!.TryGetGitHubAction(out var githubAction) ||
+            !IsArtifactAction(githubAction!))
+        {
+            return ArtifactActionResolution.NotArtifactAction;
+        }
+
+        return string.Equals(githubAction!.Repository, "upload-artifact", StringComparison.OrdinalIgnoreCase)
+            ? ResolveUploadArtifactAction(with)
+            : ResolveDownloadArtifactAction(with);
+    }
+
+    private static ArtifactActionResolution ResolveUploadArtifactAction(IReadOnlyDictionary<string, string> with)
+    {
+        var errors = new List<string>();
+        foreach (var key in with.Keys)
+        {
+            if (key is not "name" and not "path" and not "retention-days")
+            {
+                errors.Add($"actions/upload-artifact with.{key} is not supported yet.");
+            }
+        }
+
+        var artifactName = ReadOptionalActionInput(with, "name") ?? "artifact";
+        var paths = SplitActionInput(ReadRequiredActionInput(with, "path", errors));
+        var retentionDays = ReadRetentionDays(with, errors);
+
+        if (paths.Count == 0)
+        {
+            errors.Add("actions/upload-artifact with.path is required.");
+        }
+
+        return errors.Count == 0
+            ? ArtifactActionResolution.Resolved(ArtifactAction.Upload(artifactName, paths, retentionDays))
+            : ArtifactActionResolution.Failed(errors);
+    }
+
+    private static ArtifactActionResolution ResolveDownloadArtifactAction(IReadOnlyDictionary<string, string> with)
+    {
+        var errors = new List<string>();
+        foreach (var key in with.Keys)
+        {
+            if (key is not "name" and not "path")
+            {
+                errors.Add($"actions/download-artifact with.{key} is not supported yet.");
+            }
+        }
+
+        var artifactName = ReadOptionalActionInput(with, "name");
+        var destinationPath = ReadOptionalActionInput(with, "path") ?? ".";
+
+        return errors.Count == 0
+            ? ArtifactActionResolution.Resolved(ArtifactAction.Download(artifactName, destinationPath))
+            : ArtifactActionResolution.Failed(errors);
+    }
+
+    private static bool IsArtifactAction(GitHubActionReference action)
+    {
+        return string.Equals(action.Owner, "actions", StringComparison.OrdinalIgnoreCase) &&
+            string.IsNullOrEmpty(action.ActionPath) &&
+            (string.Equals(action.Repository, "upload-artifact", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(action.Repository, "download-artifact", StringComparison.OrdinalIgnoreCase));
+    }
+
     private static string? ReadRequiredCacheInput(
         IReadOnlyDictionary<string, string> with,
         string name,
@@ -1460,6 +1728,61 @@ internal sealed class JobExecutor
             .ToArray();
     }
 
+    private static string? ReadRequiredActionInput(
+        IReadOnlyDictionary<string, string> with,
+        string name,
+        List<string> errors)
+    {
+        var value = ReadOptionalActionInput(with, name);
+        if (value is null)
+        {
+            errors.Add($"actions/upload-artifact with.{name} is required.");
+        }
+
+        return value;
+    }
+
+    private static string? ReadOptionalActionInput(
+        IReadOnlyDictionary<string, string> with,
+        string name)
+    {
+        return with.TryGetValue(name, out var value) && !string.IsNullOrWhiteSpace(value)
+            ? value.Trim()
+            : null;
+    }
+
+    private static IReadOnlyList<string> SplitActionInput(string? value)
+    {
+        if (value is null)
+        {
+            return [];
+        }
+
+        return value
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(item => !string.IsNullOrWhiteSpace(item))
+            .ToArray();
+    }
+
+    private static int? ReadRetentionDays(
+        IReadOnlyDictionary<string, string> with,
+        List<string> errors)
+    {
+        var value = ReadOptionalActionInput(with, "retention-days");
+        if (value is null)
+        {
+            return null;
+        }
+
+        if (!int.TryParse(value, out var retentionDays) || retentionDays <= 0)
+        {
+            errors.Add("actions/upload-artifact with.retention-days must be a positive integer.");
+            return null;
+        }
+
+        return retentionDays;
+    }
+
     private static IReadOnlyDictionary<string, string> CreateDependencyCacheOutputs(
         string primaryKey,
         DependencyCacheRestoreResult restore)
@@ -1470,6 +1793,30 @@ internal sealed class JobExecutor
             ["cache-primary-key"] = primaryKey,
             ["cache-matched-key"] = restore.MatchedKey ?? string.Empty
         };
+    }
+
+    private static IReadOnlyList<string> FindDuplicateArtifactNameErrors(
+        IEnumerable<WorkflowRunArtifact> existingArtifacts,
+        IEnumerable<string> newArtifactNames,
+        string context)
+    {
+        var existingNames = existingArtifacts
+            .Select(artifact => artifact.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        var newNames = new HashSet<string>(StringComparer.Ordinal);
+        var reportedNames = new HashSet<string>(StringComparer.Ordinal);
+        var errors = new List<string>();
+
+        foreach (var artifactName in newArtifactNames)
+        {
+            if ((!newNames.Add(artifactName) || existingNames.Contains(artifactName)) &&
+                reportedNames.Add(artifactName))
+            {
+                errors.Add($"{context} artifact '{artifactName}' already exists in this run.");
+            }
+        }
+
+        return errors;
     }
 
     private static StepWithResolution ResolveStepWith(
@@ -1897,6 +2244,7 @@ internal sealed class JobExecutor
         string? Summary,
         IReadOnlyList<StepLogAnnotation> Annotations,
         bool CountsAsFailedStep,
+        IReadOnlyList<WorkflowRunArtifact> Artifacts,
         DependencyCacheSaveRequest? PendingDependencyCacheSave)
     {
         public static StepExecutionOutcome Succeeded(
@@ -1911,9 +2259,10 @@ internal sealed class JobExecutor
             string? summaryPath = null,
             string? summary = null,
             IReadOnlyList<StepLogAnnotation>? annotations = null,
+            IReadOnlyList<WorkflowRunArtifact>? artifacts = null,
             DependencyCacheSaveRequest? pendingDependencyCacheSave = null)
         {
-            return new StepExecutionOutcome(SuccessStatus, command, exitCode, logPath, shell, workingDirectory, outputs, [], environmentUpdates ?? new Dictionary<string, string>(), pathEntries ?? [], summaryPath, summary, annotations ?? [], false, pendingDependencyCacheSave);
+            return new StepExecutionOutcome(SuccessStatus, command, exitCode, logPath, shell, workingDirectory, outputs, [], environmentUpdates ?? new Dictionary<string, string>(), pathEntries ?? [], summaryPath, summary, annotations ?? [], false, artifacts ?? [], pendingDependencyCacheSave);
         }
 
         public static StepExecutionOutcome Failed(
@@ -1930,12 +2279,12 @@ internal sealed class JobExecutor
             string? summary = null,
             IReadOnlyList<StepLogAnnotation>? annotations = null)
         {
-            return new StepExecutionOutcome(FailedStatus, command, exitCode, logPath, shell, workingDirectory, outputs, [error], environmentUpdates ?? new Dictionary<string, string>(), pathEntries ?? [], summaryPath, summary, annotations ?? [], true, null);
+            return new StepExecutionOutcome(FailedStatus, command, exitCode, logPath, shell, workingDirectory, outputs, [error], environmentUpdates ?? new Dictionary<string, string>(), pathEntries ?? [], summaryPath, summary, annotations ?? [], true, [], null);
         }
 
         public static StepExecutionOutcome StorageFailed(string error, string? logPath = null)
         {
-            return new StepExecutionOutcome(FailedStatus, string.Empty, null, logPath, null, null, new Dictionary<string, string>(), [error], new Dictionary<string, string>(), [], null, null, [], false, null);
+            return new StepExecutionOutcome(FailedStatus, string.Empty, null, logPath, null, null, new Dictionary<string, string>(), [error], new Dictionary<string, string>(), [], null, null, [], false, [], null);
         }
 
         public static StepExecutionOutcome TimedOut(
@@ -1947,7 +2296,7 @@ internal sealed class JobExecutor
             string error,
             IReadOnlyList<StepLogAnnotation>? annotations = null)
         {
-            return new StepExecutionOutcome(TimedOutStatus, command, null, logPath, shell, workingDirectory, outputs, [error], new Dictionary<string, string>(), [], null, null, annotations ?? [], true, null);
+            return new StepExecutionOutcome(TimedOutStatus, command, null, logPath, shell, workingDirectory, outputs, [error], new Dictionary<string, string>(), [], null, null, annotations ?? [], true, [], null);
         }
 
         public static StepExecutionOutcome FailedWithoutExitCode(
@@ -1961,7 +2310,7 @@ internal sealed class JobExecutor
             string? summary = null,
             IReadOnlyList<StepLogAnnotation>? annotations = null)
         {
-            return new StepExecutionOutcome(FailedStatus, command, null, logPath, null, null, outputs ?? new Dictionary<string, string>(), errors, environmentUpdates ?? new Dictionary<string, string>(), pathEntries ?? [], summaryPath, summary, annotations ?? [], true, null);
+            return new StepExecutionOutcome(FailedStatus, command, null, logPath, null, null, outputs ?? new Dictionary<string, string>(), errors, environmentUpdates ?? new Dictionary<string, string>(), pathEntries ?? [], summaryPath, summary, annotations ?? [], true, [], null);
         }
     }
 
@@ -2000,7 +2349,8 @@ internal sealed class JobExecutor
         DockerImageAction,
         DockerfileAction,
         JavaScriptAction,
-        DependencyCacheAction
+        DependencyCacheAction,
+        ArtifactAction
     }
 
     private sealed record StepExecutionPlan(
@@ -2020,6 +2370,7 @@ internal sealed class JobExecutor
         string? JavaScriptPre,
         string? JavaScriptPost,
         DependencyCacheAction? DependencyCacheAction,
+        ArtifactAction? ArtifactAction,
         IReadOnlyDictionary<string, string> Environment,
         IReadOnlyList<StepExecutionMount> AdditionalMounts,
         IReadOnlyList<string> Errors)
@@ -2039,6 +2390,7 @@ internal sealed class JobExecutor
                 null,
                 null,
                 [],
+                null,
                 null,
                 null,
                 null,
@@ -2076,6 +2428,7 @@ internal sealed class JobExecutor
                 null,
                 null,
                 null,
+                null,
                 environment,
                 additionalMounts,
                 []);
@@ -2098,6 +2451,7 @@ internal sealed class JobExecutor
                 dockerImage,
                 dockerEntryPoint,
                 dockerArguments,
+                null,
                 null,
                 null,
                 null,
@@ -2135,6 +2489,7 @@ internal sealed class JobExecutor
                 null,
                 null,
                 null,
+                null,
                 environment,
                 additionalMounts,
                 []);
@@ -2166,6 +2521,7 @@ internal sealed class JobExecutor
                 pre,
                 post,
                 null,
+                null,
                 environment,
                 additionalMounts,
                 []);
@@ -2183,6 +2539,35 @@ internal sealed class JobExecutor
                 null,
                 null,
                 [],
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                action,
+                null,
+                new Dictionary<string, string>(),
+                [],
+                []);
+        }
+
+        public static StepExecutionPlan Artifact(ArtifactAction action)
+        {
+            var command = action.Kind == ArtifactActionKind.Upload
+                ? "actions/upload-artifact"
+                : "actions/download-artifact";
+            return new(
+                true,
+                StepExecutionKind.ArtifactAction,
+                command,
+                [],
+                new Dictionary<string, string>(),
+                new Dictionary<string, string>(),
+                null,
+                null,
+                [],
+                null,
                 null,
                 null,
                 null,
@@ -2213,6 +2598,7 @@ internal sealed class JobExecutor
                 null,
                 null,
                 null,
+                null,
                 new Dictionary<string, string>(),
                 [],
                 errors);
@@ -2229,6 +2615,20 @@ internal sealed class JobExecutor
             => new(true, action, []);
 
         public static DependencyCacheActionResolution Failed(IReadOnlyList<string> errors)
+            => new(false, null, errors);
+    }
+
+    private sealed record ArtifactActionResolution(
+        bool Success,
+        ArtifactAction? Action,
+        IReadOnlyList<string> Errors)
+    {
+        public static ArtifactActionResolution NotArtifactAction { get; } = new(true, null, []);
+
+        public static ArtifactActionResolution Resolved(ArtifactAction action)
+            => new(true, action, []);
+
+        public static ArtifactActionResolution Failed(IReadOnlyList<string> errors)
             => new(false, null, errors);
     }
 }
