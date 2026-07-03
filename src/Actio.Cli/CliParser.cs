@@ -51,6 +51,11 @@ public sealed class CliParser
             return ParseCacheCommand(args);
         }
 
+        if (string.Equals(args[0], "compatibility", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseCompatibilityCommand(args);
+        }
+
         if (IsWorkflowFilename(args[0]))
         {
             return ParseShorthandRunCommand(args);
@@ -292,6 +297,23 @@ public sealed class CliParser
             "clean" => CliCommand.CleanCache(),
             _ => CliCommand.UsageError($"Unknown cache command '{args[1]}'.")
         };
+    }
+
+    private static CliCommand ParseCompatibilityCommand(IReadOnlyList<string> args)
+    {
+        if (args.Count == 1)
+        {
+            return CliCommand.ShowCompatibility();
+        }
+
+        if (args.Count == 2 && IsHelp(args[1]))
+        {
+            return new CliCommand(CliCommandKind.ShowCompatibilityHelp);
+        }
+
+        return args[1].StartsWith("-", StringComparison.Ordinal)
+            ? CliCommand.UsageError($"Unknown option '{args[1]}' for 'compatibility'.")
+            : CliCommand.UsageError($"Unexpected argument '{args[1]}' for 'compatibility'.");
     }
 
     private static bool IsHelp(string arg)

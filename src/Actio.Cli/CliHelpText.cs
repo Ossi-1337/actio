@@ -12,6 +12,7 @@ public static class CliHelpText
           actio status <run-id>
           actio rerun <run-id>
           actio cancel <run-id>
+          actio compatibility
           actio cache <command>
           actio [options]
 
@@ -21,6 +22,7 @@ public static class CliHelpText
           status <run-id>      Show stored status for a workflow run.
           rerun <run-id>       Rerun a completed workflow run.
           cancel <run-id>      Request cancellation for a running workflow run.
+          compatibility        Show the known GitHub Actions compatibility matrix.
           cache                Inspect or clean Actio cache entries.
 
         Arguments:
@@ -38,6 +40,7 @@ public static class CliHelpText
           actio status 20260703090029234-555a1799
           actio rerun 20260703090029234-555a1799
           actio cancel 20260703090029234-555a1799
+          actio compatibility
           actio cache list
           actio run --help
         """;
@@ -161,5 +164,22 @@ public static class CliHelpText
         Examples:
           actio cache list
           actio cache clean
+        """;
+
+    public const string Compatibility = """
+        Actio compatibility - show known action compatibility.
+
+        Usage:
+          actio compatibility
+
+        Options:
+          -h, --help           Show help for the compatibility command.
+
+        Description:
+          Prints Actio's curated compatibility matrix for common GitHub Actions and selected
+          third-party actions. The matrix is a support statement, not a live Marketplace scan.
+
+        Examples:
+          actio compatibility
         """;
 }

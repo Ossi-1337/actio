@@ -25,6 +25,7 @@ Common commands:
 
 ```bash
 dotnet run --project src/Actio.Cli -- --help
+dotnet run --project src/Actio.Cli -- compatibility
 dotnet run --project src/Actio.Cli -- cache list
 dotnet run --project src/Actio.Cli -- web
 ```

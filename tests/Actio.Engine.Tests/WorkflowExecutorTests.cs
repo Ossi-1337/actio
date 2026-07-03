@@ -3224,6 +3224,33 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_FailsUnsupportedCheckoutRefBeforeDownloadingGitHubAction()
+    {
+        var runner = new FakeRunnerProvider(Array.Empty<int>());
+        var cache = new RecordingActionCache();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Checkout", null, "actions/checkout@v3")]));
+
+        var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(Environment.CurrentDirectory),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Empty(cache.GitHubSourceRequests);
+        Assert.Empty(runner.Requests);
+        Assert.Contains(result.Errors, error => error.Contains("actions/checkout@v4", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("compatibility matrix", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public async Task ExecuteAsync_FailsGitHubScriptBeforeDownloadingGitHubAction()
     {
         var runner = new FakeRunnerProvider(Array.Empty<int>());
@@ -3259,6 +3286,34 @@ public sealed class WorkflowExecutorTests
         Assert.Contains(result.Errors, error => error.Contains("does not support actions/github-script yet", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, error => error.Contains("GitHub API client context", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, error => error.Contains("GITHUB_TOKEN", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_FailsKnownUnsupportedActionBeforeDownloadingGitHubAction()
+    {
+        var runner = new FakeRunnerProvider(Array.Empty<int>());
+        var cache = new RecordingActionCache();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Label", null, "actions/labeler@v5")]));
+
+        var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(Environment.CurrentDirectory),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Empty(cache.GitHubSourceRequests);
+        Assert.Empty(runner.JavaScriptActionRequests);
+        Assert.Empty(runner.Requests);
+        Assert.Contains(result.Errors, error => error.Contains("compatibility matrix", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("Required milestone: 52, 59", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

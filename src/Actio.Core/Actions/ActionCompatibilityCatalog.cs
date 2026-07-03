@@ -1,0 +1,177 @@
+namespace Actio.Core.Actions;
+
+public static class ActionCompatibilityCatalog
+{
+    public static IReadOnlyList<ActionCompatibilityEntry> Entries { get; } =
+    [
+        new(
+            "actions/checkout",
+            "actions",
+            "checkout",
+            string.Empty,
+            ActionCompatibilityStatus.Partial,
+            "Built-in local checkout shim",
+            "v4 only",
+            "Actio treats the local project root as an already available workspace and does not download or execute the GitHub JavaScript action.",
+            "`with:` inputs such as path, ref, repository, submodules, and fetch-depth are not implemented.",
+            "14, 27, 59",
+            "Engine tests cover the checkout shim and the unsupported-input failure path."),
+        new(
+            "actions/cache",
+            "actions",
+            "cache",
+            string.Empty,
+            ActionCompatibilityStatus.Partial,
+            "Built-in local dependency cache shim",
+            "Pathless refs; v4 is the tested compatibility target",
+            "Top-level workflow steps restore exact keys, restore newest restore-key prefix matches, expose cache outputs, and save after successful jobs.",
+            "Remote/shared GitHub cache service behavior, glob paths, and nested composite usage are not implemented.",
+            "49, 59",
+            "Engine and storage tests cover restore/save, outputs, restore keys, and workspace path safety."),
+        new(
+            "actions/upload-artifact",
+            "actions",
+            "upload-artifact",
+            string.Empty,
+            ActionCompatibilityStatus.Partial,
+            "Built-in local artifact upload shim",
+            "Pathless refs; v4 is the tested compatibility target",
+            "Top-level workflow steps copy literal workspace paths into Actio local artifact storage and record local unsigned attestation metadata.",
+            "Glob paths, GitHub artifact service upload, retention enforcement, and nested composite usage are not implemented.",
+            "50, 55, 59",
+            "Engine and storage tests cover upload success, missing paths, duplicate names, retention metadata, and attestation metadata."),
+        new(
+            "actions/download-artifact",
+            "actions",
+            "download-artifact",
+            string.Empty,
+            ActionCompatibilityStatus.Partial,
+            "Built-in local artifact download shim",
+            "Pathless refs; v4 is the tested compatibility target",
+            "Top-level workflow steps restore artifacts produced earlier in the same workflow run.",
+            "Cross-run downloads, GitHub artifact service downloads, glob selection, and nested composite usage are not implemented.",
+            "50, 59",
+            "Engine and storage tests cover same-job and cross-job same-run downloads plus missing artifact failures."),
+        new(
+            "actions/setup-node",
+            "actions",
+            "setup-node",
+            string.Empty,
+            ActionCompatibilityStatus.Partial,
+            "Built-in no-install setup shim",
+            "Pathless refs; v4 is tested",
+            "Validates that Node is already available in the selected runner image and optionally matches node-version.",
+            "Tool installation, hosted toolcache behavior, registry authentication, version-file inputs, and dependency cache inputs are not implemented.",
+            "51, 59",
+            "Engine tests cover generated setup commands, version matching, unsupported inputs, and cache input rejection."),
+        new(
+            "actions/setup-python",
+            "actions",
+            "setup-python",
+            string.Empty,
+            ActionCompatibilityStatus.Partial,
+            "Built-in no-install setup shim",
+            "Pathless refs; v5 is tested",
+            "Validates that Python is already available in the selected runner image and optionally matches python-version.",
+            "Tool installation, hosted toolcache behavior, version-file inputs, architecture selection, and dependency cache inputs are not implemented.",
+            "51, 59",
+            "Engine tests cover generated setup commands, version matching, unsupported inputs, and cache input rejection."),
+        new(
+            "actions/setup-java",
+            "actions",
+            "setup-java",
+            string.Empty,
+            ActionCompatibilityStatus.Partial,
+            "Built-in no-install setup shim",
+            "Pathless refs; v4 is tested",
+            "Validates that Java is already available in the selected runner image and optionally matches java-version.",
+            "Tool installation, hosted toolcache behavior, registry authentication, architecture selection, and dependency cache inputs are not implemented.",
+            "51, 59",
+            "Engine tests cover generated setup commands, version matching, unsupported inputs, and cache input rejection."),
+        new(
+            "actions/setup-go",
+            "actions",
+            "setup-go",
+            string.Empty,
+            ActionCompatibilityStatus.Partial,
+            "Built-in no-install setup shim",
+            "Pathless refs; v5 is tested",
+            "Validates that Go is already available in the selected runner image and optionally matches go-version.",
+            "Tool installation, hosted toolcache behavior, check-latest, version-file inputs, and dependency cache inputs are not implemented.",
+            "51, 59",
+            "Engine tests cover generated setup commands, version matching, unsupported inputs, and cache input rejection."),
+        new(
+            "actions/setup-dotnet",
+            "actions",
+            "setup-dotnet",
+            string.Empty,
+            ActionCompatibilityStatus.Partial,
+            "Built-in no-install setup shim",
+            "Pathless refs; v4 is tested",
+            "Validates that .NET is already available in the selected runner image and optionally matches dotnet-version.",
+            "Tool installation, hosted toolcache behavior, source-url/auth configuration, global-json inputs, and dependency cache inputs are not implemented.",
+            "51, 59",
+            "Engine tests cover generated setup commands, version matching, unsupported inputs, and cache input rejection."),
+        new(
+            "actions/github-script",
+            "actions",
+            "github-script",
+            string.Empty,
+            ActionCompatibilityStatus.Unsupported,
+            "GitHub API JavaScript action",
+            "Recognized pathless refs",
+            "Actio fails before source download, JavaScript execution, token injection, or GitHub API calls.",
+            "Actio does not support actions/github-script yet because local runs do not provide a GitHub API client context and do not create GitHub's automatic GITHUB_TOKEN.",
+            "52, 59",
+            "Engine tests cover top-level and nested safe-fail behavior with no source download or JavaScript runner request."),
+        new(
+            "actions/labeler",
+            "actions",
+            "labeler",
+            string.Empty,
+            ActionCompatibilityStatus.Unsupported,
+            "GitHub API JavaScript action",
+            "Not supported",
+            "Actio blocks this known GitHub API action before source download.",
+            "This action needs pull request metadata, repository labels, GitHub API access, and an explicit token/mutation policy.",
+            "52, 59",
+            "Matrix entry only; no execution support is claimed."),
+        new(
+            "actions/stale",
+            "actions",
+            "stale",
+            string.Empty,
+            ActionCompatibilityStatus.Unsupported,
+            "GitHub API JavaScript action",
+            "Not supported",
+            "Actio blocks this known GitHub API action before source download.",
+            "This action needs issue and pull request mutation through the GitHub API plus an explicit token/mutation policy.",
+            "52, 59",
+            "Matrix entry only; no execution support is claimed."),
+        new(
+            "dorny/paths-filter",
+            "dorny",
+            "paths-filter",
+            string.Empty,
+            ActionCompatibilityStatus.Unvalidated,
+            "Third-party JavaScript action",
+            "Not claimed",
+            "Actio does not claim compatibility with this action yet.",
+            "Local change detection needs a first-party Actio design or a dedicated compatibility validation pass before this action should be documented as supported.",
+            "19, 20, 28, 30, 39, 59",
+            "The project workflow uses this action as future compatibility syntax, but it is not Actio-smoke-tested yet."),
+    ];
+
+    public static ActionCompatibilityEntry? Find(string uses)
+    {
+        return ActionReference.TryParse(uses, out var reference) &&
+            reference!.TryGetGitHubAction(out var action)
+                ? Find(action!)
+                : null;
+    }
+
+    public static ActionCompatibilityEntry? Find(GitHubActionReference action)
+    {
+        return Entries.FirstOrDefault(entry => entry.Matches(action));
+    }
+}

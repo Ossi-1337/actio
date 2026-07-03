@@ -11,7 +11,6 @@ internal sealed class ActionResolver
     private const string ActionContainerPath = "/actio/action";
     private const string DockerfileImageRepository = "actio/action";
     private const string CheckoutShimCommand = "printf '%s\\n' 'Actio checkout shim: workspace is already available at /workspace.'";
-    private const string GitHubScriptUnsupportedMessage = "actions/github-script is recognized, but Actio does not support actions/github-script yet. Actio does not provide a GitHub API client context and does not create GitHub's automatic GITHUB_TOKEN in local runs. Future support must require explicit local token configuration and a repository mutation policy.";
     private const int MaxNestedActionDepth = 10;
 
     private readonly ActionParser _parser;
@@ -219,9 +218,15 @@ internal sealed class ActionResolver
             return ActionResolutionResult.Failed([$"uses '{uses}' is not a valid GitHub action reference."]);
         }
 
-        if (IsGitHubScriptAction(githubAction!))
+        var compatibility = ActionCompatibilityCatalog.Find(githubAction!);
+        if (compatibility?.Status == ActionCompatibilityStatus.Unsupported)
         {
-            return ActionResolutionResult.Failed([GitHubScriptUnsupportedMessage]);
+            return ActionResolutionResult.Failed([compatibility.FormatUnsupportedMessage(uses)]);
+        }
+
+        if (IsCheckoutAction(githubAction!) && !IsCheckoutShim(githubAction!))
+        {
+            return ActionResolutionResult.Failed(["actions/checkout is supported only as the Actio actions/checkout@v4 local checkout shim. Use actions/checkout@v4 without with: inputs. See the compatibility matrix for current limitations."]);
         }
 
         if (IsCheckoutShim(githubAction!))
@@ -295,16 +300,15 @@ internal sealed class ActionResolver
 
     private static bool IsCheckoutShim(GitHubActionReference action)
     {
-        return string.Equals(action.Owner, "actions", StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(action.Repository, "checkout", StringComparison.OrdinalIgnoreCase) &&
+        return IsCheckoutAction(action) &&
             string.IsNullOrEmpty(action.ActionPath) &&
             string.Equals(action.Ref, "v4", StringComparison.Ordinal);
     }
 
-    private static bool IsGitHubScriptAction(GitHubActionReference action)
+    private static bool IsCheckoutAction(GitHubActionReference action)
     {
         return string.Equals(action.Owner, "actions", StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(action.Repository, "github-script", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(action.Repository, "checkout", StringComparison.OrdinalIgnoreCase) &&
             string.IsNullOrEmpty(action.ActionPath);
     }
 

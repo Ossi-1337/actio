@@ -31,6 +31,7 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Contains("Usage:", result.Output);
         Assert.Contains("Commands:", result.Output);
         Assert.Contains("Options:", result.Output);
+        Assert.Contains("actio compatibility", result.Output);
         Assert.Equal(string.Empty, result.Error);
         Assert.Null(result.Executor.Workflow);
     }
@@ -93,6 +94,45 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Contains("Actio cache - inspect or clean local cache entries.", result.Output);
         Assert.Contains("actio cache list", result.Output);
         Assert.Equal(string.Empty, result.Error);
+        Assert.Null(result.Executor.Workflow);
+    }
+
+    [Fact]
+    public void Run_PrintsCompatibilityHelp()
+    {
+        var result = RunWithFakeExecutor(["compatibility", "--help"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Contains("Actio compatibility - show known action compatibility.", result.Output);
+        Assert.Contains("actio compatibility", result.Output);
+        Assert.Equal(string.Empty, result.Error);
+        Assert.Null(result.Executor.Workflow);
+    }
+
+    [Fact]
+    public void Run_PrintsCompatibilityMatrix()
+    {
+        var result = RunWithFakeExecutor(["compatibility"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Contains("Actio action compatibility matrix", result.Output);
+        Assert.Contains("actions/checkout", result.Output);
+        Assert.Contains("actions/github-script", result.Output);
+        Assert.Contains("dorny/paths-filter", result.Output);
+        Assert.Contains("Details:", result.Output);
+        Assert.Equal(string.Empty, result.Error);
+        Assert.Null(result.Executor.Workflow);
+    }
+
+    [Fact]
+    public void Run_ReturnsUsageErrorForUnexpectedCompatibilityArgument()
+    {
+        var result = RunWithFakeExecutor(["compatibility", "actions/checkout"]);
+
+        Assert.Equal(ExitCodes.UsageError, result.ExitCode);
+        Assert.Equal(string.Empty, result.Output);
+        Assert.Contains("Unexpected argument 'actions/checkout' for 'compatibility'.", result.Error);
+        Assert.Contains("actio --help", result.Error);
         Assert.Null(result.Executor.Workflow);
     }
 

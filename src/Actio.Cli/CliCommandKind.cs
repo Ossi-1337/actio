@@ -9,6 +9,7 @@ public enum CliCommandKind
     RunWeb,
     ListCache,
     CleanCache,
+    ShowCompatibility,
     ShowRootHelp,
     ShowRunHelp,
     ShowRerunHelp,
@@ -16,6 +17,7 @@ public enum CliCommandKind
     ShowStatusHelp,
     ShowWebHelp,
     ShowCacheHelp,
+    ShowCompatibilityHelp,
     ShowVersion,
     UsageError
 }

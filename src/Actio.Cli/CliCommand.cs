@@ -37,6 +37,9 @@ public sealed record CliCommand(
     public static CliCommand CleanCache()
         => new(CliCommandKind.CleanCache);
 
+    public static CliCommand ShowCompatibility()
+        => new(CliCommandKind.ShowCompatibility);
+
     public static CliCommand UsageError(string message)
         => new(CliCommandKind.UsageError, ErrorMessage: message);
 }

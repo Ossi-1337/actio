@@ -1,3 +1,4 @@
+using Actio.Core.Actions;
 using Actio.Core.Security;
 using Actio.Core.Workflows;
 using Actio.Engine.Actions;
@@ -101,6 +102,9 @@ public sealed class CliApplication
             case CliCommandKind.ShowCacheHelp:
                 output.WriteLine(CliHelpText.Cache);
                 return ExitCodes.Success;
+            case CliCommandKind.ShowCompatibilityHelp:
+                output.WriteLine(CliHelpText.Compatibility);
+                return ExitCodes.Success;
             case CliCommandKind.ShowVersion:
                 output.WriteLine($"actio {CliVersion.GetVersion()}");
                 return ExitCodes.Success;
@@ -121,6 +125,9 @@ public sealed class CliApplication
                 return await ListCacheAsync(output, error, cancellationToken);
             case CliCommandKind.CleanCache:
                 return await CleanCacheAsync(output, error, cancellationToken);
+            case CliCommandKind.ShowCompatibility:
+                output.WriteLine(ActionCompatibilityFormatter.Format(ActionCompatibilityCatalog.Entries));
+                return ExitCodes.Success;
             default:
                 throw new InvalidOperationException($"Unsupported CLI command kind '{command.Kind}'.");
         }
