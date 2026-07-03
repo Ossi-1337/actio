@@ -41,6 +41,103 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
+    public void Parse_AcceptsYamlAnchorsAliasesAndMergeKeys()
+    {
+        var result = Parse(
+            """
+            name: CI
+            env: &global_env
+              DOTNET_NOLOGO: "true"
+              CONFIGURATION: Release
+            jobs:
+              prepare: &dotnet_job
+                runs-on: ubuntu-latest
+                env:
+                  <<: *global_env
+                  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+                steps:
+                  - &restore_step
+                    name: Restore
+                    run: dotnet restore
+              test:
+                <<: *dotnet_job
+                needs: prepare
+                env:
+                  <<: *global_env
+                  CONFIGURATION: Debug
+                steps:
+                  - *restore_step
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal("true", result.Workflow!.Env["DOTNET_NOLOGO"]);
+
+        var prepare = result.Workflow.Jobs["prepare"];
+        Assert.Equal("ubuntu-latest", prepare.RunsOn);
+        Assert.Equal("Release", prepare.Env["CONFIGURATION"]);
+        Assert.Equal("true", prepare.Env["DOTNET_CLI_TELEMETRY_OPTOUT"]);
+        Assert.Equal("Restore", Assert.Single(prepare.Steps).Name);
+
+        var test = result.Workflow.Jobs["test"];
+        Assert.Equal(["prepare"], test.Needs);
+        Assert.Equal("ubuntu-latest", test.RunsOn);
+        Assert.Equal("true", test.Env["DOTNET_NOLOGO"]);
+        Assert.Equal("Debug", test.Env["CONFIGURATION"]);
+        Assert.Equal(2, test.Steps.Count);
+        Assert.Equal("Restore", test.Steps[0].Name);
+        Assert.Equal("dotnet restore", test.Steps[0].Run);
+        Assert.Equal("Test", test.Steps[1].Name);
+    }
+
+    [Fact]
+    public void Parse_AcceptsYamlMergeKeySequenceWithExplicitOverrides()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                <<:
+                  - &first
+                    runs-on: ubuntu-latest
+                    timeout-minutes: 5
+                  - &second
+                    runs-on: alpine-latest
+                    continue-on-error: true
+                timeout-minutes: 10
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var job = result.Workflow!.Jobs["test"];
+        Assert.Equal("ubuntu-latest", job.RunsOn);
+        Assert.Equal(10, job.TimeoutMinutes);
+        Assert.True(job.ContinueOnError);
+    }
+
+    [Fact]
+    public void Parse_RejectsInvalidYamlMergeKey()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                <<: not-a-map
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.<< must be a mapping or a list of mappings.");
+    }
+
+    [Fact]
     public void Parse_RequiresWorkflowName()
     {
         var result = Parse(

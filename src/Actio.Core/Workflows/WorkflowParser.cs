@@ -313,6 +313,14 @@ public sealed partial class WorkflowParser
             return WorkflowParseResult.Failed(["Workflow file must contain a YAML mapping at the root."]);
         }
 
+        var mergeKeyResolution = YamlMergeKeyResolver.Resolve(root);
+        if (mergeKeyResolution.Errors.Count > 0)
+        {
+            return WorkflowParseResult.Failed(mergeKeyResolution.Errors);
+        }
+
+        root = mergeKeyResolution.Root;
+
         AddUnknownKeyErrors(errors, root, TopLevelKeys, "workflow");
         var triggers = ReadTriggers(errors, warnings, root);
         ValidateTopLevelCompatibilityFields(errors, warnings, root);
