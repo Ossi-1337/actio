@@ -225,6 +225,7 @@ public sealed class FileSystemRunStoreTests : IDisposable
         var artifact = Assert.Single(result.Artifacts);
         Assert.True(File.Exists(artifact.StoredPath));
         Assert.Contains(Path.Combine("artifacts", runId, "test", "coverage"), artifact.StoredPath);
+        AssertArtifactAttestation(artifact, expectedFileCount: 1, expectedTotalBytes: 8);
     }
 
     [Fact]
@@ -254,6 +255,51 @@ public sealed class FileSystemRunStoreTests : IDisposable
         Assert.True(Directory.Exists(artifact.StoredPath));
         Assert.True(File.Exists(Path.Combine(artifact.StoredPath, "coverage.txt")));
         Assert.True(File.Exists(Path.Combine(artifact.StoredPath, "test.log")));
+        AssertArtifactAttestation(artifact, expectedFileCount: 2, expectedTotalBytes: 11);
+    }
+
+    [Fact]
+    public async Task SaveArtifactAsync_CreatesDeterministicContentDigest()
+    {
+        var projectRoot = Path.Combine(_root, "repo");
+        Directory.CreateDirectory(projectRoot);
+        var reportPath = Path.Combine(projectRoot, "report.txt");
+        await File.WriteAllTextAsync(reportPath, "first");
+
+        var store = new FileSystemRunStore(Path.Combine(_root, "actio-home"));
+        await store.InitializeRunAsync("run-digest-1");
+        await store.InitializeRunAsync("run-digest-2");
+        await store.InitializeRunAsync("run-digest-3");
+
+        var first = await store.SaveArtifactAsync(
+            "run-digest-1",
+            "test",
+            projectRoot,
+            "report",
+            ["report.txt"]);
+        var second = await store.SaveArtifactAsync(
+            "run-digest-2",
+            "test",
+            projectRoot,
+            "report",
+            ["report.txt"]);
+
+        await File.WriteAllTextAsync(reportPath, "second");
+        var changed = await store.SaveArtifactAsync(
+            "run-digest-3",
+            "test",
+            projectRoot,
+            "report",
+            ["report.txt"]);
+
+        var firstDigest = Assert.Single(first.Artifacts).Attestation?.Digest;
+        var secondDigest = Assert.Single(second.Artifacts).Attestation?.Digest;
+        var changedDigest = Assert.Single(changed.Artifacts).Attestation?.Digest;
+        Assert.NotNull(firstDigest);
+        Assert.NotNull(secondDigest);
+        Assert.NotNull(changedDigest);
+        Assert.Equal(firstDigest, secondDigest);
+        Assert.NotEqual(firstDigest, changedDigest);
     }
 
     [Fact]
@@ -383,5 +429,19 @@ public sealed class FileSystemRunStoreTests : IDisposable
         {
             Directory.Delete(_root, recursive: true);
         }
+    }
+
+    private static void AssertArtifactAttestation(
+        WorkflowRunArtifact artifact,
+        int expectedFileCount,
+        long expectedTotalBytes)
+    {
+        Assert.NotNull(artifact.Attestation);
+        Assert.Equal("actio.local-artifact-attestation.v1", artifact.Attestation.Format);
+        Assert.Equal("local-unsigned", artifact.Attestation.TrustModel);
+        Assert.Equal("sha256", artifact.Attestation.DigestAlgorithm);
+        Assert.Equal(64, artifact.Attestation.Digest.Length);
+        Assert.Equal(expectedFileCount, artifact.Attestation.FileCount);
+        Assert.Equal(expectedTotalBytes, artifact.Attestation.TotalBytes);
     }
 }

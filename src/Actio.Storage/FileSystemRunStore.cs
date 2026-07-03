@@ -1,3 +1,6 @@
+using System.Buffers.Binary;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Actio.Core.Workflows;
 using Actio.Engine.Runs;
@@ -384,9 +387,71 @@ public sealed class FileSystemRunStore : IRunStore
             artifactName,
             sourcePathRecord,
             storedPath ?? artifactDirectory,
-            retentionDays);
+            retentionDays,
+            CreateArtifactAttestation(storedPath ?? artifactDirectory));
 
         return new ArtifactSaveResult([artifact], []);
+    }
+
+    private static WorkflowRunArtifactAttestation CreateArtifactAttestation(string storedPath)
+    {
+        var fullStoredPath = Path.GetFullPath(storedPath);
+        var isSingleFile = File.Exists(fullStoredPath);
+        string[] files = isSingleFile
+            ? [fullStoredPath]
+            : Directory.EnumerateFiles(fullStoredPath, "*", SearchOption.AllDirectories)
+                .OrderBy(path => Path.GetRelativePath(fullStoredPath, path), StringComparer.Ordinal)
+                .ToArray();
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        long totalBytes = 0;
+
+        foreach (var file in files)
+        {
+            var relativePath = isSingleFile
+                ? Path.GetFileName(file)
+                : Path.GetRelativePath(fullStoredPath, file).Replace('\\', '/');
+            var fileInfo = new FileInfo(file);
+            totalBytes += fileInfo.Length;
+
+            AppendHashString(hash, relativePath);
+            AppendHashInt64(hash, fileInfo.Length);
+            AppendHashFileContent(hash, file);
+        }
+
+        var digest = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+        return new WorkflowRunArtifactAttestation(
+            "actio.local-artifact-attestation.v1",
+            "local-unsigned",
+            "sha256",
+            digest,
+            totalBytes,
+            files.Length,
+            DateTimeOffset.UtcNow);
+    }
+
+    private static void AppendHashString(IncrementalHash hash, string value)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value);
+        AppendHashInt64(hash, bytes.Length);
+        hash.AppendData(bytes);
+    }
+
+    private static void AppendHashInt64(IncrementalHash hash, long value)
+    {
+        var bytes = new byte[sizeof(long)];
+        BinaryPrimitives.WriteInt64LittleEndian(bytes, value);
+        hash.AppendData(bytes);
+    }
+
+    private static void AppendHashFileContent(IncrementalHash hash, string file)
+    {
+        var buffer = new byte[81920];
+        using var stream = File.OpenRead(file);
+        int read;
+        while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
+        {
+            hash.AppendData(buffer, 0, read);
+        }
     }
 
     private static void CopyDirectory(string sourceDirectory, string targetDirectory)

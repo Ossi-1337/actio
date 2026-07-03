@@ -312,14 +312,29 @@ function renderArtifacts(run) {
   return `
     <section class="summary">
       <div class="summary-head"><h2>Artifacts</h2></div>
-      <div class="link-list">
-        ${run.artifacts.map(artifact => `
-          <a class="pill" href="/api/runs/${encodeURIComponent(run.runId)}/artifacts?job=${encodeURIComponent(artifact.jobName)}&name=${encodeURIComponent(artifact.name)}" target="_blank" rel="noreferrer">
-            ${escapeHtml(artifact.jobName)} / ${escapeHtml(artifact.name)}
-          </a>
-        `).join("")}
+      <div class="artifact-list">
+        ${run.artifacts.map(artifact => renderArtifact(run, artifact)).join("")}
       </div>
     </section>
+  `;
+}
+
+function renderArtifact(run, artifact) {
+  const attestation = artifact.attestation;
+  return `
+    <div class="artifact-item">
+      <a class="pill" href="/api/runs/${encodeURIComponent(run.runId)}/artifacts?job=${encodeURIComponent(artifact.jobName)}&name=${encodeURIComponent(artifact.name)}" target="_blank" rel="noreferrer">
+        ${escapeHtml(artifact.jobName)} / ${escapeHtml(artifact.name)}
+      </a>
+      ${attestation ? `
+        <div class="artifact-meta">
+          <span>${escapeHtml(attestation.digestAlgorithm)}:${escapeHtml(shortDigest(attestation.digest))}</span>
+          <span>${attestation.fileCount} files</span>
+          <span>${formatBytes(attestation.totalBytes)}</span>
+          <span>${escapeHtml(attestation.trustModel)}</span>
+        </div>
+      ` : ""}
+    </div>
   `;
 }
 
@@ -926,6 +941,29 @@ function formatDuration(milliseconds) {
   return minutes > 0 ? `${minutes}m ${rest}s` : `${seconds}s`;
 }
 
+function formatBytes(value) {
+  const bytes = Number(value ?? 0);
+  if (!Number.isFinite(bytes) || bytes < 0) {
+    return "0 B";
+  }
+
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  const units = ["KB", "MB", "GB"];
+  let amount = bytes / 1024;
+  for (const unit of units) {
+    if (amount < 1024) {
+      return `${amount.toFixed(1)} ${unit}`;
+    }
+
+    amount /= 1024;
+  }
+
+  return `${amount.toFixed(1)} TB`;
+}
+
 function formatTriggers(triggers) {
   return triggers.map(trigger => {
     const keys = Object.keys(trigger.configuration?.properties ?? {});
@@ -973,6 +1011,10 @@ function formatEventPayload(payload) {
 
 function shortRunId(runId) {
   return runId.length > 12 ? runId.slice(0, 12) : runId;
+}
+
+function shortDigest(digest) {
+  return digest && digest.length > 12 ? digest.slice(0, 12) : digest ?? "";
 }
 
 function logKey(runId, job, step) {

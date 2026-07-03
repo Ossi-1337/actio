@@ -590,6 +590,26 @@ pre {
   padding: 12px 14px;
 }
 
+.artifact-list {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+}
+
+.artifact-item {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.artifact-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .pill {
   border: 1px solid var(--line);
   border-radius: 999px;
