@@ -610,6 +610,49 @@ pre {
   font-size: 12px;
 }
 
+.security-list {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+}
+
+.security-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.security-level {
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  text-transform: capitalize;
+}
+
+.security-level.warning {
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+
+.security-level.info {
+  background: var(--running-bg);
+  color: var(--running-text);
+}
+
+.security-message,
+.security-recommendation {
+  display: block;
+}
+
+.security-recommendation {
+  color: var(--muted);
+  margin-top: 3px;
+}
+
 .pill {
   border: 1px solid var(--line);
   border-radius: 999px;

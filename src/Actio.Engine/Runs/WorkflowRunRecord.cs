@@ -1,3 +1,4 @@
+using Actio.Core.Security;
 using Actio.Core.Workflows;
 
 namespace Actio.Engine.Runs;
@@ -16,11 +17,14 @@ public sealed record WorkflowRunRecord(
     IReadOnlyList<WorkflowRunArtifact> Artifacts,
     IReadOnlyList<string> Errors,
     IReadOnlyList<WorkflowTrigger>? Triggers = null,
-    WorkflowRunTrigger? RunTrigger = null)
+    WorkflowRunTrigger? RunTrigger = null,
+    IReadOnlyList<WorkflowSecurityFinding>? SecurityFindings = null)
 {
     public IReadOnlyList<WorkflowTrigger> Triggers { get; init; } = Triggers ?? [];
 
     public WorkflowRunTrigger RunTrigger { get; init; } = RunTrigger ?? WorkflowRunTrigger.CliWorkflowDispatch;
+
+    public IReadOnlyList<WorkflowSecurityFinding> SecurityFindings { get; init; } = SecurityFindings ?? [];
 }
 
 public sealed record WorkflowRunTrigger(

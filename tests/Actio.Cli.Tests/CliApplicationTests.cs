@@ -1,4 +1,5 @@
 using Actio.Cli;
+using Actio.Core.Security;
 using Actio.Core.Workflows;
 using Actio.Engine.Actions;
 using Actio.Engine.Caching;
@@ -413,6 +414,46 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Contains("Workflow warnings:", result.Error);
         Assert.Contains("mutable Docker image reference", result.Error);
         Assert.Equal("docker://node:22", result.Executor.Workflow!.Jobs["test"].Steps[0].Uses);
+    }
+
+    [Fact]
+    public void Run_PrintsSecurityFindings()
+    {
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+        var executor = new FakeWorkflowExecutor(new WorkflowExecutionResult(
+            WorkflowExecutionStatus.Success,
+            1,
+            1,
+            [],
+            securityFindings:
+            [
+                new WorkflowSecurityFinding(
+                    "warning",
+                    "external-action.mutable-ref",
+                    "workflow.jobs.test.steps[0].uses",
+                    "External action 'docker://node:22' uses mutable identity '22'.",
+                    "Pin Docker image actions with a sha256 digest for safer reuse.")
+            ]));
+
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var exitCode = CreateApplication(executor).Run(["ci.yml"], _root, output, error);
+
+        Assert.Equal(ExitCodes.Success, exitCode);
+        Assert.Contains("security:", output.ToString());
+        Assert.Contains("warning: workflow.jobs.test.steps[0].uses", output.ToString());
+        Assert.Contains("External action 'docker://node:22' uses mutable identity '22'.", output.ToString());
+        Assert.Contains("recommendation: Pin Docker image actions with a sha256 digest for safer reuse.", output.ToString());
     }
 
     [Fact]

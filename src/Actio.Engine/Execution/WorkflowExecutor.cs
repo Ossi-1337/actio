@@ -1,5 +1,6 @@
 using Actio.Core.Actions;
 using Actio.Core.Expressions;
+using Actio.Core.Security;
 using Actio.Core.Workflows;
 using Actio.Engine.Actions;
 using Actio.Engine.Caching;
@@ -60,6 +61,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         var runId = options.RunId ?? _runStore.CreateRunId();
         var expansion = MatrixJobExpander.Expand(workflow.Jobs);
         var totalSteps = expansion.Jobs.Values.Sum(job => job.ExecutionStepCount);
+        var securityFindings = WorkflowSecurityPolicy.Analyze(workflow);
         RunStoragePaths storagePaths;
 
         try
@@ -73,7 +75,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 0,
                 totalSteps,
                 [StorageError.Format("initializing run storage", ex)],
-                runId: runId);
+                runId: runId,
+                securityFindings: securityFindings);
         }
 
         var startedAt = DateTimeOffset.UtcNow;
@@ -100,7 +103,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 jobRecords,
                 runOutputs,
                 runArtifacts,
-                errors),
+                errors,
+                securityFindings),
             cancellationToken);
 
         if (initialSaveError is not null)
@@ -111,7 +115,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 totalSteps,
                 [initialSaveError],
                 runId: runId,
-                runRecordPath: null);
+                runRecordPath: null,
+                securityFindings: securityFindings);
         }
 
         if (expansion.Errors.Count > 0)
@@ -189,7 +194,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                             jobRecords,
                             runOutputs,
                             runArtifacts,
-                            errors),
+                            errors,
+                            securityFindings),
                         cancellationToken);
 
                     if (progressSaveError is not null)
@@ -221,7 +227,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             jobRecords,
             runOutputs,
             runArtifacts,
-            errors);
+            errors,
+            securityFindings);
         var runRecordPath = storagePaths.RunRecordPath;
 
         var saveError = await TrySaveRunRecordAsync(runRecord, cancellationToken);
@@ -243,7 +250,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             runRecordPath,
             failedSteps,
             skippedSteps,
-            continuedSteps);
+            continuedSteps,
+            securityFindings);
     }
 
     private async Task<JobExecutionOutcome> ExecuteOrSkipJobAsync(
@@ -851,7 +859,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         IReadOnlyList<JobRunRecord> jobRecords,
         IReadOnlyList<WorkflowRunOutput> runOutputs,
         IReadOnlyList<WorkflowRunArtifact> runArtifacts,
-        IReadOnlyList<string> errors)
+        IReadOnlyList<string> errors,
+        IReadOnlyList<WorkflowSecurityFinding> securityFindings)
     {
         return new WorkflowRunRecord(
             runId,
@@ -867,7 +876,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             runArtifacts.ToArray(),
             errors.ToArray(),
             workflow.Triggers,
-            options.RunTrigger);
+            options.RunTrigger,
+            securityFindings.ToArray());
     }
 
     private async Task<string?> TrySaveRunRecordAsync(

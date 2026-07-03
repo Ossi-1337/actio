@@ -249,6 +249,7 @@ async function renderDetail() {
   el.title.textContent = run.workflowName;
   el.detail.innerHTML = [
     renderSummary(run),
+    renderSecurity(run),
     renderGraph(run),
     renderArtifacts(run),
     renderOutputs(run),
@@ -276,6 +277,31 @@ function renderSummary(run) {
         ${run.runTrigger?.eventPayload ? summaryCell("Event payload", formatEventPayload(run.runTrigger.eventPayload)) : ""}
         ${run.triggers?.length ? summaryCell("Configured triggers", formatTriggers(run.triggers)) : ""}
         ${summaryCell("Workflow file", run.workflowPath ?? "Unknown")}
+      </div>
+    </section>
+  `;
+}
+
+function renderSecurity(run) {
+  if (!run.securityFindings || run.securityFindings.length === 0) {
+    return "";
+  }
+
+  return `
+    <section class="summary">
+      <div class="summary-head"><h2>Security</h2></div>
+      <div class="security-list">
+        ${run.securityFindings.map(finding => `
+          <div class="security-row">
+            <span class="security-level ${securityLevelClass(finding.severity)}">${escapeHtml(finding.severity)}</span>
+            <span>
+              <span class="job-name">${escapeHtml(finding.location)}</span>
+              <span class="run-sub muted">${escapeHtml(finding.category)}</span>
+              <span class="security-message">${escapeHtml(finding.message)}</span>
+              <span class="security-recommendation">${escapeHtml(finding.recommendation)}</span>
+            </span>
+          </div>
+        `).join("")}
       </div>
     </section>
   `;
@@ -1015,6 +1041,10 @@ function shortRunId(runId) {
 
 function shortDigest(digest) {
   return digest && digest.length > 12 ? digest.slice(0, 12) : digest ?? "";
+}
+
+function securityLevelClass(severity) {
+  return severity === "warning" || severity === "info" ? severity : "";
 }
 
 function logKey(runId, job, step) {

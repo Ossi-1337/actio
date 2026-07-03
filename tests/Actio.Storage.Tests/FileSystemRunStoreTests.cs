@@ -113,6 +113,7 @@ public sealed class FileSystemRunStoreTests : IDisposable
         Assert.Empty(loaded.Triggers);
         Assert.Equal("workflow_dispatch", loaded.RunTrigger.EventName);
         Assert.Equal("CLI", loaded.RunTrigger.Source);
+        Assert.Empty(loaded.SecurityFindings);
         Assert.Equal("workflow_dispatch", loaded.RunTrigger.EventPayload.EventName);
         Assert.Equal("CLI", loaded.RunTrigger.EventPayload.Source);
     }

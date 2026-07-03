@@ -1,3 +1,4 @@
+using Actio.Core.Security;
 using Actio.Core.Workflows;
 using Actio.Engine.Actions;
 using Actio.Engine.Caching;
@@ -405,6 +406,18 @@ public sealed class CliApplication
             }
 
             wrotePreviousSection = true;
+        }
+
+        if (result.SecurityFindings.Count > 0)
+        {
+            WriteSectionBreakIfNeeded(output, wrotePreviousSection);
+            output.WriteLine("security:");
+
+            foreach (var finding in result.SecurityFindings)
+            {
+                output.WriteLine($" - {finding.Severity}: {finding.Location}: {finding.Message}");
+                output.WriteLine($"   recommendation: {finding.Recommendation}");
+            }
         }
     }
 

@@ -1,3 +1,4 @@
+using Actio.Core.Security;
 using Actio.Engine.Runs;
 
 namespace Actio.Engine.Execution;
@@ -15,7 +16,8 @@ public sealed record WorkflowExecutionResult
         string? runRecordPath = null,
         int failedSteps = 0,
         int skippedSteps = 0,
-        int continuedSteps = 0)
+        int continuedSteps = 0,
+        IReadOnlyList<WorkflowSecurityFinding>? securityFindings = null)
     {
         Status = status;
         SuccessfulSteps = successfulSteps;
@@ -28,6 +30,7 @@ public sealed record WorkflowExecutionResult
         FailedSteps = failedSteps;
         SkippedSteps = skippedSteps;
         ContinuedSteps = continuedSteps;
+        SecurityFindings = securityFindings ?? [];
     }
 
     public WorkflowExecutionStatus Status { get; init; }
@@ -51,6 +54,8 @@ public sealed record WorkflowExecutionResult
     public int SkippedSteps { get; init; }
 
     public int ContinuedSteps { get; init; }
+
+    public IReadOnlyList<WorkflowSecurityFinding> SecurityFindings { get; init; }
 
     public bool Success => Status == WorkflowExecutionStatus.Success;
 }

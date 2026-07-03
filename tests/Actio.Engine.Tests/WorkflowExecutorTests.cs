@@ -99,6 +99,42 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_SavesSecurityFindingsInRunRecords()
+    {
+        var runner = new FakeRunnerProvider([0]);
+        var store = new RecordingRunStore();
+        var workflow = new WorkflowDocument(
+            "CI",
+            new Dictionary<string, string>(),
+            new[]
+            {
+                new WorkflowJob(
+                    "test",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Test", "dotnet test", null)])
+            }.ToDictionary(job => job.Name, StringComparer.Ordinal),
+            [new WorkflowTrigger("pull_request_target", null)]);
+
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success);
+        Assert.All(store.SavedRecords, record =>
+        {
+            var finding = Assert.Single(record.SecurityFindings);
+            Assert.Equal("unsafe-trigger", finding.Category);
+            Assert.Equal("workflow.on.pull_request_target", finding.Location);
+        });
+        Assert.Equal("unsafe-trigger", Assert.Single(result.SecurityFindings).Category);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_UsesJobDisplayNameInOutputAndRunRecord()
     {
         var runner = new FakeRunnerProvider([0]);

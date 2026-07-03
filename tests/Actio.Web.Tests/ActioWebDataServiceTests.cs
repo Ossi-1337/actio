@@ -1,4 +1,5 @@
 using Actio.Core.Workflows;
+using Actio.Core.Security;
 using Actio.Engine.Actions;
 using Actio.Engine.Caching;
 using Actio.Engine.Runs;
@@ -161,6 +162,33 @@ public sealed class ActioWebDataServiceTests : IDisposable
         Assert.NotNull(environment);
         Assert.Equal("production", environment.Name);
         Assert.Equal("https://actio.local/deployments/42", environment.Url);
+    }
+
+    [Fact]
+    public async Task GetRunAsync_ReturnsSecurityFindings()
+    {
+        var workflowPath = WriteWorkflow("ci.yml", "CI");
+        await SaveRunAsync(CreateRun(
+            "run-1",
+            "CI",
+            workflowPath,
+            securityFindings:
+            [
+                new WorkflowSecurityFinding(
+                    "warning",
+                    "external-action.mutable-ref",
+                    "workflow.jobs.test.steps[0].uses",
+                    "External action 'docker://node:22' uses mutable identity '22'.",
+                    "Pin Docker image actions with a sha256 digest for safer reuse.")
+            ]));
+
+        var run = await CreateService().GetRunAsync("run-1");
+
+        Assert.NotNull(run);
+        var finding = Assert.Single(run.SecurityFindings);
+        Assert.Equal("warning", finding.Severity);
+        Assert.Equal("external-action.mutable-ref", finding.Category);
+        Assert.Equal("workflow.jobs.test.steps[0].uses", finding.Location);
     }
 
     [Fact]
@@ -504,7 +532,8 @@ public sealed class ActioWebDataServiceTests : IDisposable
         string? stepId = null,
         string? stepSummary = null,
         IReadOnlyList<StepLogAnnotation>? annotations = null,
-        WorkflowJobEnvironment? environment = null)
+        WorkflowJobEnvironment? environment = null,
+        IReadOnlyList<WorkflowSecurityFinding>? securityFindings = null)
     {
         var start = startedAt ?? DateTimeOffset.UtcNow;
         var finish = finishedAt ?? start;
@@ -541,7 +570,8 @@ public sealed class ActioWebDataServiceTests : IDisposable
             [],
             artifact,
             [],
-            RunTrigger: runTrigger);
+            RunTrigger: runTrigger,
+            SecurityFindings: securityFindings);
     }
 
     private sealed class FixedTimeProvider : TimeProvider
