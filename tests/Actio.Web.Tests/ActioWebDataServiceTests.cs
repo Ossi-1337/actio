@@ -2,6 +2,7 @@ using Actio.Core.Workflows;
 using Actio.Core.Security;
 using Actio.Engine.Actions;
 using Actio.Engine.Caching;
+using Actio.Engine.Execution;
 using Actio.Engine.Runs;
 using Actio.Storage;
 
@@ -461,7 +462,56 @@ public sealed class ActioWebDataServiceTests : IDisposable
         Assert.Null(run);
     }
 
-    private ActioWebDataService CreateService(TimeProvider? timeProvider = null)
+    [Fact]
+    public async Task CancelRunAsync_RequestsCancellationForRunningRun()
+    {
+        var workflowPath = WriteWorkflow("ci.yml", "CI");
+        await SaveRunAsync(CreateRun("run-cancel", "CI", workflowPath, status: "Running"));
+
+        var result = await CreateService().CancelRunAsync("run-cancel");
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.True(await new FileSystemRunStore(_actioHome).IsRunCancellationRequestedAsync("run-cancel"));
+    }
+
+    [Fact]
+    public async Task RerunAsync_StartsNewRunWithStoredInputs()
+    {
+        var workflowPath = WriteWorkflow(
+            "ci.yml",
+            "CI",
+            """
+            on:
+              workflow_dispatch:
+                inputs:
+                  environment:
+                    required: true
+            """);
+        await SaveRunAsync(CreateRun(
+            "run-source",
+            "CI",
+            workflowPath,
+            runTrigger: new WorkflowRunTrigger(
+                "workflow_dispatch",
+                "CLI",
+                new Dictionary<string, string> { ["environment"] = "staging" })));
+        var executor = new FakeWorkflowExecutor(new WorkflowExecutionResult(WorkflowExecutionStatus.Success, 1, 1, []));
+
+        var result = await CreateService(
+            createExecutor: () => executor,
+            scheduleBackgroundWork: work => work()).RerunAsync("run-source");
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.NotNull(result.RunId);
+        Assert.Equal("CI", executor.Workflow!.Name);
+        Assert.Equal("rerun:run-source", executor.Options!.RunTrigger.Source);
+        Assert.Equal("staging", executor.Options.RunTrigger.Inputs["environment"]);
+    }
+
+    private ActioWebDataService CreateService(
+        TimeProvider? timeProvider = null,
+        Func<IWorkflowExecutor>? createExecutor = null,
+        Func<Func<Task>, Task>? scheduleBackgroundWork = null)
     {
         return new ActioWebDataService(
             new ActioWebOptions(_projectRoot, _actioHome),
@@ -469,16 +519,19 @@ public sealed class ActioWebDataServiceTests : IDisposable
             new FileSystemActionCache(_actioHome),
             new FileSystemDependencyCache(_actioHome),
             new Actio.Core.Workflows.WorkflowParser(),
-            timeProvider);
+            timeProvider,
+            createExecutor,
+            scheduleBackgroundWork);
     }
 
-    private string WriteWorkflow(string fileName, string name)
+    private string WriteWorkflow(string fileName, string name, string? extraTopLevelYaml = null)
     {
         var path = Path.Combine(_projectRoot, ".workflows", fileName);
         File.WriteAllText(
             path,
-            $"""
-            name: {name}
+            $$"""
+            name: {{name}}
+            {{extraTopLevelYaml ?? string.Empty}}
             jobs:
               test:
                 runs-on: ubuntu-latest
@@ -572,6 +625,32 @@ public sealed class ActioWebDataServiceTests : IDisposable
             [],
             RunTrigger: runTrigger,
             SecurityFindings: securityFindings);
+    }
+
+    private sealed class FakeWorkflowExecutor : IWorkflowExecutor
+    {
+        private readonly WorkflowExecutionResult _result;
+
+        public FakeWorkflowExecutor(WorkflowExecutionResult result)
+        {
+            _result = result;
+        }
+
+        public WorkflowDocument? Workflow { get; private set; }
+
+        public WorkflowExecutionOptions? Options { get; private set; }
+
+        public Task<WorkflowExecutionResult> ExecuteAsync(
+            WorkflowDocument workflow,
+            WorkflowExecutionOptions options,
+            TextWriter output,
+            TextWriter error,
+            CancellationToken cancellationToken = default)
+        {
+            Workflow = workflow;
+            Options = options;
+            return Task.FromResult(_result);
+        }
     }
 
     private sealed class FixedTimeProvider : TimeProvider

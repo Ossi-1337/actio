@@ -4,6 +4,7 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="..\Actio.Core\Actio.Core.csproj" />
     <ProjectReference Include="..\Actio.Engine\Actio.Engine.csproj" />
+    <ProjectReference Include="..\Actio.Runner.Docker\Actio.Runner.Docker.csproj" />
     <ProjectReference Include="..\Actio.Storage\Actio.Storage.csproj" />
   </ItemGroup>
 

@@ -76,6 +76,16 @@ public sealed class NullRunStore : IRunStore
         return Task.FromResult(new ArtifactDownloadResult([], []));
     }
 
+    public Task RequestRunCancellationAsync(string runId, CancellationToken cancellationToken = default)
+    {
+        return Task.CompletedTask;
+    }
+
+    public Task<bool> IsRunCancellationRequestedAsync(string runId, CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(false);
+    }
+
     public Task SaveRunRecordAsync(
         WorkflowRunRecord runRecord,
         CancellationToken cancellationToken = default)

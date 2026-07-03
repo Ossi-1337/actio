@@ -221,6 +221,23 @@ public sealed class FileSystemRunStore : IRunStore
         return Task.FromResult(new ArtifactDownloadResult(restoredPaths, errors));
     }
 
+    public async Task RequestRunCancellationAsync(
+        string runId,
+        CancellationToken cancellationToken = default)
+    {
+        var runDirectory = Path.Combine(RunsPath, SanitizePathSegment(runId));
+        Directory.CreateDirectory(runDirectory);
+        var markerPath = GetCancellationMarkerPath(runId);
+        await File.WriteAllTextAsync(markerPath, DateTimeOffset.UtcNow.ToString("O"), cancellationToken);
+    }
+
+    public Task<bool> IsRunCancellationRequestedAsync(
+        string runId,
+        CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(File.Exists(GetCancellationMarkerPath(runId)));
+    }
+
     public async Task SaveRunRecordAsync(
         WorkflowRunRecord runRecord,
         CancellationToken cancellationToken = default)
@@ -470,6 +487,11 @@ public sealed class FileSystemRunStore : IRunStore
     private string GetFullActioHomePath()
     {
         return Path.GetFullPath(ActioHomePath);
+    }
+
+    private string GetCancellationMarkerPath(string runId)
+    {
+        return Path.Combine(RunsPath, SanitizePathSegment(runId), "cancel.requested");
     }
 
     private static bool IsUnderRoot(string path, string root)

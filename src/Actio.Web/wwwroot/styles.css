@@ -341,6 +341,10 @@ input[type="search"] {
   background: var(--running);
 }
 
+.status-cancelled {
+  background: var(--warning);
+}
+
 .detail {
   display: grid;
   align-content: start;
@@ -685,6 +689,21 @@ pre {
   background: var(--warning-bg);
   border-color: transparent;
   color: var(--warning-text);
+}
+
+.pill.status-cancelled {
+  background: var(--warning-bg);
+  border-color: transparent;
+  color: var(--warning-text);
+}
+
+.summary-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
 }
 
 .empty {

@@ -1,5 +1,7 @@
 using Actio.Core.Workflows;
+using Actio.Engine.Execution;
 using Actio.Engine.Runs;
+using Actio.Runner.Docker;
 using Actio.Storage;
 using Actio.Web.Models;
 using System.Text.Json;
@@ -14,6 +16,8 @@ public sealed class ActioWebDataService
     private readonly FileSystemDependencyCache _dependencyCache;
     private readonly WorkflowParser _workflowParser;
     private readonly TimeProvider _timeProvider;
+    private readonly Func<IWorkflowExecutor> _createExecutor;
+    private readonly Func<Func<Task>, Task> _scheduleBackgroundWork;
 
     public ActioWebDataService(ActioWebOptions options)
         : this(
@@ -32,7 +36,9 @@ public sealed class ActioWebDataService
         FileSystemActionCache actionCache,
         FileSystemDependencyCache dependencyCache,
         WorkflowParser workflowParser,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        Func<IWorkflowExecutor>? createExecutor = null,
+        Func<Func<Task>, Task>? scheduleBackgroundWork = null)
     {
         _options = options;
         _runStore = runStore;
@@ -40,6 +46,8 @@ public sealed class ActioWebDataService
         _dependencyCache = dependencyCache;
         _workflowParser = workflowParser;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _createExecutor = createExecutor ?? CreateDefaultExecutor;
+        _scheduleBackgroundWork = scheduleBackgroundWork ?? ScheduleBackgroundWork;
     }
 
     public string ProjectRoot => Path.GetFullPath(_options.ProjectRoot);
@@ -206,6 +214,95 @@ public sealed class ActioWebDataService
         return new CacheCleanResult(removed);
     }
 
+    public async Task<RunActionResult> CancelRunAsync(
+        string runId,
+        CancellationToken cancellationToken = default)
+    {
+        var run = await GetRunAsync(runId, cancellationToken);
+        if (run is null)
+        {
+            return RunActionResult.Failed([$"Run '{runId}' was not found."]);
+        }
+
+        if (!string.Equals(run.Status, "Running", StringComparison.Ordinal))
+        {
+            return RunActionResult.Failed([$"Run '{runId}' is not running; current status is {run.Status}."]);
+        }
+
+        try
+        {
+            await _runStore.RequestRunCancellationAsync(runId, cancellationToken);
+            return RunActionResult.Completed();
+        }
+        catch (Exception ex) when (IsRecoverableFileReadError(ex))
+        {
+            return RunActionResult.Failed([$"Run '{runId}' could not be cancelled: {ex.Message}"]);
+        }
+    }
+
+    public async Task<RunActionResult> RerunAsync(
+        string runId,
+        CancellationToken cancellationToken = default)
+    {
+        var sourceRun = await GetRunAsync(runId, cancellationToken);
+        if (sourceRun is null)
+        {
+            return RunActionResult.Failed([$"Run '{runId}' was not found."]);
+        }
+
+        if (string.Equals(sourceRun.Status, "Running", StringComparison.Ordinal))
+        {
+            return RunActionResult.Failed([$"Run '{runId}' is still running and cannot be rerun yet."]);
+        }
+
+        if (sourceRun.WorkflowPath is null || !File.Exists(sourceRun.WorkflowPath))
+        {
+            return RunActionResult.Failed([$"Run '{runId}' cannot be rerun because its workflow file is missing."]);
+        }
+
+        var parseResult = _workflowParser.ParseFile(sourceRun.WorkflowPath);
+        if (!parseResult.Success)
+        {
+            return RunActionResult.Failed(parseResult.Errors);
+        }
+
+        var workflow = parseResult.Workflow!;
+        if (workflow.IsReusableOnly)
+        {
+            return RunActionResult.Failed([$"Workflow '{workflow.Name}' is reusable through workflow_call and cannot be run directly."]);
+        }
+
+        var inputResolution = WorkflowDispatchInputResolver.Resolve(workflow, sourceRun.RunTrigger.Inputs);
+        if (!inputResolution.Success)
+        {
+            return RunActionResult.Failed(inputResolution.Errors);
+        }
+
+        var localValues = new FileSystemLocalValueProvider().Load(sourceRun.ProjectRoot);
+        if (!localValues.Success)
+        {
+            return RunActionResult.Failed(localValues.Errors);
+        }
+
+        var newRunId = _runStore.CreateRunId();
+        var options = new WorkflowExecutionOptions(
+            sourceRun.ProjectRoot,
+            sourceRun.WorkflowPath,
+            newRunId,
+            new WorkflowRunTrigger("workflow_dispatch", $"rerun:{sourceRun.RunId}", inputResolution.Inputs),
+            Secrets: localValues.Values.Secrets,
+            Variables: localValues.Values.Variables);
+
+        await _scheduleBackgroundWork(() => _createExecutor().ExecuteAsync(
+            workflow,
+            options,
+            TextWriter.Null,
+            TextWriter.Null,
+            CancellationToken.None));
+
+        return RunActionResult.Accepted(newRunId);
+    }
+
     public async Task<string?> GetWorkflowFileAsync(string runId, CancellationToken cancellationToken = default)
     {
         var workflowFile = await GetWorkflowFileResultAsync(runId, cancellationToken);
@@ -354,6 +451,31 @@ public sealed class ActioWebDataService
     {
         return path.EndsWith(".yml", StringComparison.OrdinalIgnoreCase) ||
             path.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private IWorkflowExecutor CreateDefaultExecutor()
+    {
+        return new WorkflowExecutor(
+            new DockerRunnerProvider(),
+            _runStore,
+            _actionCache,
+            _dependencyCache);
+    }
+
+    private static Task ScheduleBackgroundWork(Func<Task> work)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await work();
+            }
+            catch
+            {
+            }
+        });
+
+        return Task.CompletedTask;
     }
 
     private WorkflowRunRecord RefreshRunningDuration(WorkflowRunRecord run)

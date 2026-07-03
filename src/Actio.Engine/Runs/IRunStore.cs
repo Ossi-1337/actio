@@ -45,5 +45,9 @@ public interface IRunStore
         bool useArtifactNameSubdirectories,
         CancellationToken cancellationToken = default);
 
+    Task RequestRunCancellationAsync(string runId, CancellationToken cancellationToken = default);
+
+    Task<bool> IsRunCancellationRequestedAsync(string runId, CancellationToken cancellationToken = default);
+
     Task SaveRunRecordAsync(WorkflowRunRecord runRecord, CancellationToken cancellationToken = default);
 }

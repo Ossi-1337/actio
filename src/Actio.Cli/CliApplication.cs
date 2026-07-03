@@ -21,6 +21,7 @@ public sealed class CliApplication
     private readonly IDependencyCache _dependencyCache;
     private readonly CliOutputFormatter _outputFormatter;
     private readonly FileSystemLocalValueProvider _localValueProvider;
+    private readonly FileSystemRunStore _runStore;
     private readonly Func<string> _createRunId;
 
     public CliApplication()
@@ -33,8 +34,7 @@ public sealed class CliApplication
             new FileSystemActionCache(),
             new FileSystemDependencyCache(),
             new CliOutputFormatter(),
-            new FileSystemLocalValueProvider(),
-            new FileSystemRunStore().CreateRunId)
+            new FileSystemLocalValueProvider())
     {
     }
 
@@ -48,6 +48,7 @@ public sealed class CliApplication
         IDependencyCache? dependencyCache = null,
         CliOutputFormatter? outputFormatter = null,
         FileSystemLocalValueProvider? localValueProvider = null,
+        FileSystemRunStore? runStore = null,
         Func<string>? createRunId = null)
     {
         _resolver = resolver;
@@ -59,7 +60,8 @@ public sealed class CliApplication
         _dependencyCache = dependencyCache ?? NullDependencyCache.Instance;
         _outputFormatter = outputFormatter ?? new CliOutputFormatter();
         _localValueProvider = localValueProvider ?? new FileSystemLocalValueProvider();
-        _createRunId = createRunId ?? new FileSystemRunStore().CreateRunId;
+        _runStore = runStore ?? new FileSystemRunStore();
+        _createRunId = createRunId ?? _runStore.CreateRunId;
     }
 
     public int Run(string[] args, string workingDirectory, TextWriter output, TextWriter error)
@@ -84,6 +86,15 @@ public sealed class CliApplication
             case CliCommandKind.ShowRunHelp:
                 output.WriteLine(CliHelpText.Run);
                 return ExitCodes.Success;
+            case CliCommandKind.ShowRerunHelp:
+                output.WriteLine(CliHelpText.Rerun);
+                return ExitCodes.Success;
+            case CliCommandKind.ShowCancelHelp:
+                output.WriteLine(CliHelpText.Cancel);
+                return ExitCodes.Success;
+            case CliCommandKind.ShowStatusHelp:
+                output.WriteLine(CliHelpText.Status);
+                return ExitCodes.Success;
             case CliCommandKind.ShowWebHelp:
                 output.WriteLine(CliHelpText.Web);
                 return ExitCodes.Success;
@@ -98,6 +109,12 @@ public sealed class CliApplication
                 return ExitCodes.UsageError;
             case CliCommandKind.RunWorkflow:
                 return await RunWorkflowAsync(command, workingDirectory, output, error, cancellationToken);
+            case CliCommandKind.RerunWorkflow:
+                return await RerunWorkflowAsync(command, output, error, cancellationToken);
+            case CliCommandKind.CancelRun:
+                return await CancelRunAsync(command, output, error, cancellationToken);
+            case CliCommandKind.ShowRunStatus:
+                return await ShowRunStatusAsync(command, output, error, cancellationToken);
             case CliCommandKind.RunWeb:
                 return await RunWebAsync(command, workingDirectory, output, error, cancellationToken);
             case CliCommandKind.ListCache:
@@ -139,6 +156,125 @@ public sealed class CliApplication
         WriteWarnings(error, parseResult.Warnings);
 
         var workflow = parseResult.Workflow!;
+        return await ExecuteWorkflowAsync(
+            workflow,
+            resolution.ProjectRoot!,
+            resolution.WorkflowPath,
+            command.Inputs,
+            "CLI",
+            output,
+            error,
+            cancellationToken);
+    }
+
+    private async Task<int> RerunWorkflowAsync(
+        CliCommand command,
+        TextWriter output,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        var sourceRun = await ReadRunRecordAsync(command.RunId!, error, cancellationToken);
+        if (sourceRun is null)
+        {
+            return ExitCodes.ValidationError;
+        }
+
+        if (string.Equals(sourceRun.Status, "Running", StringComparison.Ordinal))
+        {
+            error.WriteLine($"Run '{sourceRun.RunId}' is still running and cannot be rerun yet.");
+            return ExitCodes.ValidationError;
+        }
+
+        if (sourceRun.WorkflowPath is null || !File.Exists(sourceRun.WorkflowPath))
+        {
+            error.WriteLine($"Run '{sourceRun.RunId}' cannot be rerun because its workflow file is missing.");
+            return ExitCodes.ValidationError;
+        }
+
+        var parseResult = _parser.ParseFile(sourceRun.WorkflowPath);
+        if (!parseResult.Success)
+        {
+            WriteErrors(error, parseResult.Errors);
+            return ExitCodes.ValidationError;
+        }
+
+        WriteWarnings(error, parseResult.Warnings);
+        return await ExecuteWorkflowAsync(
+            parseResult.Workflow!,
+            sourceRun.ProjectRoot,
+            sourceRun.WorkflowPath,
+            sourceRun.RunTrigger.Inputs,
+            $"rerun:{sourceRun.RunId}",
+            output,
+            error,
+            cancellationToken);
+    }
+
+    private async Task<int> CancelRunAsync(
+        CliCommand command,
+        TextWriter output,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        var run = await ReadRunRecordAsync(command.RunId!, error, cancellationToken);
+        if (run is null)
+        {
+            return ExitCodes.ValidationError;
+        }
+
+        if (!string.Equals(run.Status, "Running", StringComparison.Ordinal))
+        {
+            error.WriteLine($"Run '{run.RunId}' is not running; current status is {run.Status}.");
+            return ExitCodes.ValidationError;
+        }
+
+        try
+        {
+            await _runStore.RequestRunCancellationAsync(run.RunId, cancellationToken);
+        }
+        catch (Exception ex) when (IsRecoverableRunStoreError(ex))
+        {
+            error.WriteLine($"Run '{run.RunId}' could not be cancelled: {ex.Message}");
+            return ExitCodes.ValidationError;
+        }
+
+        output.WriteLine($"Cancellation requested for run {run.RunId}.");
+        return ExitCodes.Success;
+    }
+
+    private async Task<int> ShowRunStatusAsync(
+        CliCommand command,
+        TextWriter output,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        var run = await ReadRunRecordAsync(command.RunId!, error, cancellationToken);
+        if (run is null)
+        {
+            return ExitCodes.ValidationError;
+        }
+
+        output.WriteLine($"Run: {run.RunId}");
+        output.WriteLine($"Workflow: {run.WorkflowName}");
+        output.WriteLine($"Status: {run.Status}");
+        output.WriteLine($"Started: {run.StartedAt:O}");
+        output.WriteLine($"Duration: {run.DurationMilliseconds} ms");
+        output.WriteLine($"Jobs: {run.Jobs.Count}");
+        output.WriteLine($"Artifacts: {run.Artifacts.Count}");
+        output.WriteLine($"Workflow file: {run.WorkflowPath ?? "Unknown"}");
+        return ExitCodes.Success;
+    }
+
+    private async Task<int> ExecuteWorkflowAsync(
+        WorkflowDocument workflow,
+        string projectRoot,
+        string? workflowPath,
+        IReadOnlyDictionary<string, string> inputs,
+        string triggerSource,
+        TextWriter output,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
         if (workflow.IsReusableOnly)
         {
             error.WriteLine($"Workflow '{workflow.Name}' is reusable through workflow_call and cannot be run directly yet.");
@@ -146,14 +282,14 @@ public sealed class CliApplication
             return ExitCodes.ValidationError;
         }
 
-        var inputResolution = WorkflowDispatchInputResolver.Resolve(workflow, command.Inputs);
+        var inputResolution = WorkflowDispatchInputResolver.Resolve(workflow, inputs);
         if (!inputResolution.Success)
         {
             WriteErrors(error, inputResolution.Errors);
             return ExitCodes.ValidationError;
         }
 
-        var localValues = _localValueProvider.Load(resolution.ProjectRoot!);
+        var localValues = _localValueProvider.Load(projectRoot);
         if (!localValues.Success)
         {
             WriteErrors(error, localValues.Errors);
@@ -162,7 +298,7 @@ public sealed class CliApplication
 
         var runId = _createRunId();
         var wrotePipelineLink = await WriteViewPipelineLinkAsync(
-            resolution.ProjectRoot!,
+            projectRoot,
             runId,
             output,
             error,
@@ -177,10 +313,10 @@ public sealed class CliApplication
         var executionResult = await _executor.ExecuteAsync(
             workflow,
             new WorkflowExecutionOptions(
-                resolution.ProjectRoot!,
-                resolution.WorkflowPath,
+                projectRoot,
+                workflowPath,
                 runId,
-                new WorkflowRunTrigger("workflow_dispatch", "CLI", inputResolution.Inputs),
+                new WorkflowRunTrigger("workflow_dispatch", triggerSource, inputResolution.Inputs),
                 Secrets: localValues.Values.Secrets,
                 Variables: localValues.Values.Variables),
             output,
@@ -189,13 +325,18 @@ public sealed class CliApplication
 
         if (!executionResult.Success)
         {
-            WriteExecutionErrors(error, executionResult.Errors);
-            output.WriteLine(FormatSummary("Failed", executionResult, output));
+            WriteExecutionErrors(
+                error,
+                executionResult.Errors,
+                executionResult.Status == WorkflowExecutionStatus.Cancelled
+                    ? "Workflow execution cancelled:"
+                    : "Workflow execution failed:");
+            output.WriteLine(FormatSummary(executionResult.Status.ToString(), executionResult, output));
             WriteOutputsAndArtifacts(output, executionResult, addLeadingSeparator: true);
             return ExitCodes.ValidationError;
         }
 
-        output.WriteLine(FormatSummary("Success", executionResult, output));
+        output.WriteLine(FormatSummary(executionResult.Status.ToString(), executionResult, output));
         WriteOutputsAndArtifacts(output, executionResult, addLeadingSeparator: true);
         return ExitCodes.Success;
     }
@@ -325,6 +466,39 @@ public sealed class CliApplication
             or ArgumentException;
     }
 
+    private static bool IsRecoverableRunStoreError(Exception exception)
+    {
+        return exception is IOException
+            or UnauthorizedAccessException
+            or System.Security.SecurityException
+            or System.Text.Json.JsonException
+            or NotSupportedException
+            or ArgumentException;
+    }
+
+    private async Task<WorkflowRunRecord?> ReadRunRecordAsync(
+        string runId,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var run = await _runStore.ReadRunRecordAsync(runId, cancellationToken);
+            if (run is not null)
+            {
+                return run;
+            }
+
+            error.WriteLine($"Run '{runId}' was not found.");
+            return null;
+        }
+        catch (Exception ex) when (IsRecoverableRunStoreError(ex))
+        {
+            error.WriteLine($"Run '{runId}' could not be read: {ex.Message}");
+            return null;
+        }
+    }
+
     private static void WriteUsageError(TextWriter error, string message)
     {
         error.WriteLine(message);
@@ -358,14 +532,17 @@ public sealed class CliApplication
         error.WriteLine();
     }
 
-    private static void WriteExecutionErrors(TextWriter error, IReadOnlyList<string> errors)
+    private static void WriteExecutionErrors(
+        TextWriter error,
+        IReadOnlyList<string> errors,
+        string heading)
     {
         if (errors.Count == 0)
         {
             return;
         }
 
-        error.WriteLine("Workflow execution failed:");
+        error.WriteLine(heading);
 
         foreach (var item in errors)
         {
@@ -466,7 +643,9 @@ public sealed class CliApplication
 
         if (!result.Success && result.FailedSteps == 0)
         {
-            details.Add("workflow error");
+            details.Add(result.Status == WorkflowExecutionStatus.Cancelled
+                ? "workflow cancelled"
+                : "workflow error");
         }
 
         var suffix = details.Count == 0 ? string.Empty : $", {string.Join(", ", details)}";

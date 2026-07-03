@@ -19,6 +19,33 @@ public sealed class CliParser
             return ParseWebCommand(args);
         }
 
+        if (string.Equals(args[0], "rerun", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseRunManagementCommand(
+                args,
+                "rerun",
+                CliCommandKind.ShowRerunHelp,
+                CliCommand.RerunWorkflow);
+        }
+
+        if (string.Equals(args[0], "cancel", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseRunManagementCommand(
+                args,
+                "cancel",
+                CliCommandKind.ShowCancelHelp,
+                CliCommand.CancelRun);
+        }
+
+        if (string.Equals(args[0], "status", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseRunManagementCommand(
+                args,
+                "status",
+                CliCommandKind.ShowStatusHelp,
+                CliCommand.ShowRunStatus);
+        }
+
         if (string.Equals(args[0], "cache", StringComparison.OrdinalIgnoreCase))
         {
             return ParseCacheCommand(args);
@@ -211,6 +238,35 @@ public sealed class CliParser
         }
 
         return CliCommand.RunWeb(projectRoot, actioHome, url, background);
+    }
+
+    private static CliCommand ParseRunManagementCommand(
+        IReadOnlyList<string> args,
+        string commandName,
+        CliCommandKind helpKind,
+        Func<string, CliCommand> createCommand)
+    {
+        if (args.Count == 2 && IsHelp(args[1]))
+        {
+            return new CliCommand(helpKind);
+        }
+
+        if (args.Count == 1)
+        {
+            return CliCommand.UsageError($"Missing run id argument for '{commandName}'.");
+        }
+
+        if (args.Count > 2)
+        {
+            return CliCommand.UsageError($"Unexpected argument '{args[2]}' for '{commandName}'.");
+        }
+
+        if (args[1].StartsWith("-", StringComparison.Ordinal))
+        {
+            return CliCommand.UsageError($"Unknown option '{args[1]}' for '{commandName}'.");
+        }
+
+        return createCommand(args[1]);
     }
 
     private static CliCommand ParseCacheCommand(IReadOnlyList<string> args)

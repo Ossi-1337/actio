@@ -69,6 +69,32 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_CancelsWhenRunStoreCancellationIsRequested()
+    {
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(0, delay: TimeSpan.FromSeconds(10))]);
+        var store = new RecordingRunStore { CancellationRequested = true };
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Test", "dotnet test", null)]));
+
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.Equal(WorkflowExecutionStatus.Cancelled, result.Status);
+        Assert.False(result.Success);
+        Assert.Contains("Workflow run was cancelled.", result.Errors);
+        Assert.Equal("Cancelled", store.SavedRecords.Last().Status);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_SavesTriggerMetadataInRunRecords()
     {
         var runner = new FakeRunnerProvider([0]);
@@ -4697,6 +4723,16 @@ public sealed class WorkflowExecutorTests
             return Task.FromResult(new ArtifactDownloadResult([], []));
         }
 
+        public Task RequestRunCancellationAsync(string runId, CancellationToken cancellationToken = default)
+        {
+            return Task.CompletedTask;
+        }
+
+        public Task<bool> IsRunCancellationRequestedAsync(string runId, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(false);
+        }
+
         public Task SaveRunRecordAsync(WorkflowRunRecord runRecord, CancellationToken cancellationToken = default)
         {
             return Task.CompletedTask;
@@ -4708,6 +4744,8 @@ public sealed class WorkflowExecutorTests
         public List<WorkflowRunRecord> SavedRecords { get; } = [];
 
         public List<string> LogLines { get; } = [];
+
+        public bool CancellationRequested { get; set; }
 
         public string CreateRunId()
         {
@@ -4807,6 +4845,17 @@ public sealed class WorkflowExecutorTests
             }
 
             return Task.FromResult(new ArtifactDownloadResult(restoredPaths, errors));
+        }
+
+        public Task RequestRunCancellationAsync(string runId, CancellationToken cancellationToken = default)
+        {
+            CancellationRequested = true;
+            return Task.CompletedTask;
+        }
+
+        public Task<bool> IsRunCancellationRequestedAsync(string runId, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(CancellationRequested);
         }
 
         public Task SaveRunRecordAsync(WorkflowRunRecord runRecord, CancellationToken cancellationToken = default)

@@ -9,16 +9,23 @@ public static class CliHelpText
           actio run <workflow>.yml
           actio <workflow>.yml
           actio web
+          actio status <run-id>
+          actio rerun <run-id>
+          actio cancel <run-id>
           actio cache <command>
           actio [options]
 
         Commands:
           run <workflow>.yml   Run a workflow from .workflows, with .github/workflows fallback.
           web                  Start the local Actio web UI.
+          status <run-id>      Show stored status for a workflow run.
+          rerun <run-id>       Rerun a completed workflow run.
+          cancel <run-id>      Request cancellation for a running workflow run.
           cache                Inspect or clean Actio cache entries.
 
         Arguments:
           <workflow>.yml       Bare workflow filename, for example ci.yml.
+          <run-id>             Stored Actio run id.
 
         Options:
           -h, --help              Show help.
@@ -28,6 +35,9 @@ public static class CliHelpText
           actio run ci.yml
           actio ci.yml
           actio web
+          actio status 20260703090029234-555a1799
+          actio rerun 20260703090029234-555a1799
+          actio cancel 20260703090029234-555a1799
           actio cache list
           actio run --help
         """;
@@ -58,6 +68,57 @@ public static class CliHelpText
           actio run ci.yml
           actio run ci.yml --input environment=staging
           actio ci.yml
+        """;
+
+    public const string Rerun = """
+        Actio rerun - rerun a completed workflow run.
+
+        Usage:
+          actio rerun <run-id>
+
+        Options:
+          -h, --help           Show help for the rerun command.
+
+        Description:
+          Reads the stored run record from ACTIO_HOME, reuses the workflow file, project root,
+          and workflow_dispatch inputs, then starts a new local run.
+
+        Examples:
+          actio rerun 20260703090029234-555a1799
+        """;
+
+    public const string Cancel = """
+        Actio cancel - request cancellation for a running workflow run.
+
+        Usage:
+          actio cancel <run-id>
+
+        Options:
+          -h, --help           Show help for the cancel command.
+
+        Description:
+          Writes a local cancellation request into ACTIO_HOME. A running Actio process polls
+          this request and cancels active runner work through the normal cancellation path.
+
+        Examples:
+          actio cancel 20260703090029234-555a1799
+        """;
+
+    public const string Status = """
+        Actio status - show stored workflow run status.
+
+        Usage:
+          actio status <run-id>
+
+        Options:
+          -h, --help           Show help for the status command.
+
+        Description:
+          Reads the local run record from ACTIO_HOME and prints the workflow name, status,
+          duration, job count, artifact count, and workflow file path.
+
+        Examples:
+          actio status 20260703090029234-555a1799
         """;
 
     public const string Web = """

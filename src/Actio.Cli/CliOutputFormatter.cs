@@ -5,6 +5,7 @@ public sealed class CliOutputFormatter
     private const string Reset = "\u001b[0m";
     private const string Green = "\u001b[32m";
     private const string Red = "\u001b[31m";
+    private const string Yellow = "\u001b[33m";
 
     private readonly Func<string, string?> _getEnvironmentVariable;
     private readonly Func<bool> _isOutputRedirected;
@@ -36,6 +37,7 @@ public sealed class CliOutputFormatter
         {
             "Success" => $"{Green}{status}{Reset}",
             "Failed" => $"{Red}{status}{Reset}",
+            "Cancelled" => $"{Yellow}{status}{Reset}",
             _ => status
         };
     }

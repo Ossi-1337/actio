@@ -184,6 +184,21 @@ public sealed class FileSystemRunStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task RequestRunCancellationAsync_WritesCancellationMarker()
+    {
+        var store = new FileSystemRunStore(_root);
+        var runId = "run-cancel";
+        await store.InitializeRunAsync(runId);
+
+        Assert.False(await store.IsRunCancellationRequestedAsync(runId));
+
+        await store.RequestRunCancellationAsync(runId);
+
+        Assert.True(await store.IsRunCancellationRequestedAsync(runId));
+        Assert.True(File.Exists(Path.Combine(_root, "runs", runId, "cancel.requested")));
+    }
+
+    [Fact]
     public async Task CreateStepEnvironmentFilesAsync_CreatesFilesUnderRunDirectory()
     {
         var store = new FileSystemRunStore(_root);

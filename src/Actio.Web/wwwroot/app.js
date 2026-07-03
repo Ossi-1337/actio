@@ -19,6 +19,7 @@ const state = {
   logContents: new Map(),
   workflowFiles: new Map(),
   workflowMessages: new Map(),
+  runMessages: new Map(),
   expandedWorkflowFiles: new Set(),
   refreshTimer: null,
   detailRequestId: 0,
@@ -65,6 +66,12 @@ el.navLinks.forEach(link => {
 });
 
 document.addEventListener("click", async event => {
+  const runButton = event.target.closest("[data-run-action]");
+  if (runButton) {
+    await handleRunAction(runButton);
+    return;
+  }
+
   const button = event.target.closest("[data-workflow-action]");
   if (!button) {
     return;
@@ -263,11 +270,15 @@ async function renderDetail() {
 }
 
 function renderSummary(run) {
+  const runMessage = state.runMessages.get(run.runId);
   return `
     <section class="summary">
       <div class="summary-head">
         <h2>${escapeHtml(run.workflowName)}</h2>
-        <span class="pill ${statusClass(run.status)}">${escapeHtml(run.status)}</span>
+        <div class="summary-actions">
+          ${renderRunActions(run)}
+          <span class="pill ${statusClass(run.status)}">${escapeHtml(run.status)}</span>
+        </div>
       </div>
       <div class="summary-grid">
         ${summaryCell("Started", formatDate(run.startedAt))}
@@ -278,8 +289,17 @@ function renderSummary(run) {
         ${run.triggers?.length ? summaryCell("Configured triggers", formatTriggers(run.triggers)) : ""}
         ${summaryCell("Workflow file", run.workflowPath ?? "Unknown")}
       </div>
+      ${runMessage ? `<div class="inline-message">${escapeHtml(runMessage)}</div>` : ""}
     </section>
   `;
+}
+
+function renderRunActions(run) {
+  if (isActiveStatus(run.status)) {
+    return `<button class="danger-button" type="button" data-run-action="cancel" data-run-id="${escapeHtml(run.runId)}">Cancel</button>`;
+  }
+
+  return `<button class="text-button" type="button" data-run-action="rerun" data-run-id="${escapeHtml(run.runId)}">Rerun</button>`;
 }
 
 function renderSecurity(run) {
@@ -669,6 +689,42 @@ async function refreshOpenLogs(run) {
     refreshLog(run.runId, target.dataset.job, target.dataset.step, target, target.dataset.logKey)));
 }
 
+async function handleRunAction(button) {
+  const runId = button.dataset.runId;
+  const action = button.dataset.runAction;
+  if (!runId || !action) {
+    return;
+  }
+
+  if (action === "cancel" && !confirm("Cancel this workflow run?")) {
+    return;
+  }
+
+  button.disabled = true;
+
+  try {
+    const result = await fetchJson(`/api/runs/${encodeURIComponent(runId)}/${encodeURIComponent(action)}`, {
+      method: "POST"
+    });
+
+    if (action === "rerun" && result.runId) {
+      state.runMessages.set(result.runId, `Rerun started from ${runId}.`);
+      await refreshData();
+      await selectRun(result.runId);
+      return;
+    }
+
+    state.runMessages.set(runId, "Cancellation requested.");
+    await refreshData();
+    await renderDetail();
+  } catch (error) {
+    state.runMessages.set(runId, error.message);
+    await renderDetail();
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function refreshLog(runId, job, step, target, key) {
   try {
     const content = await fetchText(`/api/runs/${encodeURIComponent(runId)}/logs?job=${encodeURIComponent(job)}&step=${encodeURIComponent(step)}`);
@@ -896,6 +952,7 @@ function statusClass(status) {
   const value = (status ?? "").toLowerCase();
   if (value === "success") return "status-success";
   if (value === "failed" || value === "timedout") return "status-failed";
+  if (value === "cancelled") return "status-cancelled";
   if (value === "skipped") return "status-skipped";
   if (value === "running") return "status-running";
   return "";

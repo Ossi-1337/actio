@@ -101,6 +101,18 @@ public sealed class ActioWebServer
         app.MapDelete("/api/cache", async (ActioWebDataService data, CancellationToken cancellationToken) =>
             Results.Ok(await data.CleanCacheAsync(cancellationToken)));
 
+        app.MapPost("/api/runs/{runId}/cancel", async (string runId, ActioWebDataService data, CancellationToken cancellationToken) =>
+        {
+            var result = await data.CancelRunAsync(runId, cancellationToken);
+            return result.Success ? Results.Ok(result) : Results.BadRequest(result);
+        });
+
+        app.MapPost("/api/runs/{runId}/rerun", async (string runId, ActioWebDataService data, CancellationToken cancellationToken) =>
+        {
+            var result = await data.RerunAsync(runId, cancellationToken);
+            return result.Success ? Results.Ok(result) : Results.BadRequest(result);
+        });
+
         app.MapGet("/api/runs/{runId}/logs", async (
             string runId,
             string job,

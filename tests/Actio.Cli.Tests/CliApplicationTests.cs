@@ -97,6 +97,39 @@ public sealed class CliApplicationTests : IDisposable
     }
 
     [Fact]
+    public void Run_PrintsRerunHelp()
+    {
+        var result = RunWithFakeExecutor(["rerun", "--help"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Contains("Actio rerun - rerun a completed workflow run.", result.Output);
+        Assert.Equal(string.Empty, result.Error);
+        Assert.Null(result.Executor.Workflow);
+    }
+
+    [Fact]
+    public void Run_PrintsCancelHelp()
+    {
+        var result = RunWithFakeExecutor(["cancel", "--help"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Contains("Actio cancel - request cancellation for a running workflow run.", result.Output);
+        Assert.Equal(string.Empty, result.Error);
+        Assert.Null(result.Executor.Workflow);
+    }
+
+    [Fact]
+    public void Run_PrintsStatusHelp()
+    {
+        var result = RunWithFakeExecutor(["status", "--help"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Contains("Actio status - show stored workflow run status.", result.Output);
+        Assert.Equal(string.Empty, result.Error);
+        Assert.Null(result.Executor.Workflow);
+    }
+
+    [Fact]
     public void Run_ListsCacheEntries()
     {
         using var output = new StringWriter();
@@ -175,6 +208,88 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Contains("Cache could not be listed: cache is locked", error.ToString());
     }
 
+    [Fact]
+    public async Task Run_PrintsStoredRunStatus()
+    {
+        var workflowPath = WriteWorkflow("ci.yml", "CI");
+        var runStore = new FileSystemRunStore(Path.Combine(_root, "actio-home"));
+        await SaveRunAsync(runStore, CreateRun("run-status", "CI", workflowPath, status: "Success"));
+        var executor = new FakeWorkflowExecutor(new WorkflowExecutionResult(WorkflowExecutionStatus.Success, 1, 1, []));
+
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var exitCode = CreateApplication(executor, runStore: runStore).Run(["status", "run-status"], _root, output, error);
+
+        Assert.Equal(ExitCodes.Success, exitCode);
+        Assert.Contains("Run: run-status", output.ToString());
+        Assert.Contains("Workflow: CI", output.ToString());
+        Assert.Contains("Status: Success", output.ToString());
+        Assert.Contains("Jobs: 1", output.ToString());
+        Assert.Equal(string.Empty, error.ToString());
+        Assert.Null(executor.Workflow);
+    }
+
+    [Fact]
+    public async Task Run_RequestsCancellationForRunningRun()
+    {
+        var workflowPath = WriteWorkflow("ci.yml", "CI");
+        var runStore = new FileSystemRunStore(Path.Combine(_root, "actio-home"));
+        await SaveRunAsync(runStore, CreateRun("run-cancel", "CI", workflowPath, status: "Running"));
+        var executor = new FakeWorkflowExecutor(new WorkflowExecutionResult(WorkflowExecutionStatus.Success, 1, 1, []));
+
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var exitCode = CreateApplication(executor, runStore: runStore).Run(["cancel", "run-cancel"], _root, output, error);
+
+        Assert.Equal(ExitCodes.Success, exitCode);
+        Assert.Contains("Cancellation requested for run run-cancel.", output.ToString());
+        Assert.True(await runStore.IsRunCancellationRequestedAsync("run-cancel"));
+        Assert.Equal(string.Empty, error.ToString());
+        Assert.Null(executor.Workflow);
+    }
+
+    [Fact]
+    public async Task Run_RerunsCompletedRunWithStoredInputs()
+    {
+        var workflowPath = WriteWorkflow(
+            "ci.yml",
+            "CI",
+            """
+            on:
+              workflow_dispatch:
+                inputs:
+                  environment:
+                    required: true
+            """);
+        var runStore = new FileSystemRunStore(Path.Combine(_root, "actio-home"));
+        await SaveRunAsync(
+            runStore,
+            CreateRun(
+                "run-source",
+                "CI",
+                workflowPath,
+                runTrigger: new WorkflowRunTrigger(
+                    "workflow_dispatch",
+                    "CLI",
+                    new Dictionary<string, string> { ["environment"] = "staging" })));
+        var executor = new FakeWorkflowExecutor(new WorkflowExecutionResult(WorkflowExecutionStatus.Success, 1, 1, []));
+
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var exitCode = CreateApplication(
+            executor,
+            runStore: runStore,
+            createRunId: () => "run-rerun").Run(["rerun", "run-source"], _root, output, error);
+
+        Assert.Equal(ExitCodes.Success, exitCode);
+        Assert.Contains("Success (1 / 1)", output.ToString());
+        Assert.Equal("CI", executor.Workflow!.Name);
+        Assert.Equal("run-rerun", executor.Options!.RunId);
+        Assert.Equal("rerun:run-source", executor.Options.RunTrigger.Source);
+        Assert.Equal("staging", executor.Options.RunTrigger.Inputs["environment"]);
+        Assert.Contains("Workflow warnings:", error.ToString());
+        Assert.Contains("workflow.on is parsed as trigger metadata", error.ToString());
+    }
 
     [Fact]
     public void Run_PrintsVersion()
@@ -729,6 +844,34 @@ public sealed class CliApplicationTests : IDisposable
     }
 
     [Fact]
+    public void Run_PrintsCancelledSummaryForCancelledExecution()
+    {
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        var executor = new FakeWorkflowExecutor(
+            new WorkflowExecutionResult(WorkflowExecutionStatus.Cancelled, 0, 1, ["Workflow run was cancelled."]));
+
+        var exitCode = CreateApplication(executor).Run(["ci.yml"], _root, output, error);
+
+        Assert.Equal(ExitCodes.ValidationError, exitCode);
+        Assert.Contains("Cancelled (0 / 1, workflow cancelled)", output.ToString());
+        Assert.Contains("Workflow execution cancelled:", error.ToString());
+        Assert.Contains("Workflow run was cancelled.", error.ToString());
+    }
+
+    [Fact]
     public void Run_ColorizesFailureWhenTerminalSupportsAnsi()
     {
         File.WriteAllText(
@@ -1013,6 +1156,7 @@ public sealed class CliApplicationTests : IDisposable
         IDependencyCache? dependencyCache = null,
         CliOutputFormatter? outputFormatter = null,
         FileSystemLocalValueProvider? localValueProvider = null,
+        FileSystemRunStore? runStore = null,
         Func<string>? createRunId = null)
     {
         return new CliApplication(
@@ -1024,7 +1168,70 @@ public sealed class CliApplicationTests : IDisposable
             dependencyCache: dependencyCache,
             outputFormatter: outputFormatter,
             localValueProvider: localValueProvider,
+            runStore: runStore,
             createRunId: createRunId ?? (() => "run-1"));
+    }
+
+    private string WriteWorkflow(string fileName, string name, string? extraTopLevelYaml = null)
+    {
+        var path = Path.Combine(_root, ".workflows", fileName);
+        File.WriteAllText(
+            path,
+            $$"""
+            name: {{name}}
+            {{extraTopLevelYaml ?? string.Empty}}
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+        return path;
+    }
+
+    private async Task SaveRunAsync(FileSystemRunStore runStore, WorkflowRunRecord run)
+    {
+        await runStore.InitializeRunAsync(run.RunId);
+        await runStore.SaveRunRecordAsync(run);
+    }
+
+    private WorkflowRunRecord CreateRun(
+        string runId,
+        string workflowName,
+        string workflowPath,
+        string status = "Success",
+        WorkflowRunTrigger? runTrigger = null)
+    {
+        var startedAt = DateTimeOffset.UtcNow;
+        return new WorkflowRunRecord(
+            runId,
+            workflowName,
+            workflowPath,
+            _root,
+            status,
+            startedAt,
+            startedAt,
+            10,
+            [
+                new JobRunRecord(
+                    "test",
+                    status,
+                    "ubuntu-latest",
+                    [],
+                    null,
+                    startedAt,
+                    startedAt,
+                    10,
+                    new Dictionary<string, string>(),
+                    [new StepRunRecord("Test", status, "dotnet test", 0, null, startedAt, startedAt, 10)],
+                    [],
+                    [])
+            ],
+            [],
+            [],
+            [],
+            RunTrigger: runTrigger);
     }
 
     private static CliOutputFormatter CreateOutputFormatter(
