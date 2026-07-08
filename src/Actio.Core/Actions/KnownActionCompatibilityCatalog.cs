@@ -1,6 +1,6 @@
 namespace Actio.Core.Actions;
 
-public static class ActionCompatibilityCatalog
+public static class KnownActionCompatibilityCatalog
 {
     public static IReadOnlyList<ActionCompatibilityEntry> Entries { get; } =
     [

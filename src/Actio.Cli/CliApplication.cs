@@ -126,7 +126,7 @@ public sealed class CliApplication
             case CliCommandKind.CleanCache:
                 return await CleanCacheAsync(output, error, cancellationToken);
             case CliCommandKind.ShowCompatibility:
-                output.WriteLine(ActionCompatibilityFormatter.Format(ActionCompatibilityCatalog.Entries));
+                output.WriteLine(ActionCompatibilityFormatter.Format(KnownActionCompatibilityCatalog.Entries));
                 return ExitCodes.Success;
             default:
                 throw new InvalidOperationException($"Unsupported CLI command kind '{command.Kind}'.");

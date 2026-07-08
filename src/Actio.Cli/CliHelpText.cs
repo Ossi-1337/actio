@@ -177,7 +177,8 @@ public static class CliHelpText
 
         Description:
           Prints Actio's curated compatibility matrix for common GitHub Actions and selected
-          third-party actions. The matrix is a support statement, not a live Marketplace scan.
+          third-party actions. This is not an allowlist or a live Marketplace scan. Unlisted
+          GitHub actions are resolved from their action metadata at runtime.
 
         Examples:
           actio compatibility

@@ -115,7 +115,9 @@ public sealed class CliApplicationTests : IDisposable
         var result = RunWithFakeExecutor(["compatibility"]);
 
         Assert.Equal(ExitCodes.Success, result.ExitCode);
-        Assert.Contains("Actio action compatibility matrix", result.Output);
+        Assert.Contains("Actio known-action compatibility matrix", result.Output);
+        Assert.Contains("not an allowlist", result.Output);
+        Assert.Contains("Unlisted GitHub actions are resolved from their action metadata", result.Output);
         Assert.Contains("actions/checkout", result.Output);
         Assert.Contains("actions/github-script", result.Output);
         Assert.Contains("dorny/paths-filter", result.Output);

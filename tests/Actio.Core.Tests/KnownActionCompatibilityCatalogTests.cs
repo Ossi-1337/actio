@@ -2,7 +2,7 @@ using Actio.Core.Actions;
 
 namespace Actio.Core.Tests;
 
-public sealed class ActionCompatibilityCatalogTests
+public sealed class KnownActionCompatibilityCatalogTests
 {
     [Theory]
     [InlineData("actions/checkout@v4", ActionCompatibilityStatus.Partial, "14")]
@@ -21,7 +21,7 @@ public sealed class ActionCompatibilityCatalogTests
         ActionCompatibilityStatus status,
         string milestone)
     {
-        var entry = ActionCompatibilityCatalog.Find(uses);
+        var entry = KnownActionCompatibilityCatalog.Find(uses);
 
         Assert.NotNull(entry);
         Assert.Equal(status, entry.Status);
@@ -33,7 +33,7 @@ public sealed class ActionCompatibilityCatalogTests
     [Fact]
     public void Find_DoesNotMatchUnknownActionPath()
     {
-        var entry = ActionCompatibilityCatalog.Find("actions/checkout/path@v4");
+        var entry = KnownActionCompatibilityCatalog.Find("actions/checkout/path@v4");
 
         Assert.Null(entry);
     }
@@ -41,7 +41,7 @@ public sealed class ActionCompatibilityCatalogTests
     [Fact]
     public void UnsupportedMessage_IncludesActionAndRequiredMilestone()
     {
-        var entry = ActionCompatibilityCatalog.Find("actions/github-script@v7");
+        var entry = KnownActionCompatibilityCatalog.Find("actions/github-script@v7");
 
         var message = entry!.FormatUnsupportedMessage("actions/github-script@v7");
 

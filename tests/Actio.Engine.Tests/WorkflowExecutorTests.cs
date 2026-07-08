@@ -3585,7 +3585,7 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_RunsGitHubJavaScriptAction()
+    public async Task ExecuteAsync_RunsUnlistedGitHubJavaScriptActionFromItsMetadata()
     {
         var actionRoot = Path.Combine(Path.GetTempPath(), $"actio-github-action-tests-{Guid.NewGuid():N}");
         Directory.CreateDirectory(Path.Combine(actionRoot, "dist"));
@@ -3647,6 +3647,9 @@ public sealed class WorkflowExecutorTests
                 TextWriter.Null);
 
             Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+            var sourceRequest = Assert.Single(cache.GitHubSourceRequests);
+            Assert.Equal("example", sourceRequest.Owner);
+            Assert.Equal("javascript-action", sourceRequest.Repository);
             Assert.Empty(runner.Requests);
             Assert.Empty(runner.DockerActionRequests);
             var request = Assert.Single(runner.JavaScriptActionRequests);

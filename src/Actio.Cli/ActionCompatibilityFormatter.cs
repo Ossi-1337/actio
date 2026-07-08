@@ -8,7 +8,8 @@ internal static class ActionCompatibilityFormatter
     public static string Format(IReadOnlyList<ActionCompatibilityEntry> entries)
     {
         var builder = new StringBuilder();
-        builder.AppendLine("Actio action compatibility matrix");
+        builder.AppendLine("Actio known-action compatibility matrix");
+        builder.AppendLine("This curated list is not an allowlist. Unlisted GitHub actions are resolved from their action metadata.");
         builder.AppendLine();
         builder.AppendLine("| Action | Status | Action type | Supported refs | Milestone |");
         builder.AppendLine("| --- | --- | --- | --- | --- |");

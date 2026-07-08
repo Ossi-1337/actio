@@ -218,7 +218,7 @@ internal sealed class ActionResolver
             return ActionResolutionResult.Failed([$"uses '{uses}' is not a valid GitHub action reference."]);
         }
 
-        var compatibility = ActionCompatibilityCatalog.Find(githubAction!);
+        var compatibility = KnownActionCompatibilityCatalog.Find(githubAction!);
         if (compatibility?.Status == ActionCompatibilityStatus.Unsupported)
         {
             return ActionResolutionResult.Failed([compatibility.FormatUnsupportedMessage(uses)]);
