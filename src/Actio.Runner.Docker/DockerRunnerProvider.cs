@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using Actio.Core.Workflows;
 using Actio.Engine.Execution;
 
 namespace Actio.Runner.Docker;
@@ -318,10 +319,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             request.AdditionalMounts,
             request.Container,
             request.Services);
-        startInfo.ArgumentList.Add(image);
-        startInfo.ArgumentList.Add(NormalizeShell(request.Shell));
-        startInfo.ArgumentList.Add("-lc");
-        startInfo.ArgumentList.Add(BuildShellScript(request.Command));
+        AddShellInvocation(startInfo, image, request.Shell, request.Command);
 
         return startInfo;
     }
@@ -531,7 +529,32 @@ public sealed class DockerRunnerProvider : IRunnerProvider
     }
 
     private static string NormalizeShell(string? shell)
-        => string.IsNullOrWhiteSpace(shell) ? "sh" : shell;
+        => string.IsNullOrWhiteSpace(shell) ? WorkflowShells.Sh : shell;
+
+    private static void AddShellInvocation(
+        ProcessStartInfo startInfo,
+        string image,
+        string? configuredShell,
+        string command)
+    {
+        var shell = NormalizeShell(configuredShell);
+        startInfo.ArgumentList.Add("--entrypoint");
+        startInfo.ArgumentList.Add(shell);
+        startInfo.ArgumentList.Add(image);
+
+        if (string.Equals(shell, WorkflowShells.PowerShell, StringComparison.Ordinal))
+        {
+            startInfo.ArgumentList.Add("-NoLogo");
+            startInfo.ArgumentList.Add("-NoProfile");
+            startInfo.ArgumentList.Add("-NonInteractive");
+            startInfo.ArgumentList.Add("-Command");
+            startInfo.ArgumentList.Add(BuildPowerShellScript(command));
+            return;
+        }
+
+        startInfo.ArgumentList.Add("-lc");
+        startInfo.ArgumentList.Add(BuildShellScript(command));
+    }
 
     internal static string ToContainerWorkingDirectory(string? workingDirectory)
     {
@@ -566,6 +589,16 @@ public sealed class DockerRunnerProvider : IRunnerProvider
               set -o pipefail
             fi
             {command}
+            """;
+    }
+
+    internal static string BuildPowerShellScript(string command)
+    {
+        return $$"""
+            $ErrorActionPreference = 'Stop'
+            $PSNativeCommandUseErrorActionPreference = $true
+            {{command}}
+            if (Test-Path -LiteralPath variable:\LASTEXITCODE) { exit $LASTEXITCODE }
             """;
     }
 

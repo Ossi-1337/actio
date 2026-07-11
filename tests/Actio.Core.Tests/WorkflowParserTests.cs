@@ -806,7 +806,7 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
-    public void Parse_RejectsUnsupportedDefaults()
+    public void Parse_AcceptsPowerShellDefaults()
     {
         var result = Parse(
             """
@@ -814,6 +814,27 @@ public sealed class WorkflowParserTests
             defaults:
               run:
                 shell: pwsh
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal("pwsh", result.Workflow!.Defaults.Shell);
+    }
+
+    [Fact]
+    public void Parse_RejectsUnsupportedDefaults()
+    {
+        var result = Parse(
+            """
+            name: CI
+            defaults:
+              run:
+                shell: fish
                 working-directory: ../outside
             jobs:
               test:
@@ -827,7 +848,7 @@ public sealed class WorkflowParserTests
             """);
 
         Assert.False(result.Success);
-        Assert.Contains(result.Errors, error => error == "workflow.defaults.run.shell must be bash or sh.");
+        Assert.Contains(result.Errors, error => error == "workflow.defaults.run.shell must be bash, pwsh, or sh.");
         Assert.Contains(result.Errors, error => error == "workflow.defaults.run.working-directory must be a relative path inside the workspace.");
         Assert.Contains(result.Errors, error => error == "workflow.jobs.test.defaults.run.working-directory must be a relative path inside the workspace.");
     }
@@ -866,6 +887,25 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
+    public void Parse_AcceptsPowerShellStep()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Run tests
+                    shell: pwsh
+                    run: dotnet test
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal("pwsh", Assert.Single(result.Workflow!.Jobs["test"].Steps).Shell);
+    }
+
+    [Fact]
     public void Parse_AcceptsActionStepWithInputs()
     {
         var result = Parse(
@@ -901,7 +941,7 @@ public sealed class WorkflowParserTests
                   - id: 1bad
                     name: First
                     run: echo first
-                    shell: pwsh
+                    shell: fish
                     working-directory: ../outside
                     timeout-minutes: 0
                     continue-on-error: maybe
@@ -919,7 +959,7 @@ public sealed class WorkflowParserTests
 
         Assert.False(result.Success);
         Assert.Contains(result.Errors, error => error.Contains("workflow.jobs.test.steps[0].id", StringComparison.OrdinalIgnoreCase));
-        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[0].shell must be bash or sh.");
+        Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[0].shell must be bash, pwsh, or sh.");
         Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[0].working-directory must be a relative path inside the workspace.");
         Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[0].timeout-minutes must be a positive integer.");
         Assert.Contains(result.Errors, error => error == "workflow.jobs.test.steps[0].continue-on-error must be true or false.");

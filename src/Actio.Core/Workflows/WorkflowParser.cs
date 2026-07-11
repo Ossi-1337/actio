@@ -191,12 +191,6 @@ public sealed partial class WorkflowParser
         "--no-healthcheck"
     };
 
-    private static readonly HashSet<string> SupportedDefaultShells = new(StringComparer.Ordinal)
-    {
-        "bash",
-        "sh"
-    };
-
     private static readonly HashSet<string> SupportedPermissionModes = new(StringComparer.Ordinal)
     {
         WorkflowPermissions.ReadAllMode,
@@ -668,9 +662,9 @@ public sealed partial class WorkflowParser
 
             ValidateStepId(errors, stepIds, id, $"{itemPath}.id");
 
-            if (shell is not null && !SupportedDefaultShells.Contains(shell))
+            if (shell is not null && !WorkflowShells.IsSupported(shell))
             {
-                errors.Add($"{itemPath}.shell must be bash or sh.");
+                errors.Add($"{itemPath}.shell must be {WorkflowShells.SupportedValues}.");
             }
 
             if (workingDirectory is not null && !IsSafeRelativePath(workingDirectory))
@@ -2075,9 +2069,9 @@ public sealed partial class WorkflowParser
         var shell = ReadOptionalScalar(errors, runMap, "shell", $"{runPath}.shell");
         var workingDirectory = ReadOptionalScalar(errors, runMap, "working-directory", $"{runPath}.working-directory");
 
-        if (shell is not null && !SupportedDefaultShells.Contains(shell))
+        if (shell is not null && !WorkflowShells.IsSupported(shell))
         {
-            errors.Add($"{runPath}.shell must be bash or sh.");
+            errors.Add($"{runPath}.shell must be {WorkflowShells.SupportedValues}.");
         }
 
         if (workingDirectory is not null && !IsSafeRelativePath(workingDirectory))

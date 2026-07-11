@@ -196,8 +196,9 @@ public sealed class DockerRunnerProviderTests
         Assert.Contains($"{Path.GetFullPath(cachePath)}:/cache:ro", args);
         Assert.Contains("NODE_ENV=test", args);
         Assert.True(imageIndex >= 0);
-        Assert.Equal("sh", args[imageIndex + 1]);
-        Assert.Equal("-lc", args[imageIndex + 2]);
+        Assert.Equal("--entrypoint", args[imageIndex - 2]);
+        Assert.Equal("sh", args[imageIndex - 1]);
+        Assert.Equal("-lc", args[imageIndex + 1]);
     }
 
     [Fact]
@@ -297,6 +298,32 @@ public sealed class DockerRunnerProviderTests
 
         Assert.Contains("bash", args);
         Assert.Contains("/workspace/src/Actio.Core", args);
+    }
+
+    [Fact]
+    public void CreateShellStepStartInfo_ConfiguresPowerShellCore()
+    {
+        var request = new StepExecutionRequest(
+            "test",
+            "Run tests",
+            "ubuntu-latest",
+            "dotnet test",
+            Directory.GetCurrentDirectory(),
+            new Dictionary<string, string>(),
+            Shell: "pwsh");
+
+        var startInfo = DockerRunnerProvider.CreateShellStepStartInfo(request, "mcr.microsoft.com/powershell:7.5-ubuntu-24.04", "actio-test");
+        var args = startInfo.ArgumentList.ToArray();
+        var imageIndex = Array.IndexOf(args, "mcr.microsoft.com/powershell:7.5-ubuntu-24.04");
+
+        Assert.True(imageIndex >= 0);
+        Assert.Equal("--entrypoint", args[imageIndex - 2]);
+        Assert.Equal("pwsh", args[imageIndex - 1]);
+        Assert.Equal(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"], args[(imageIndex + 1)..(imageIndex + 5)]);
+        Assert.Contains("$ErrorActionPreference = 'Stop'", args[imageIndex + 5]);
+        Assert.Contains("$PSNativeCommandUseErrorActionPreference = $true", args[imageIndex + 5]);
+        Assert.Contains("dotnet test", args[imageIndex + 5]);
+        Assert.Contains("exit $LASTEXITCODE", args[imageIndex + 5]);
     }
 
     [Theory]
