@@ -9,7 +9,7 @@ public sealed record DockerfileActionExecutionRequest(
     string DockerfilePath,
     IReadOnlyDictionary<string, string> Environment,
     IReadOnlyList<StepExecutionMount>? AdditionalMounts = null,
-    JobServiceNetwork? Services = null,
+    JobRuntimeContext? Runtime = null,
     string? EntryPoint = null,
     IReadOnlyList<string>? Arguments = null,
     string? BuildContextStagingRoot = null)

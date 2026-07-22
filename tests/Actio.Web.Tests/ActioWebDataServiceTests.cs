@@ -214,7 +214,19 @@ public sealed class ActioWebDataServiceTests : IDisposable
                 "read-write-with-protected-value-file-masks",
                 "canonical-existing-bind-sources-only",
                 ["/workspace/.actio/secrets.env"],
-                [new RunnerImageUserObservation("shell:test", "alpine:3.20", "<image-default-root>", "root")])));
+                [new RunnerImageUserObservation("shell:test", "alpine:3.20", "<image-default-root>", "root")],
+                "per-job-user-defined-bridge-with-outbound",
+                "ipv4-loopback-only",
+                [
+                    new RunnerNetworkObservation(
+                        "test",
+                        "actio-test-network",
+                        "user-defined-bridge",
+                        OutboundAllowed: true,
+                        Internal: false,
+                        ["postgres"],
+                        [new RunnerPublishedPort("service:postgres", "127.0.0.1", 5432, 15432, "tcp")])
+                ])));
 
         var run = await CreateService().GetRunAsync("run-1");
 
@@ -224,6 +236,8 @@ public sealed class ActioWebDataServiceTests : IDisposable
         Assert.Equal("secure-baseline", run.RunnerSecurity.EffectiveProfile);
         Assert.Contains("no-new-privileges=true", run.RunnerSecurity.AppliedSecurityOptions);
         Assert.Equal("not-evaluated", run.RunnerSecurity.DaemonPlatformState);
+        Assert.Equal("ipv4-loopback-only", run.RunnerSecurity.PublishedPortPolicy);
+        Assert.Equal("actio-test-network", Assert.Single(run.RunnerSecurity.NetworkObservations).NetworkName);
         Assert.Equal("image-default-user-with-root-warning", run.RunnerSecurity.UserPolicy);
         Assert.Equal("writable", run.RunnerSecurity.RootFilesystemPolicy);
         Assert.Contains("/workspace/.actio/secrets.env", run.RunnerSecurity.ProtectedPaths);

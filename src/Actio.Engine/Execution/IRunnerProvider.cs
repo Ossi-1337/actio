@@ -8,12 +8,12 @@ public interface IRunnerProvider
 
     bool SupportsRunner(string runsOn);
 
-    Task<ServiceContainerStartResult> StartServiceContainersAsync(
-        ServiceContainerStartRequest request,
+    Task<JobRuntimeStartResult> StartJobRuntimeAsync(
+        JobRuntimeStartRequest request,
         CancellationToken cancellationToken = default);
 
-    Task<ServiceContainerStopResult> StopServiceContainersAsync(
-        JobServiceNetwork network,
+    Task<JobRuntimeStopResult> StopJobRuntimeAsync(
+        JobRuntimeContext runtime,
         CancellationToken cancellationToken = default);
 
     Task<StepExecutionResult> ExecuteStepAsync(

@@ -325,6 +325,8 @@ function renderSecurity(run) {
           ${summaryCell("Workspace", metadata.workspacePolicy)}
           ${summaryCell("Mount policy", metadata.mountPolicy)}
           ${summaryCell("Protected paths", (metadata.protectedPaths ?? []).join(", ") || "None")}
+          ${summaryCell("Network policy", metadata.networkPolicy)}
+          ${summaryCell("Published ports", metadata.publishedPortPolicy)}
           ${summaryCell("Daemon/platform", metadata.daemonPlatformState)}
           ${summaryCell("Degraded controls", (metadata.degradedControls ?? []).join(", ") || "None")}
         </div>
@@ -336,6 +338,20 @@ function renderSecurity(run) {
                 <span class="job-name">${escapeHtml(observation.image)}</span>
                 <span class="run-sub muted">${escapeHtml(observation.surface)}</span>
                 <span class="security-message">Configured user: ${escapeHtml(observation.configuredUser)}</span>
+              </span>
+            </div>
+          `).join("")}
+        </div>` : ""}
+        ${(metadata.networkObservations ?? []).length ? `<div class="security-list">
+          ${(metadata.networkObservations ?? []).map(observation => `
+            <div class="security-row">
+              <span class="security-level info">network</span>
+              <span>
+                <span class="job-name">${escapeHtml(observation.jobName)}</span>
+                <span class="run-sub muted">${escapeHtml(observation.networkName)}</span>
+                <span class="security-message">${escapeHtml(observation.mode)} · outbound ${observation.outboundAllowed ? "allowed" : "blocked"} · internal ${observation.internal ? "yes" : "no"}</span>
+                ${(observation.serviceAliases ?? []).length ? `<span class="security-message">Services: ${escapeHtml(observation.serviceAliases.join(", "))}</span>` : ""}
+                ${(observation.publishedPorts ?? []).map(port => `<span class="security-message">${escapeHtml(port.surface)}: ${escapeHtml(port.bindAddress)}:${escapeHtml(port.hostPort ?? "dynamic")} → ${escapeHtml(port.containerPort)}/${escapeHtml(port.protocol)}</span>`).join("")}
               </span>
             </div>
           `).join("")}

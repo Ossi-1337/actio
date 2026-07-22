@@ -1,3 +1,5 @@
+using Actio.Core.Workflows;
+
 namespace Actio.Engine.Execution;
 
 public sealed record StepExecutionRequest(
@@ -11,18 +13,18 @@ public sealed record StepExecutionRequest(
     string? WorkingDirectory = null,
     IReadOnlyList<StepExecutionMount>? AdditionalMounts = null,
     JobContainerExecutionOptions? Container = null,
-    JobServiceNetwork? Services = null)
+    JobRuntimeContext? Runtime = null)
 {
     public IReadOnlyList<StepExecutionMount> AdditionalMounts { get; init; } = AdditionalMounts ?? [];
 }
 
 public sealed record JobContainerExecutionOptions(
     string Image,
-    IReadOnlyList<string>? Ports = null,
+    IReadOnlyList<ContainerPortMapping>? Ports = null,
     IReadOnlyList<string>? Options = null,
     IReadOnlyList<StepExecutionMount>? Volumes = null)
 {
-    public IReadOnlyList<string> Ports { get; init; } = Ports ?? [];
+    public IReadOnlyList<ContainerPortMapping> Ports { get; init; } = Ports ?? [];
 
     public IReadOnlyList<string> Options { get; init; } = Options ?? [];
 

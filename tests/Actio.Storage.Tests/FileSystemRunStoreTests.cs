@@ -59,7 +59,20 @@ public sealed class FileSystemRunStoreTests : IDisposable
                 "docker",
                 "secure-baseline",
                 "secure-baseline",
-                ["no-new-privileges=true"]));
+                ["no-new-privileges=true"],
+                NetworkPolicy: "per-job-user-defined-bridge-with-outbound",
+                PublishedPortPolicy: "ipv4-loopback-only",
+                NetworkObservations:
+                [
+                    new RunnerNetworkObservation(
+                        "test",
+                        "actio-test-network",
+                        "user-defined-bridge",
+                        OutboundAllowed: true,
+                        Internal: false,
+                        ["postgres"],
+                        [new RunnerPublishedPort("service:postgres", "127.0.0.1", 5432, 15432, "tcp")])
+                ]));
 
         await store.SaveRunRecordAsync(record);
         var loaded = await store.ReadRunRecordAsync(runId);
@@ -79,6 +92,10 @@ public sealed class FileSystemRunStoreTests : IDisposable
         Assert.NotNull(loaded.RunnerSecurity);
         Assert.Equal("docker", loaded.RunnerSecurity.Provider);
         Assert.Contains("no-new-privileges=true", loaded.RunnerSecurity.AppliedSecurityOptions);
+        Assert.Equal("ipv4-loopback-only", loaded.RunnerSecurity.PublishedPortPolicy);
+        var network = Assert.Single(loaded.RunnerSecurity.NetworkObservations);
+        Assert.Equal("actio-test-network", network.NetworkName);
+        Assert.Equal(15432, Assert.Single(network.PublishedPorts).HostPort);
         Assert.True(File.Exists(Path.Combine(_root, "runs", runId, "run.json")));
     }
 
@@ -142,6 +159,44 @@ public sealed class FileSystemRunStoreTests : IDisposable
         Assert.Null(loaded.RunnerSecurity);
         Assert.Equal("workflow_dispatch", loaded.RunTrigger.EventPayload.EventName);
         Assert.Equal("CLI", loaded.RunTrigger.EventPayload.Source);
+    }
+
+    [Fact]
+    public async Task ReadRunRecordAsync_DefaultsNetworkMetadataForOlderSecurityRecords()
+    {
+        var store = new FileSystemRunStore(_root);
+        const string runId = "run-old-security";
+        await store.InitializeRunAsync(runId);
+        await File.WriteAllTextAsync(
+            Path.Combine(_root, "runs", runId, "run.json"),
+            """
+            {
+              "RunId": "run-old-security",
+              "WorkflowName": "CI",
+              "WorkflowPath": "C:\\repo\\.workflows\\ci.yml",
+              "ProjectRoot": "C:\\repo",
+              "Status": "Success",
+              "StartedAt": "2026-06-25T10:00:00+00:00",
+              "FinishedAt": "2026-06-25T10:00:01+00:00",
+              "DurationMilliseconds": 1000,
+              "Jobs": [],
+              "Outputs": [],
+              "Artifacts": [],
+              "Errors": [],
+              "RunnerSecurity": {
+                "Provider": "docker",
+                "RequestedProfile": "secure-baseline",
+                "EffectiveProfile": "secure-baseline"
+              }
+            }
+            """);
+
+        var loaded = await store.ReadRunRecordAsync(runId);
+
+        Assert.NotNull(loaded?.RunnerSecurity);
+        Assert.Equal("not-reported", loaded.RunnerSecurity.NetworkPolicy);
+        Assert.Equal("not-reported", loaded.RunnerSecurity.PublishedPortPolicy);
+        Assert.Empty(loaded.RunnerSecurity.NetworkObservations);
     }
 
     [Fact]

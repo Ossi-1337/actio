@@ -166,13 +166,13 @@ public sealed record WorkflowJobMatrix(
 public sealed record WorkflowJobContainer(
     string Image,
     IReadOnlyDictionary<string, string>? Env = null,
-    IReadOnlyList<string>? Ports = null,
+    IReadOnlyList<ContainerPortMapping>? Ports = null,
     IReadOnlyList<WorkflowJobContainerVolume>? Volumes = null,
     IReadOnlyList<string>? Options = null)
 {
     public IReadOnlyDictionary<string, string> Env { get; init; } = Env ?? new Dictionary<string, string>();
 
-    public IReadOnlyList<string> Ports { get; init; } = Ports ?? [];
+    public IReadOnlyList<ContainerPortMapping> Ports { get; init; } = Ports ?? [];
 
     public IReadOnlyList<WorkflowJobContainerVolume> Volumes { get; init; } = Volumes ?? [];
 
@@ -187,13 +187,13 @@ public sealed record WorkflowJobContainerVolume(
 public sealed record WorkflowJobService(
     string Image,
     IReadOnlyDictionary<string, string>? Env = null,
-    IReadOnlyList<string>? Ports = null,
+    IReadOnlyList<ContainerPortMapping>? Ports = null,
     IReadOnlyList<WorkflowJobContainerVolume>? Volumes = null,
     IReadOnlyList<string>? Options = null)
 {
     public IReadOnlyDictionary<string, string> Env { get; init; } = Env ?? new Dictionary<string, string>();
 
-    public IReadOnlyList<string> Ports { get; init; } = Ports ?? [];
+    public IReadOnlyList<ContainerPortMapping> Ports { get; init; } = Ports ?? [];
 
     public IReadOnlyList<WorkflowJobContainerVolume> Volumes { get; init; } = Volumes ?? [];
 

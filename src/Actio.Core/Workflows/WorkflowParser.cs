@@ -1899,21 +1899,115 @@ public sealed partial class WorkflowParser
         return services;
     }
 
-    private static IReadOnlyList<string> ReadContainerPorts(
+    private static IReadOnlyList<ContainerPortMapping> ReadContainerPorts(
         List<string> errors,
         YamlMappingNode containerMap,
         string path)
     {
         var ports = ReadOptionalStringList(errors, containerMap, "ports", $"{path}.ports");
-        foreach (var port in ports)
+        var mappings = new List<ContainerPortMapping>();
+        var fixedHostPorts = new HashSet<(int Port, string Protocol)>();
+
+        for (var index = 0; index < ports.Count; index++)
         {
-            if (ContainsWhitespace(port) || port.StartsWith("-", StringComparison.Ordinal))
+            var portPath = $"{path}.ports[{index}]";
+            var mapping = ParseContainerPort(errors, ports[index], portPath);
+            if (mapping is null)
             {
-                errors.Add($"{path}.ports contains invalid Docker port mapping '{port}'.");
+                continue;
             }
+
+            if (mappings.Contains(mapping))
+            {
+                errors.Add($"{portPath} duplicates port mapping '{ports[index]}'.");
+                continue;
+            }
+
+            if (mapping.HostPort is int hostPort && !fixedHostPorts.Add((hostPort, mapping.Protocol)))
+            {
+                errors.Add($"{portPath} reuses fixed host port {hostPort}/{mapping.Protocol}.");
+                continue;
+            }
+
+            mappings.Add(mapping);
         }
 
-        return ports;
+        return mappings;
+    }
+
+    private static ContainerPortMapping? ParseContainerPort(
+        List<string> errors,
+        string value,
+        string path)
+    {
+        if (string.IsNullOrWhiteSpace(value) || ContainsWhitespace(value) || value.StartsWith("-", StringComparison.Ordinal))
+        {
+            errors.Add($"{path} must use '<container-port>[/tcp|udp]' or '<host-port>:<container-port>[/tcp|udp]'.");
+            return null;
+        }
+
+        if (value.Contains('-', StringComparison.Ordinal))
+        {
+            errors.Add($"{path} does not support port ranges. List each port mapping separately.");
+            return null;
+        }
+
+        var protocolParts = value.Split('/');
+        if (protocolParts.Length > 2)
+        {
+            errors.Add($"{path} contains an invalid port protocol.");
+            return null;
+        }
+
+        var protocol = protocolParts.Length == 2
+            ? protocolParts[1].ToLowerInvariant()
+            : ContainerPortMapping.TcpProtocol;
+        if (protocol is not (ContainerPortMapping.TcpProtocol or ContainerPortMapping.UdpProtocol))
+        {
+            errors.Add($"{path} protocol must be tcp or udp.");
+            return null;
+        }
+
+        var portParts = protocolParts[0].Split(':');
+        if (portParts.Length is < 1 or > 2)
+        {
+            errors.Add($"{path} cannot specify a host IP. Actio publishes ports on 127.0.0.1 only.");
+            return null;
+        }
+
+        int? hostPort = null;
+        var containerPortIndex = 0;
+        if (portParts.Length == 2)
+        {
+            if (!TryReadPort(portParts[0], out var parsedHostPort))
+            {
+                errors.Add($"{path} host port must be between 1 and 65535.");
+                return null;
+            }
+
+            if (parsedHostPort < 1024)
+            {
+                errors.Add($"{path} fixed host port {parsedHostPort} is privileged. Use a host port from 1024 to 65535 or omit it for a dynamic loopback port.");
+                return null;
+            }
+
+            hostPort = parsedHostPort;
+            containerPortIndex = 1;
+        }
+
+        if (!TryReadPort(portParts[containerPortIndex], out var containerPort))
+        {
+            errors.Add($"{path} container port must be between 1 and 65535.");
+            return null;
+        }
+
+        return new ContainerPortMapping(containerPort, hostPort, protocol);
+    }
+
+    private static bool TryReadPort(string value, out int port)
+    {
+        return int.TryParse(value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out port)
+            && port is >= 1 and <= 65535;
     }
 
     private static IReadOnlyList<WorkflowJobContainerVolume> ReadContainerVolumes(

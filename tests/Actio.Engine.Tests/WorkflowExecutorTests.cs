@@ -38,6 +38,10 @@ public sealed class WorkflowExecutorTests
         Assert.Equal(2, result.TotalSteps);
         Assert.Equal(["Restore", "Test"], runner.Requests.Select(request => request.StepName));
         Assert.Equal("true", runner.Requests[0].Environment["DOTNET_NOLOGO"]);
+        var runtimeStart = Assert.Single(runner.RuntimeStartRequests);
+        Assert.Empty(runtimeStart.Services);
+        Assert.All(runner.Requests, request => Assert.NotNull(request.Runtime));
+        Assert.Single(runner.StoppedRuntimes);
         Assert.Contains("[test] Restore", output.ToString());
         Assert.Equal(string.Empty, error.ToString());
     }
@@ -92,6 +96,31 @@ public sealed class WorkflowExecutorTests
         Assert.False(result.Success);
         Assert.Contains("Workflow run was cancelled.", result.Errors);
         Assert.Equal("Cancelled", store.SavedRecords.Last().Status);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_StopsRuntimeWhenCancellationOccursDuringStep()
+    {
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(0, delay: TimeSpan.FromSeconds(5))]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Long test", "dotnet test", null)]));
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(20));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null,
+            cancellation.Token);
+
+        Assert.Equal(WorkflowExecutionStatus.Cancelled, result.Status);
+        Assert.Single(runner.StoppedRuntimes);
     }
 
     [Fact]
@@ -314,7 +343,7 @@ public sealed class WorkflowExecutorTests
                             ["CONTAINER_ONLY"] = "container",
                             ["DOTNET_NOLOGO"] = "container"
                         },
-                        ["3000:3000"],
+                        [new ContainerPortMapping(3000, 3000)],
                         [new WorkflowJobContainerVolume("./.actio/cache", "/cache", ReadOnly: true)],
                         ["--cpus", "1"]))
             });
@@ -331,7 +360,10 @@ public sealed class WorkflowExecutorTests
         Assert.Equal("container", request.Environment["CONTAINER_ONLY"]);
         Assert.NotNull(request.Container);
         Assert.Equal("node:22", request.Container.Image);
-        Assert.Equal(["3000:3000"], request.Container.Ports);
+        Assert.Equal(new ContainerPortMapping(3000, 3000), Assert.Single(request.Container.Ports));
+        Assert.Equal(
+            new ContainerPortMapping(3000, 3000),
+            Assert.Single(Assert.Single(runner.RuntimeStartRequests).JobContainerPorts));
         Assert.Equal(["--cpus", "1"], request.Container.Options);
         var volume = Assert.Single(request.Container.Volumes);
         Assert.Equal(Path.Combine(projectRoot, "./.actio/cache"), volume.HostPath);
@@ -341,7 +373,7 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_StartsServicesAndPassesNetworkToSteps()
+    public async Task ExecuteAsync_StartsServicesAndPassesJobRuntimeToSteps()
     {
         var runner = new FakeRunnerProvider([0, 0]);
         var projectRoot = Environment.CurrentDirectory;
@@ -377,7 +409,7 @@ public sealed class WorkflowExecutorTests
                             {
                                 ["POSTGRES_PASSWORD"] = "postgres"
                             },
-                            ["5432:5432"],
+                            [new ContainerPortMapping(5432, 5432)],
                             [new WorkflowJobContainerVolume("./db", "/var/lib/postgresql/data", ReadOnly: false)],
                             ["--health-cmd=pg_isready"])
                     })
@@ -390,24 +422,24 @@ public sealed class WorkflowExecutorTests
             TextWriter.Null);
 
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
-        var startRequest = Assert.Single(runner.ServiceStartRequests);
+        var startRequest = Assert.Single(runner.RuntimeStartRequests);
         var service = Assert.Single(startRequest.Services);
         Assert.Equal("postgres", service.Name);
         Assert.Equal("postgres:16", service.Image);
         Assert.Equal("postgres", service.Environment["POSTGRES_PASSWORD"]);
-        Assert.Equal(["5432:5432"], service.Ports);
+        Assert.Equal(new ContainerPortMapping(5432, 5432), Assert.Single(service.Ports));
         Assert.Equal(["--health-cmd=pg_isready"], service.Options);
         var serviceVolume = Assert.Single(service.Volumes);
         Assert.Equal(Path.Combine(projectRoot, "./db"), serviceVolume.HostPath);
         Assert.Equal("/var/lib/postgresql/data", serviceVolume.ContainerPath);
 
         var stepRequest = Assert.Single(runner.Requests);
-        Assert.NotNull(stepRequest.Services);
-        Assert.Equal("actio-test-network", stepRequest.Services.NetworkName);
+        Assert.NotNull(stepRequest.Runtime);
+        Assert.Equal("actio-test-network", stepRequest.Runtime.NetworkName);
         var dockerActionRequest = Assert.Single(runner.DockerActionRequests);
-        Assert.NotNull(dockerActionRequest.Services);
-        Assert.Equal("actio-test-network", dockerActionRequest.Services.NetworkName);
-        var stoppedNetwork = Assert.Single(runner.StoppedServiceNetworks);
+        Assert.NotNull(dockerActionRequest.Runtime);
+        Assert.Equal("actio-test-network", dockerActionRequest.Runtime.NetworkName);
+        var stoppedNetwork = Assert.Single(runner.StoppedRuntimes);
         Assert.Equal("actio-test-network", stoppedNetwork.NetworkName);
     }
 
@@ -415,7 +447,7 @@ public sealed class WorkflowExecutorTests
     public async Task ExecuteAsync_FailsJobWhenServiceStartupFails()
     {
         var runner = new FakeRunnerProvider(Array.Empty<int>());
-        runner.ServiceStartResult = ServiceContainerStartResult.Failed(["Service 'postgres' did not become healthy."]);
+        runner.RuntimeStartResult = JobRuntimeStartResult.Failed(["Service 'postgres' did not become healthy."]);
         var workflow = new WorkflowDocument(
             "CI",
             new Dictionary<string, string>(),
@@ -453,7 +485,7 @@ public sealed class WorkflowExecutorTests
         Assert.Equal(0, result.SuccessfulSteps);
         Assert.Equal(1, result.SkippedSteps);
         Assert.Empty(runner.Requests);
-        Assert.Empty(runner.StoppedServiceNetworks);
+        Assert.Empty(runner.StoppedRuntimes);
         Assert.Contains(result.Errors, error => error.Contains("did not become healthy", StringComparison.OrdinalIgnoreCase));
     }
 
@@ -947,6 +979,7 @@ public sealed class WorkflowExecutorTests
         Assert.Equal(3, result.TotalSteps);
         Assert.Equal(2, runner.Requests.Count);
         Assert.Contains(result.Errors, error => error.Contains("exit code 42", StringComparison.OrdinalIgnoreCase));
+        Assert.Single(runner.StoppedRuntimes);
     }
 
     [Fact]
@@ -1022,6 +1055,7 @@ public sealed class WorkflowExecutorTests
         Assert.Equal("TimedOut", job.Status);
         Assert.Equal(1, job.TimeoutMinutes);
         Assert.Equal("TimedOut", Assert.Single(job.Steps).Status);
+        Assert.Single(runner.StoppedRuntimes);
     }
 
     [Fact]
@@ -2629,6 +2663,7 @@ public sealed class WorkflowExecutorTests
             Assert.Equal("dist/index.js", request.Main);
             Assert.Equal("dist/pre.js", request.Pre);
             Assert.Equal("dist/post.js", request.Post);
+            Assert.NotNull(request.Runtime);
             Assert.Equal("Actio", request.Environment["INPUT_NAME"]);
             Assert.Equal("/actio/action", request.Environment["GITHUB_ACTION_PATH"]);
             var actionMount = Assert.Single(request.AdditionalMounts, mount => mount.ContainerPath == "/actio/action");
@@ -2698,6 +2733,7 @@ public sealed class WorkflowExecutorTests
             Assert.Equal($"actio/action:{cacheRequest.ContentHash}", request.Image);
             Assert.Equal(actionRoot, request.BuildContext);
             Assert.Equal(Path.Combine(actionRoot, "Dockerfile"), request.DockerfilePath);
+            Assert.NotNull(request.Runtime);
             Assert.Equal("Actio", request.Environment["INPUT_NAME"]);
             Assert.Equal("/actio/action", request.Environment["GITHUB_ACTION_PATH"]);
             var actionMount = Assert.Single(request.AdditionalMounts, mount => mount.ContainerPath == "/actio/action");
@@ -4655,40 +4691,40 @@ public sealed class WorkflowExecutorTests
 
         public List<JavaScriptActionExecutionRequest> JavaScriptActionRequests { get; } = [];
 
-        public List<ServiceContainerStartRequest> ServiceStartRequests { get; } = [];
+        public List<JobRuntimeStartRequest> RuntimeStartRequests { get; } = [];
 
-        public List<JobServiceNetwork> StoppedServiceNetworks { get; } = [];
+        public List<JobRuntimeContext> StoppedRuntimes { get; } = [];
 
         public RunnerSecurityMetadata SecurityMetadata { get; } = new(
             "fake",
             "test",
             "test");
 
-        public ServiceContainerStartResult? ServiceStartResult { get; set; }
+        public JobRuntimeStartResult? RuntimeStartResult { get; set; }
 
         public bool SupportsRunner(string runsOn)
         {
             return _supportsRunner;
         }
 
-        public Task<ServiceContainerStartResult> StartServiceContainersAsync(
-            ServiceContainerStartRequest request,
+        public Task<JobRuntimeStartResult> StartJobRuntimeAsync(
+            JobRuntimeStartRequest request,
             CancellationToken cancellationToken = default)
         {
-            ServiceStartRequests.Add(request);
+            RuntimeStartRequests.Add(request);
             return Task.FromResult(
-                ServiceStartResult ??
-                ServiceContainerStartResult.Started(new JobServiceNetwork(
+                RuntimeStartResult ??
+                JobRuntimeStartResult.Started(new JobRuntimeContext(
                     "actio-test-network",
                     request.Services.Select(service => $"actio-{service.Name}").ToArray())));
         }
 
-        public Task<ServiceContainerStopResult> StopServiceContainersAsync(
-            JobServiceNetwork network,
+        public Task<JobRuntimeStopResult> StopJobRuntimeAsync(
+            JobRuntimeContext runtime,
             CancellationToken cancellationToken = default)
         {
-            StoppedServiceNetworks.Add(network);
-            return Task.FromResult(new ServiceContainerStopResult([]));
+            StoppedRuntimes.Add(runtime);
+            return Task.FromResult(new JobRuntimeStopResult([]));
         }
 
         public Task<StepExecutionResult> ExecuteStepAsync(

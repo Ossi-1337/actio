@@ -1,3 +1,4 @@
+using Actio.Core.Workflows;
 using Actio.Engine.Execution;
 
 namespace Actio.Runner.Docker.Tests;
@@ -187,7 +188,7 @@ public sealed class DockerRunnerProviderTests
             },
             Container: new JobContainerExecutionOptions(
                 "node:22",
-                ["3000:3000"],
+                [new ContainerPortMapping(3000, 3000)],
                 ["--cpus", "1", "--init"],
                 [new StepExecutionMount(cachePath, "/cache", ReadOnly: true)]));
 
@@ -195,7 +196,7 @@ public sealed class DockerRunnerProviderTests
         var args = startInfo.ArgumentList.ToArray();
         var imageIndex = Array.IndexOf(args, "node:22");
 
-        Assert.Contains("3000:3000", args);
+        Assert.Contains("127.0.0.1:3000:3000/tcp", args);
         Assert.Contains("--cpus", args);
         Assert.Contains("1", args);
         Assert.Contains("--init", args);
@@ -209,7 +210,7 @@ public sealed class DockerRunnerProviderTests
     }
 
     [Fact]
-    public void CreateShellStepStartInfo_AttachesServiceNetwork()
+    public void CreateShellStepStartInfo_AttachesJobNetwork()
     {
         var request = new StepExecutionRequest(
             "test",
@@ -218,7 +219,7 @@ public sealed class DockerRunnerProviderTests
             "dotnet test",
             Directory.GetCurrentDirectory(),
             new Dictionary<string, string>(),
-            Services: new JobServiceNetwork("actio-test-network", ["actio-postgres"]));
+            Runtime: new JobRuntimeContext("actio-test-network", ["actio-postgres"]));
 
         var startInfo = DockerRunnerProvider.CreateShellStepStartInfo(request, "ubuntu:24.04", "actio-test");
         var args = startInfo.ArgumentList.ToArray();
@@ -229,7 +230,7 @@ public sealed class DockerRunnerProviderTests
     }
 
     [Fact]
-    public void CreateDockerActionStartInfo_AttachesServiceNetwork()
+    public void CreateDockerActionStartInfo_AttachesJobNetwork()
     {
         var request = new DockerActionExecutionRequest(
             "test",
@@ -237,7 +238,7 @@ public sealed class DockerRunnerProviderTests
             "alpine:3.20",
             Directory.GetCurrentDirectory(),
             new Dictionary<string, string>(),
-            Services: new JobServiceNetwork("actio-test-network", ["actio-postgres"]));
+            Runtime: new JobRuntimeContext("actio-test-network", ["actio-postgres"]));
 
         var startInfo = DockerRunnerProvider.CreateDockerActionStartInfo(request, "actio-test");
         var args = startInfo.ArgumentList.ToArray();
@@ -245,6 +246,58 @@ public sealed class DockerRunnerProviderTests
 
         Assert.True(networkIndex >= 0);
         Assert.Equal("actio-test-network", args[networkIndex + 1]);
+    }
+
+    [Fact]
+    public void CreateJavaScriptActionStartInfo_AttachesJobNetwork()
+    {
+        var actionPath = Path.Combine(Directory.GetCurrentDirectory(), "action");
+        Directory.CreateDirectory(actionPath);
+        var request = new JavaScriptActionExecutionRequest(
+            "test",
+            "Use JavaScript",
+            Directory.GetCurrentDirectory(),
+            actionPath,
+            "dist/index.js",
+            new Dictionary<string, string>(),
+            Runtime: new JobRuntimeContext("actio-test-network", []));
+
+        var startInfo = DockerRunnerProvider.CreateJavaScriptActionStartInfo(
+            request,
+            "dist/index.js",
+            "actio-test");
+        var args = startInfo.ArgumentList.ToArray();
+        var networkIndex = Array.IndexOf(args, "--network");
+
+        Assert.True(networkIndex >= 0);
+        Assert.Equal("actio-test-network", args[networkIndex + 1]);
+    }
+
+    [Fact]
+    public void CreateNetworkCreateStartInfo_UsesScopedOutboundBridgeWithLoopbackDefault()
+    {
+        var startInfo = DockerRunnerProvider.CreateNetworkCreateStartInfo("test", "actio-test-network");
+        var args = startInfo.ArgumentList.ToArray();
+
+        Assert.Contains("--driver", args);
+        Assert.Contains("bridge", args);
+        Assert.Contains("com.docker.network.bridge.host_binding_ipv4=127.0.0.1", args);
+        Assert.DoesNotContain("--internal", args);
+        Assert.Equal("actio-test-network", args[^1]);
+    }
+
+    [Theory]
+    [InlineData(8080, null, "tcp", "127.0.0.1::8080/tcp")]
+    [InlineData(53, 5353, "udp", "127.0.0.1:5353:53/udp")]
+    public void FormatPublishedPort_AlwaysUsesIpv4Loopback(
+        int containerPort,
+        int? hostPort,
+        string protocol,
+        string expected)
+    {
+        Assert.Equal(
+            expected,
+            DockerRunnerProvider.FormatPublishedPort(new ContainerPortMapping(containerPort, hostPort, protocol)));
     }
 
     [Fact]
@@ -259,12 +312,13 @@ public sealed class DockerRunnerProviderTests
             {
                 ["POSTGRES_PASSWORD"] = "postgres"
             },
-            ["5432:5432"],
+            [new ContainerPortMapping(5432, 5432)],
             ["--health-cmd=pg_isready", "--health-interval=5s"],
             [new StepExecutionMount(dbPath, "/var/lib/postgresql/data", ReadOnly: false)]);
-        var request = new ServiceContainerStartRequest(
+        var request = new JobRuntimeStartRequest(
             "test",
             Directory.GetCurrentDirectory(),
+            [],
             [service]);
 
         var startInfo = DockerRunnerProvider.CreateServiceContainerStartInfo(
@@ -280,7 +334,7 @@ public sealed class DockerRunnerProviderTests
         Assert.Contains("actio-postgres", args);
         Assert.Contains("actio-test-network", args);
         Assert.Contains("postgres", args);
-        Assert.Contains("5432:5432", args);
+        Assert.Contains("127.0.0.1:5432:5432/tcp", args);
         Assert.Contains("--health-cmd=pg_isready", args);
         Assert.Contains("--health-interval=5s", args);
         Assert.Contains($"type=bind,src={Path.GetFullPath(dbPath)},dst=/var/lib/postgresql/data", args);
@@ -415,6 +469,14 @@ public sealed class DockerRunnerProviderTests
     [InlineData("--cgroupns=host")]
     [InlineData("--userns=host")]
     [InlineData("--network=host")]
+    [InlineData("--network-alias=database")]
+    [InlineData("--link=database")]
+    [InlineData("--ip=172.20.0.2")]
+    [InlineData("--publish=8080:80")]
+    [InlineData("-p")]
+    [InlineData("--publish-all")]
+    [InlineData("-P")]
+    [InlineData("--expose=80")]
     [InlineData("--security-opt=seccomp=unconfined")]
     [InlineData("--mount")]
     [InlineData("--volume")]
@@ -432,6 +494,60 @@ public sealed class DockerRunnerProviderTests
         Assert.NotNull(error);
         Assert.Contains("secure-baseline", error, StringComparison.Ordinal);
         Assert.Contains(option.Split('=')[0], error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PortLeaseManager_BlocksParallelFixedPortReuseAndReleasesLease()
+    {
+        var manager = new DockerPortLeaseManager();
+        var port = new ContainerPortMapping(80, 8080);
+
+        Assert.True(manager.TryAcquire("first", [port], out var firstError), firstError);
+        Assert.False(manager.TryAcquire("second", [port], out var conflict));
+        Assert.Contains("job 'first' already reserved it", conflict, StringComparison.Ordinal);
+
+        manager.Release("first", [port]);
+
+        Assert.True(manager.TryAcquire("second", [port], out var secondError), secondError);
+    }
+
+    [Fact]
+    public void PortLeaseManager_DoesNotReleaseLeaseOwnedByAnotherJob()
+    {
+        var manager = new DockerPortLeaseManager();
+        var port = new ContainerPortMapping(80, 8080);
+
+        Assert.True(manager.TryAcquire("first", [port], out var firstError), firstError);
+
+        manager.Release("stale", [port]);
+
+        Assert.False(manager.TryAcquire("second", [port], out var conflict));
+        Assert.Contains("job 'first' already reserved it", conflict, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PortLeaseManager_TreatsTcpAndUdpAsSeparateBindings()
+    {
+        var manager = new DockerPortLeaseManager();
+
+        Assert.True(manager.TryAcquire("tcp", [new ContainerPortMapping(80, 8080)], out var tcpError), tcpError);
+        Assert.True(
+            manager.TryAcquire(
+                "udp",
+                [new ContainerPortMapping(80, 8080, ContainerPortMapping.UdpProtocol)],
+                out var udpError),
+            udpError);
+    }
+
+    [Fact]
+    public void PortLeaseManager_RejectsDuplicatePortsWithinJobWithoutLeakingLeases()
+    {
+        var manager = new DockerPortLeaseManager();
+        var port = new ContainerPortMapping(80, 8080);
+
+        Assert.False(manager.TryAcquire("duplicate", [port, port], out var duplicateError));
+        Assert.Contains("duplicate fixed loopback port", duplicateError, StringComparison.Ordinal);
+        Assert.True(manager.TryAcquire("next", [port], out var nextError), nextError);
     }
 
     [Theory]
@@ -467,6 +583,46 @@ public sealed class DockerRunnerProviderTests
         Assert.Equal("writable", metadata.RootFilesystemPolicy);
         Assert.Equal("read-write-with-protected-value-file-masks", metadata.WorkspacePolicy);
         Assert.Contains("/workspace/.actio/secrets.env", metadata.ProtectedPaths);
+        Assert.Equal("per-job-user-defined-bridge-with-outbound", metadata.NetworkPolicy);
+        Assert.Equal("ipv4-loopback-only", metadata.PublishedPortPolicy);
+    }
+
+    [Fact]
+    public void CreateNetworkObservation_RecordsServicesAndLoopbackPortPolicy()
+    {
+        var request = new JobRuntimeStartRequest(
+            "test",
+            Directory.GetCurrentDirectory(),
+            [new ContainerPortMapping(8080)],
+            [
+                new ServiceContainerDefinition(
+                    "postgres",
+                    "postgres:16",
+                    new Dictionary<string, string>(),
+                    [new ContainerPortMapping(5432, 15432)])
+            ]);
+
+        var observation = DockerRunnerProvider.CreateNetworkObservation(request, "actio-test-network");
+
+        Assert.Equal("test", observation.JobName);
+        Assert.Equal("user-defined-bridge", observation.Mode);
+        Assert.True(observation.OutboundAllowed);
+        Assert.False(observation.Internal);
+        Assert.Equal(["postgres"], observation.ServiceAliases);
+        Assert.Collection(
+            observation.PublishedPorts,
+            port =>
+            {
+                Assert.Equal("job-container", port.Surface);
+                Assert.Equal("127.0.0.1", port.BindAddress);
+                Assert.Equal("dynamic", port.Assignment);
+            },
+            port =>
+            {
+                Assert.Equal("service:postgres", port.Surface);
+                Assert.Equal(15432, port.HostPort);
+                Assert.Equal("fixed", port.Assignment);
+            });
     }
 
     [Theory]

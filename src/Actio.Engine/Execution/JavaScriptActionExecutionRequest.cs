@@ -8,7 +8,7 @@ public sealed record JavaScriptActionExecutionRequest(
     string Main,
     IReadOnlyDictionary<string, string> Environment,
     IReadOnlyList<StepExecutionMount>? AdditionalMounts = null,
-    JobServiceNetwork? Services = null,
+    JobRuntimeContext? Runtime = null,
     string? Pre = null,
     string? Post = null)
 {

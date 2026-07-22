@@ -23,7 +23,9 @@ internal static class DockerRuntimeSecurityPolicy
         "writable",
         "read-write-with-protected-value-file-masks",
         "canonical-existing-bind-sources-only",
-        ["/workspace/.actio/secrets.env", "/workspace/.actio/vars.env"]);
+        ["/workspace/.actio/secrets.env", "/workspace/.actio/vars.env"],
+        NetworkPolicy: "per-job-user-defined-bridge-with-outbound",
+        PublishedPortPolicy: "ipv4-loopback-only");
 
     internal static void AddRuntimeArguments(ProcessStartInfo startInfo)
     {

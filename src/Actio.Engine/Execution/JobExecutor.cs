@@ -85,7 +85,7 @@ internal sealed class JobExecutor
         var currentStepIndex = -1;
         WorkflowStep? currentStep = null;
         DateTimeOffset? currentStepStartedAt = null;
-        JobServiceNetwork? serviceNetwork = null;
+        JobRuntimeContext? serviceNetwork = null;
         var servicesStopped = false;
 
         foreach (var secret in workflowSecrets.Values)
@@ -102,7 +102,7 @@ internal sealed class JobExecutor
 
         try
         {
-            var serviceStart = await StartServiceContainersAsync(job, projectRoot, output, jobCancellationToken);
+            var serviceStart = await StartJobRuntimeAsync(job, projectRoot, output, jobCancellationToken);
             if (!serviceStart.Success)
             {
                 errors.AddRange(serviceStart.Errors);
@@ -115,7 +115,7 @@ internal sealed class JobExecutor
                 output.WriteLine($"warning: {warning}");
             }
 
-            serviceNetwork = serviceStart.Network;
+            serviceNetwork = serviceStart.Runtime;
 
             for (var index = 0; index < job.Steps.Count; index++)
             {
@@ -339,7 +339,7 @@ internal sealed class JobExecutor
             stepRecords.AddRange(CreateSkippedStepRecords(remainingSteps));
             skippedSteps += remainingSteps.Length;
 
-            await StopServiceContainersAsync(serviceNetwork, errors, CancellationToken.None);
+            await StopJobRuntimeAsync(serviceNetwork, errors, CancellationToken.None);
             servicesStopped = true;
 
             return CompleteJob(
@@ -359,7 +359,7 @@ internal sealed class JobExecutor
         {
             if (!servicesStopped)
             {
-                await StopServiceContainersAsync(serviceNetwork, errors, CancellationToken.None);
+                await StopJobRuntimeAsync(serviceNetwork, errors, CancellationToken.None);
             }
         }
 
@@ -428,28 +428,28 @@ internal sealed class JobExecutor
         return $"workflow.jobs.{jobName}.steps.{stepName} timed out after {timeoutMinutes} minute(s).";
     }
 
-    private async Task<ServiceContainerStartResult> StartServiceContainersAsync(
+    private async Task<JobRuntimeStartResult> StartJobRuntimeAsync(
         WorkflowJob job,
         string projectRoot,
         TextWriter output,
         CancellationToken cancellationToken)
     {
-        if (job.Services.Count == 0)
+        if (job.Services.Count > 0)
         {
-            return ServiceContainerStartResult.Started(null);
+            output.WriteLine($"[{job.DisplayName}] Starting service containers");
         }
 
-        output.WriteLine($"[{job.DisplayName}] Starting service containers");
-        return await _runnerProvider.StartServiceContainersAsync(
-            new ServiceContainerStartRequest(
+        return await _runnerProvider.StartJobRuntimeAsync(
+            new JobRuntimeStartRequest(
                 job.Name,
                 projectRoot,
+                job.Container?.Ports ?? [],
                 CreateServiceDefinitions(job, projectRoot)),
             cancellationToken);
     }
 
-    private async Task StopServiceContainersAsync(
-        JobServiceNetwork? serviceNetwork,
+    private async Task StopJobRuntimeAsync(
+        JobRuntimeContext? serviceNetwork,
         List<string> errors,
         CancellationToken cancellationToken)
     {
@@ -458,7 +458,7 @@ internal sealed class JobExecutor
             return;
         }
 
-        var stopResult = await _runnerProvider.StopServiceContainersAsync(serviceNetwork, cancellationToken);
+        var stopResult = await _runnerProvider.StopJobRuntimeAsync(serviceNetwork, cancellationToken);
         errors.AddRange(stopResult.Errors);
     }
 
@@ -484,7 +484,7 @@ internal sealed class JobExecutor
         RunFilesystemIsolation filesystemIsolation,
         WorkflowRunTrigger runTrigger,
         IReadOnlyDictionary<string, string> stepStatuses,
-        JobServiceNetwork? serviceNetwork,
+        JobRuntimeContext? serviceNetwork,
         TextWriter output,
         TextWriter error,
         CancellationToken cancellationToken)
@@ -768,7 +768,7 @@ internal sealed class JobExecutor
         string projectRoot,
         string runId,
         RunFilesystemIsolation filesystemIsolation,
-        JobServiceNetwork? serviceNetwork,
+        JobRuntimeContext? serviceNetwork,
         StepOutputCollector collector,
         CancellationToken cancellationToken)
     {
@@ -1154,7 +1154,7 @@ internal sealed class JobExecutor
         string projectRoot,
         string runId,
         RunFilesystemIsolation filesystemIsolation,
-        JobServiceNetwork? serviceNetwork,
+        JobRuntimeContext? serviceNetwork,
         StepOutputCollector collector,
         CancellationToken cancellationToken)
     {
@@ -1266,7 +1266,7 @@ internal sealed class JobExecutor
         string projectRoot,
         string runId,
         RunFilesystemIsolation filesystemIsolation,
-        JobServiceNetwork? serviceNetwork,
+        JobRuntimeContext? serviceNetwork,
         StepOutputCollector collector,
         CancellationToken cancellationToken)
     {
@@ -1333,7 +1333,7 @@ internal sealed class JobExecutor
         string projectRoot,
         string runId,
         RunFilesystemIsolation filesystemIsolation,
-        JobServiceNetwork? serviceNetwork,
+        JobRuntimeContext? serviceNetwork,
         StepOutputCollector collector,
         CancellationToken cancellationToken)
     {

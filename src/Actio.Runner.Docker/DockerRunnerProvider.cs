@@ -18,6 +18,8 @@ public sealed class DockerRunnerProvider : IRunnerProvider
     private readonly ConcurrentDictionary<string, RunnerImageUserObservation> _imageUserObservations = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, (string ConfiguredUser, string Status)> _imageUsers = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _warnedRootImages = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, RunnerNetworkObservation> _networkObservations = new(StringComparer.Ordinal);
+    private readonly DockerPortLeaseManager _portLeases = new();
 
     public DockerRunnerProvider()
         : this(new DockerImageResolver())
@@ -43,10 +45,20 @@ public sealed class DockerRunnerProvider : IRunnerProvider
                 degraded.Add("one-or-more-image-users-not-evaluated");
             }
 
+            var networkObservations = _networkObservations.Values
+                .OrderBy(item => item.JobName, StringComparer.Ordinal)
+                .ThenBy(item => item.NetworkName, StringComparer.Ordinal)
+                .ToArray();
+            if (networkObservations.Any(item => item.PublishedPorts.Count > 0))
+            {
+                degraded.Add("published-port-daemon-routing-not-verified");
+            }
+
             return DockerRuntimeSecurityPolicy.Metadata with
             {
                 DegradedControls = degraded,
-                ImageUserObservations = observations
+                ImageUserObservations = observations,
+                NetworkObservations = networkObservations
             };
         }
     }
@@ -56,15 +68,10 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         return _imageResolver.TryResolveImage(runsOn, out _);
     }
 
-    public async Task<ServiceContainerStartResult> StartServiceContainersAsync(
-        ServiceContainerStartRequest request,
+    public async Task<JobRuntimeStartResult> StartJobRuntimeAsync(
+        JobRuntimeStartRequest request,
         CancellationToken cancellationToken = default)
     {
-        if (request.Services.Count == 0)
-        {
-            return ServiceContainerStartResult.Started(null);
-        }
-
         foreach (var service in request.Services)
         {
             var policyError = DockerRuntimeSecurityPolicy.Validate(
@@ -73,7 +80,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
                 $"service '{service.Name}'");
             if (policyError is not null)
             {
-                return ServiceContainerStartResult.Failed([policyError]);
+                return JobRuntimeStartResult.Failed([policyError]);
             }
 
             var filesystemError = DockerRuntimeSecurityPolicy.ValidateFilesystem(
@@ -82,14 +89,24 @@ public sealed class DockerRunnerProvider : IRunnerProvider
                 $"service '{service.Name}'");
             if (filesystemError is not null)
             {
-                return ServiceContainerStartResult.Failed([filesystemError]);
+                return JobRuntimeStartResult.Failed([filesystemError]);
             }
         }
 
         var errors = new List<string>();
         var warnings = new List<string>();
         var containerNames = new List<string>();
+        var reservedPorts = request.JobContainerPorts
+            .Concat(request.Services.SelectMany(service => service.Ports))
+            .Where(port => port.HostPort is not null)
+            .ToArray();
+        if (!_portLeases.TryAcquire(request.JobName, reservedPorts, out var leaseError))
+        {
+            return JobRuntimeStartResult.Failed([leaseError!]);
+        }
+
         var networkName = CreateNetworkName(request.JobName);
+        var runtime = new JobRuntimeContext(networkName, containerNames, reservedPorts, request.JobName);
 
         try
         {
@@ -99,9 +116,12 @@ public sealed class DockerRunnerProvider : IRunnerProvider
 
             if (!networkResult.Success)
             {
-                return ServiceContainerStartResult.Failed(
-                    [FormatDockerCommandError($"creating service network for job '{request.JobName}'", networkResult)]);
+                _portLeases.Release(request.JobName, reservedPorts);
+                return JobRuntimeStartResult.Failed(
+                    [FormatDockerCommandError($"creating job network for job '{request.JobName}'", networkResult)]);
             }
+
+            _networkObservations[networkName] = CreateNetworkObservation(request, networkName);
 
             foreach (var service in request.Services)
             {
@@ -135,47 +155,60 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         }
         catch (OperationCanceledException)
         {
-            await StopServiceContainersAsync(new JobServiceNetwork(networkName, containerNames), CancellationToken.None);
+            await StopJobRuntimeAsync(runtime, CancellationToken.None);
+            throw;
+        }
+        catch
+        {
+            await StopJobRuntimeAsync(runtime, CancellationToken.None);
             throw;
         }
 
         if (errors.Count > 0)
         {
-            var stopResult = await StopServiceContainersAsync(
-                new JobServiceNetwork(networkName, containerNames),
-                CancellationToken.None);
+            var stopResult = await StopJobRuntimeAsync(runtime, CancellationToken.None);
             errors.AddRange(stopResult.Errors);
-            return ServiceContainerStartResult.Failed(errors);
+            return JobRuntimeStartResult.Failed(errors);
         }
 
-        return ServiceContainerStartResult.Started(new JobServiceNetwork(networkName, containerNames), warnings);
+        return JobRuntimeStartResult.Started(runtime, warnings);
     }
 
-    public async Task<ServiceContainerStopResult> StopServiceContainersAsync(
-        JobServiceNetwork network,
+    public async Task<JobRuntimeStopResult> StopJobRuntimeAsync(
+        JobRuntimeContext runtime,
         CancellationToken cancellationToken = default)
     {
         var errors = new List<string>();
-        foreach (var containerName in network.ContainerNames)
+        try
         {
-            var removeResult = await RunDockerCommandAsync(
-                CreateContainerRemoveStartInfo(containerName),
-                cancellationToken);
-            if (!removeResult.Success)
+            foreach (var containerName in runtime.ServiceContainerNames)
             {
-                errors.Add(FormatDockerCommandError($"removing service container '{containerName}'", removeResult));
+                var removeResult = await RunDockerCommandAsync(
+                    CreateContainerRemoveStartInfo(containerName),
+                    cancellationToken);
+                if (!removeResult.Success)
+                {
+                    errors.Add(FormatDockerCommandError($"removing service container '{containerName}'", removeResult));
+                }
+            }
+
+            var networkRemoveResult = await RunDockerCommandAsync(
+                CreateNetworkRemoveStartInfo(runtime.NetworkName),
+                cancellationToken);
+            if (!networkRemoveResult.Success)
+            {
+                errors.Add(FormatDockerCommandError($"removing job network '{runtime.NetworkName}'", networkRemoveResult));
+            }
+        }
+        finally
+        {
+            if (runtime.PortLeaseOwner is not null)
+            {
+                _portLeases.Release(runtime.PortLeaseOwner, runtime.ReservedPorts);
             }
         }
 
-        var networkRemoveResult = await RunDockerCommandAsync(
-            CreateNetworkRemoveStartInfo(network.NetworkName),
-            cancellationToken);
-        if (!networkRemoveResult.Success)
-        {
-            errors.Add(FormatDockerCommandError($"removing service network '{network.NetworkName}'", networkRemoveResult));
-        }
-
-        return new ServiceContainerStopResult(errors);
+        return new JobRuntimeStopResult(errors);
     }
 
     public async Task<StepExecutionResult> ExecuteStepAsync(
@@ -343,7 +376,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
                 request.ProjectRoot,
                 request.Environment,
                 request.AdditionalMounts,
-                request.Services,
+                request.Runtime,
                 request.EntryPoint,
                 request.Arguments),
             output,
@@ -517,7 +550,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             request.WorkingDirectory,
             request.AdditionalMounts,
             request.Container,
-            request.Services);
+            request.Runtime);
         AddShellInvocation(startInfo, image, request.Shell, request.Command);
 
         return startInfo;
@@ -536,7 +569,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             null,
             request.AdditionalMounts,
             null,
-            request.Services);
+            request.Runtime);
         if (!string.IsNullOrWhiteSpace(request.EntryPoint))
         {
             startInfo.ArgumentList.Add("--entrypoint");
@@ -585,7 +618,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             null,
             request.AdditionalMounts,
             null,
-            request.Services);
+            request.Runtime);
 
         startInfo.ArgumentList.Add(JavaScriptActionNodeImage);
         startInfo.ArgumentList.Add("node");
@@ -595,7 +628,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
     }
 
     internal static ProcessStartInfo CreateServiceContainerStartInfo(
-        ServiceContainerStartRequest request,
+        JobRuntimeStartRequest request,
         ServiceContainerDefinition service,
         string networkName,
         string containerName)
@@ -628,8 +661,8 @@ public sealed class DockerRunnerProvider : IRunnerProvider
 
         foreach (var port in service.Ports)
         {
-            startInfo.ArgumentList.Add("-p");
-            startInfo.ArgumentList.Add(port);
+            startInfo.ArgumentList.Add("--publish");
+            startInfo.ArgumentList.Add(FormatPublishedPort(port));
         }
 
         foreach (var option in service.Options)
@@ -661,7 +694,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         string? workingDirectory,
         IReadOnlyList<StepExecutionMount>? additionalMounts,
         JobContainerExecutionOptions? container,
-        JobServiceNetwork? services)
+        JobRuntimeContext? runtime)
     {
         var mounts = (container?.Volumes ?? []).Concat(additionalMounts ?? []);
         DockerRuntimeSecurityPolicy.ThrowIfDenied(
@@ -687,16 +720,16 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         startInfo.ArgumentList.Add($"actio.step={stepName}");
         DockerRuntimeSecurityPolicy.AddRuntimeArguments(startInfo);
 
-        if (services is not null)
+        if (runtime is not null)
         {
             startInfo.ArgumentList.Add("--network");
-            startInfo.ArgumentList.Add(services.NetworkName);
+            startInfo.ArgumentList.Add(runtime.NetworkName);
         }
 
         foreach (var port in container?.Ports ?? [])
         {
-            startInfo.ArgumentList.Add("-p");
-            startInfo.ArgumentList.Add(port);
+            startInfo.ArgumentList.Add("--publish");
+            startInfo.ArgumentList.Add(FormatPublishedPort(port));
         }
 
         foreach (var option in container?.Options ?? [])
@@ -832,11 +865,15 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             """;
     }
 
-    private static ProcessStartInfo CreateNetworkCreateStartInfo(string jobName, string networkName)
+    internal static ProcessStartInfo CreateNetworkCreateStartInfo(string jobName, string networkName)
     {
         var startInfo = CreateDockerStartInfo();
         startInfo.ArgumentList.Add("network");
         startInfo.ArgumentList.Add("create");
+        startInfo.ArgumentList.Add("--driver");
+        startInfo.ArgumentList.Add("bridge");
+        startInfo.ArgumentList.Add("--opt");
+        startInfo.ArgumentList.Add("com.docker.network.bridge.host_binding_ipv4=127.0.0.1");
         startInfo.ArgumentList.Add("--label");
         startInfo.ArgumentList.Add("actio=true");
         startInfo.ArgumentList.Add("--label");
@@ -853,6 +890,35 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         startInfo.ArgumentList.Add(networkName);
         return startInfo;
     }
+
+    internal static string FormatPublishedPort(ContainerPortMapping port)
+    {
+        var hostPort = port.HostPort?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
+        return $"127.0.0.1:{hostPort}:{port.ContainerPort}/{port.Protocol}";
+    }
+
+    internal static RunnerNetworkObservation CreateNetworkObservation(
+        JobRuntimeStartRequest request,
+        string networkName)
+    {
+        var ports = request.JobContainerPorts
+            .Select(port => ToPublishedPort("job-container", port))
+            .Concat(request.Services.SelectMany(service =>
+                service.Ports.Select(port => ToPublishedPort($"service:{service.Name}", port))))
+            .ToArray();
+
+        return new RunnerNetworkObservation(
+            request.JobName,
+            networkName,
+            "user-defined-bridge",
+            OutboundAllowed: true,
+            Internal: false,
+            request.Services.Select(service => service.Name).OrderBy(name => name, StringComparer.Ordinal).ToArray(),
+            ports);
+    }
+
+    private static RunnerPublishedPort ToPublishedPort(string surface, ContainerPortMapping port)
+        => new(surface, "127.0.0.1", port.ContainerPort, port.HostPort, port.Protocol);
 
     private static ProcessStartInfo CreateContainerRemoveStartInfo(string containerName)
     {
@@ -1181,4 +1247,5 @@ public sealed class DockerRunnerProvider : IRunnerProvider
     {
         public bool Success => ExitCode == 0;
     }
+
 }

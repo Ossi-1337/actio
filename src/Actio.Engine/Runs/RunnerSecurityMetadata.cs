@@ -14,7 +14,10 @@ public sealed record RunnerSecurityMetadata(
     string WorkspacePolicy = "not-reported",
     string MountPolicy = "not-reported",
     IReadOnlyList<string>? ProtectedPaths = null,
-    IReadOnlyList<RunnerImageUserObservation>? ImageUserObservations = null)
+    IReadOnlyList<RunnerImageUserObservation>? ImageUserObservations = null,
+    string NetworkPolicy = "not-reported",
+    string PublishedPortPolicy = "not-reported",
+    IReadOnlyList<RunnerNetworkObservation>? NetworkObservations = null)
 {
     public IReadOnlyList<string> AppliedSecurityOptions { get; init; } = AppliedSecurityOptions ?? [];
 
@@ -23,4 +26,6 @@ public sealed record RunnerSecurityMetadata(
     public IReadOnlyList<string> ProtectedPaths { get; init; } = ProtectedPaths ?? [];
 
     public IReadOnlyList<RunnerImageUserObservation> ImageUserObservations { get; init; } = ImageUserObservations ?? [];
+
+    public IReadOnlyList<RunnerNetworkObservation> NetworkObservations { get; init; } = NetworkObservations ?? [];
 }

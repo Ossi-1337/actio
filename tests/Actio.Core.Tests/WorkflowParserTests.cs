@@ -533,7 +533,7 @@ public sealed class WorkflowParserTests
         Assert.NotNull(container);
         Assert.Equal("node:22", container.Image);
         Assert.Equal("test", container.Env["NODE_ENV"]);
-        Assert.Equal(["3000:3000"], container.Ports);
+        Assert.Equal(new ContainerPortMapping(3000, 3000), Assert.Single(container.Ports));
         var volume = Assert.Single(container.Volumes);
         Assert.Equal("./.actio/cache", volume.Source);
         Assert.Equal("/cache", volume.Target);
@@ -561,6 +561,90 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
+    public void Parse_NormalizesSecureContainerPortMappings()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                container:
+                  image: nginx:latest
+                  ports:
+                    - 8080/tcp
+                    - 5353:53/UDP
+                steps:
+                  - name: Ready
+                    run: echo ready
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal(
+            [
+                new ContainerPortMapping(8080),
+                new ContainerPortMapping(53, 5353, ContainerPortMapping.UdpProtocol)
+            ],
+            result.Workflow!.Jobs["test"].Container!.Ports);
+    }
+
+    [Theory]
+    [InlineData("0", "container port must be between")]
+    [InlineData("65536", "container port must be between")]
+    [InlineData("70000:80", "host port must be between")]
+    [InlineData("8080:0", "container port must be between")]
+    [InlineData("80:80", "is privileged")]
+    [InlineData("127.0.0.1:8080:80", "cannot specify a host IP")]
+    [InlineData("8000-8002:80-82", "does not support port ranges")]
+    [InlineData("8080:80/sctp", "protocol must be tcp or udp")]
+    [InlineData("8080:80/tcp/extra", "invalid port protocol")]
+    public void Parse_RejectsUnsafeOrUnsupportedContainerPortMappings(string mapping, string expectedError)
+    {
+        var result = Parse(
+            $$"""
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                container:
+                  image: nginx:latest
+                  ports:
+                    - "{{mapping}}"
+                steps:
+                  - name: Ready
+                    run: echo ready
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error.Contains(expectedError, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Parse_RejectsDuplicateContainerPortMappingsAndFixedHostPorts()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                container:
+                  image: nginx:latest
+                  ports:
+                    - 8080:80
+                    - 8080:80
+                    - 8080:81
+                steps:
+                  - name: Ready
+                    run: echo ready
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error => error.Contains("duplicates port mapping", StringComparison.Ordinal));
+        Assert.Contains(result.Errors, error => error.Contains("reuses fixed host port 8080/tcp", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Parse_RejectsUnsafeJobContainerValues()
     {
         var result = Parse(
@@ -578,7 +662,7 @@ public sealed class WorkflowParserTests
                     - ./cache:cache
                     - ./state:/actio/env
                     - ./cache:/cache:shared
-                  options: --privileged --use-api-socket --cpus --memory=
+                  options: --privileged --use-api-socket --publish=8080:80 --cpus --memory=
                   credentials:
                     username: oskar
                 steps:
@@ -590,7 +674,7 @@ public sealed class WorkflowParserTests
         Assert.Contains(result.Errors, error => error == "workflow.jobs.test.container.image is required.");
         Assert.Contains(result.Errors, error => error == "workflow.jobs.test.container.env must be a mapping.");
         Assert.Contains(result.Errors, error => error == "workflow.jobs.test.container.credentials is not supported.");
-        Assert.Contains(result.Errors, error => error.Contains("invalid Docker port mapping", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("must use '<container-port>", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, error => error.Contains("source must be a relative path inside the workspace", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, error => error.Contains("target must be an absolute container path outside /actio/env", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, error => error.Contains("mode must be ro or rw", StringComparison.OrdinalIgnoreCase));
@@ -598,6 +682,8 @@ public sealed class WorkflowParserTests
             error.Contains("Docker option '--privileged' is blocked by secure-baseline", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, error =>
             error.Contains("Docker option '--use-api-socket' is blocked by secure-baseline", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error =>
+            error.Contains("Docker option '--publish' is blocked by secure-baseline", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, error => error.Contains("option '--cpus' requires a value", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, error => error.Contains("option '--memory' requires a value", StringComparison.OrdinalIgnoreCase));
     }
@@ -631,7 +717,7 @@ public sealed class WorkflowParserTests
         Assert.Equal("postgres", service.Key);
         Assert.Equal("postgres:16", service.Value.Image);
         Assert.Equal("postgres", service.Value.Env["POSTGRES_PASSWORD"]);
-        Assert.Equal(["5432:5432"], service.Value.Ports);
+        Assert.Equal(new ContainerPortMapping(5432, 5432), Assert.Single(service.Value.Ports));
         var volume = Assert.Single(service.Value.Volumes);
         Assert.Equal("./db", volume.Source);
         Assert.Equal("/var/lib/postgresql/data", volume.Target);
@@ -675,7 +761,7 @@ public sealed class WorkflowParserTests
         Assert.Contains(result.Errors, error => error == "workflow.jobs.test.services must be a mapping.");
         Assert.Contains(result.Errors, error => error == "workflow.jobs.unsafe.services.-bad must use a Docker-safe service name.");
         Assert.Contains(result.Errors, error => error == "workflow.jobs.unsafe.services.redis.image is required.");
-        Assert.Contains(result.Errors, error => error.Contains("invalid Docker port mapping", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("must use '<container-port>", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, error => error.Contains("source must be a relative path inside the workspace", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, error =>
             error.Contains("Docker option '--network' is blocked by secure-baseline", StringComparison.OrdinalIgnoreCase));
