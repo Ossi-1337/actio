@@ -11,7 +11,8 @@ public sealed record DockerfileActionExecutionRequest(
     IReadOnlyList<StepExecutionMount>? AdditionalMounts = null,
     JobServiceNetwork? Services = null,
     string? EntryPoint = null,
-    IReadOnlyList<string>? Arguments = null)
+    IReadOnlyList<string>? Arguments = null,
+    string? BuildContextStagingRoot = null)
 {
     public IReadOnlyList<StepExecutionMount> AdditionalMounts { get; init; } = AdditionalMounts ?? [];
 

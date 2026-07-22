@@ -4,6 +4,8 @@ namespace Actio.Engine.Runs;
 
 public interface IRunStore
 {
+    string? ActioHomePath => null;
+
     string CreateRunId();
 
     Task<RunStoragePaths> InitializeRunAsync(string runId, CancellationToken cancellationToken = default);

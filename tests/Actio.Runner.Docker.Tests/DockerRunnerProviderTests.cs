@@ -47,19 +47,20 @@ public sealed class DockerRunnerProviderTests
     public void CreateDockerActionStartInfo_AddsAdditionalWritableMounts()
     {
         var envFilePath = Path.Combine(Directory.GetCurrentDirectory(), "env-files");
+        Directory.CreateDirectory(envFilePath);
         var request = new DockerActionExecutionRequest(
             "test",
             "Use image",
             "alpine:3.20",
             Directory.GetCurrentDirectory(),
             new Dictionary<string, string>(),
-            [new StepExecutionMount(envFilePath, "/actio/env", ReadOnly: false)]);
+            [new StepExecutionMount(envFilePath, "/actio/env", ReadOnly: false, StepExecutionMountKind.EnvironmentFiles)]);
 
         var startInfo = DockerRunnerProvider.CreateDockerActionStartInfo(request, "actio-test");
         var args = startInfo.ArgumentList.ToArray();
 
-        Assert.Contains("-v", args);
-        Assert.Contains($"{Path.GetFullPath(envFilePath)}:/actio/env", args);
+        Assert.Contains("--mount", args);
+        Assert.Contains($"type=bind,src={Path.GetFullPath(envFilePath)},dst=/actio/env", args);
     }
 
     [Fact]
@@ -120,6 +121,7 @@ public sealed class DockerRunnerProviderTests
     public void CreateJavaScriptActionStartInfo_RunsNode20WithActionScript()
     {
         var actionPath = Path.Combine(Directory.GetCurrentDirectory(), "cached-action");
+        Directory.CreateDirectory(actionPath);
         var request = new JavaScriptActionExecutionRequest(
             "test",
             "Use JavaScript action",
@@ -130,7 +132,7 @@ public sealed class DockerRunnerProviderTests
             {
                 ["INPUT_NAME"] = "Actio"
             },
-            [new StepExecutionMount(actionPath, "/actio/action", ReadOnly: true)]);
+            [new StepExecutionMount(actionPath, "/actio/action", ReadOnly: true, StepExecutionMountKind.ActionSource)]);
 
         var startInfo = DockerRunnerProvider.CreateJavaScriptActionStartInfo(request, "dist/index.js", "actio-test");
         var args = startInfo.ArgumentList.ToArray();
@@ -140,7 +142,7 @@ public sealed class DockerRunnerProviderTests
         Assert.Contains("run", args);
         Assert.Contains("actio-test", args);
         Assert.Contains("INPUT_NAME=Actio", args);
-        Assert.Contains($"{Path.GetFullPath(actionPath)}:/actio/action:ro", args);
+        Assert.Contains($"type=bind,src={Path.GetFullPath(actionPath)},dst=/actio/action,readonly", args);
         AssertSecureBaseline(args);
         Assert.True(imageIndex >= 0);
         Assert.Equal("node", args[imageIndex + 1]);
@@ -151,6 +153,7 @@ public sealed class DockerRunnerProviderTests
     public void CreateShellStepStartInfo_AddsAdditionalReadOnlyMounts()
     {
         var actionPath = Path.Combine(Directory.GetCurrentDirectory(), "cached-action");
+        Directory.CreateDirectory(actionPath);
         var request = new StepExecutionRequest(
             "test",
             "Use action",
@@ -158,19 +161,20 @@ public sealed class DockerRunnerProviderTests
             "echo remote",
             Directory.GetCurrentDirectory(),
             new Dictionary<string, string>(),
-            AdditionalMounts: [new StepExecutionMount(actionPath, "/actio/action", ReadOnly: true)]);
+            AdditionalMounts: [new StepExecutionMount(actionPath, "/actio/action", ReadOnly: true, StepExecutionMountKind.ActionSource)]);
 
         var startInfo = DockerRunnerProvider.CreateShellStepStartInfo(request, "alpine:3.20", "actio-test");
         var args = startInfo.ArgumentList.ToArray();
 
-        Assert.Contains("-v", args);
-        Assert.Contains($"{Path.GetFullPath(actionPath)}:/actio/action:ro", args);
+        Assert.Contains("--mount", args);
+        Assert.Contains($"type=bind,src={Path.GetFullPath(actionPath)},dst=/actio/action,readonly", args);
     }
 
     [Fact]
     public void CreateShellStepStartInfo_UsesJobContainerConfiguration()
     {
         var cachePath = Path.Combine(Directory.GetCurrentDirectory(), ".actio", "cache");
+        Directory.CreateDirectory(cachePath);
         var request = new StepExecutionRequest(
             "test",
             "Run npm",
@@ -195,7 +199,7 @@ public sealed class DockerRunnerProviderTests
         Assert.Contains("--cpus", args);
         Assert.Contains("1", args);
         Assert.Contains("--init", args);
-        Assert.Contains($"{Path.GetFullPath(cachePath)}:/cache:ro", args);
+        Assert.Contains($"type=bind,src={Path.GetFullPath(cachePath)},dst=/cache,readonly", args);
         Assert.Contains("NODE_ENV=test", args);
         AssertSecureBaseline(args);
         Assert.True(imageIndex >= 0);
@@ -247,6 +251,7 @@ public sealed class DockerRunnerProviderTests
     public void CreateServiceContainerStartInfo_UsesServiceConfiguration()
     {
         var dbPath = Path.Combine(Directory.GetCurrentDirectory(), "db");
+        Directory.CreateDirectory(dbPath);
         var service = new ServiceContainerDefinition(
             "postgres",
             "postgres:16",
@@ -278,7 +283,7 @@ public sealed class DockerRunnerProviderTests
         Assert.Contains("5432:5432", args);
         Assert.Contains("--health-cmd=pg_isready", args);
         Assert.Contains("--health-interval=5s", args);
-        Assert.Contains($"{Path.GetFullPath(dbPath)}:/var/lib/postgresql/data", args);
+        Assert.Contains($"type=bind,src={Path.GetFullPath(dbPath)},dst=/var/lib/postgresql/data", args);
         Assert.Contains("POSTGRES_PASSWORD=postgres", args);
         AssertSecureBaseline(args);
         Assert.Equal(args.Length - 1, imageIndex);
@@ -351,6 +356,49 @@ public sealed class DockerRunnerProviderTests
         Assert.DoesNotContain(args, argument => argument.Contains("docker.sock", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public void DockerfileBuildContextPreparer_ExcludesProtectedAndVcsFiles()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"actio-build-context-{Guid.NewGuid():N}");
+        var source = Path.Combine(root, "source");
+        var staging = Path.Combine(root, "staging");
+        Directory.CreateDirectory(Path.Combine(source, ".actio"));
+        Directory.CreateDirectory(Path.Combine(source, ".git"));
+        File.WriteAllText(Path.Combine(source, "Dockerfile"), "FROM alpine:3.20");
+        File.WriteAllText(Path.Combine(source, "app.txt"), "safe");
+        File.WriteAllText(Path.Combine(source, ".dockerignore"), "*.tmp");
+        File.WriteAllText(Path.Combine(source, ".actio", "secrets.env"), "TOKEN=secret");
+        File.WriteAllText(Path.Combine(source, ".actio", "vars.env"), "MODE=test");
+        File.WriteAllText(Path.Combine(source, ".git", "config"), "metadata");
+
+        try
+        {
+            var request = new DockerfileActionExecutionRequest(
+                "test",
+                "Dockerfile action",
+                "actio/action:test",
+                root,
+                source,
+                Path.Combine(source, "Dockerfile"),
+                new Dictionary<string, string>(),
+                BuildContextStagingRoot: staging);
+
+            var result = DockerfileBuildContextPreparer.Prepare(request);
+
+            Assert.True(result.Success, result.Error);
+            Assert.True(File.Exists(Path.Combine(result.Request!.BuildContext, "Dockerfile")));
+            Assert.True(File.Exists(Path.Combine(result.Request.BuildContext, "app.txt")));
+            Assert.True(File.Exists(Path.Combine(result.Request.BuildContext, ".dockerignore")));
+            Assert.False(File.Exists(Path.Combine(result.Request.BuildContext, ".actio", "secrets.env")));
+            Assert.False(File.Exists(Path.Combine(result.Request.BuildContext, ".actio", "vars.env")));
+            Assert.False(Directory.Exists(Path.Combine(result.Request.BuildContext, ".git")));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData("--privileged")]
     [InlineData("--cap-add=SYS_ADMIN")]
@@ -415,6 +463,10 @@ public sealed class DockerRunnerProviderTests
         Assert.Equal("docker-default-no-additions", metadata.CapabilityPolicy);
         Assert.Equal("not-evaluated", metadata.DaemonPlatformState);
         Assert.Contains("daemon-platform-security-not-evaluated", metadata.DegradedControls);
+        Assert.Equal("image-default-user-with-root-warning", metadata.UserPolicy);
+        Assert.Equal("writable", metadata.RootFilesystemPolicy);
+        Assert.Equal("read-write-with-protected-value-file-masks", metadata.WorkspacePolicy);
+        Assert.Contains("/workspace/.actio/secrets.env", metadata.ProtectedPaths);
     }
 
     [Theory]

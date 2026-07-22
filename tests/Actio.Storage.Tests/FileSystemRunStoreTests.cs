@@ -9,6 +9,23 @@ public sealed class FileSystemRunStoreTests : IDisposable
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"actio-storage-tests-{Guid.NewGuid():N}");
 
     [Fact]
+    public async Task InitializeRunAsync_CreatesRunSpecificWorkspaceMaskFiles()
+    {
+        var store = new FileSystemRunStore(_root);
+
+        var paths = await store.InitializeRunAsync("run-isolation");
+
+        Assert.Equal(Path.GetFullPath(_root), paths.ActioHomePath);
+        Assert.Equal(2, paths.WorkspaceMaskFiles.Count);
+        Assert.All(paths.WorkspaceMaskFiles.Values, path =>
+        {
+            Assert.True(File.Exists(path));
+            Assert.Equal(string.Empty, File.ReadAllText(path));
+            Assert.StartsWith(paths.RunDirectory!, path, StringComparison.OrdinalIgnoreCase);
+        });
+    }
+
+    [Fact]
     public async Task SaveRunRecordAsync_PersistsReadableRunJson()
     {
         var store = new FileSystemRunStore(_root);

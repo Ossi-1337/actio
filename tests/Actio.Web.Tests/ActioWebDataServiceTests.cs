@@ -208,7 +208,13 @@ public sealed class ActioWebDataServiceTests : IDisposable
                 "docker-default-no-additions",
                 "docker-default-seccomp-and-lsm-preserved",
                 "not-evaluated",
-                ["daemon-platform-security-not-evaluated"])));
+                ["daemon-platform-security-not-evaluated"],
+                "image-default-user-with-root-warning",
+                "writable",
+                "read-write-with-protected-value-file-masks",
+                "canonical-existing-bind-sources-only",
+                ["/workspace/.actio/secrets.env"],
+                [new RunnerImageUserObservation("shell:test", "alpine:3.20", "<image-default-root>", "root")])));
 
         var run = await CreateService().GetRunAsync("run-1");
 
@@ -218,6 +224,10 @@ public sealed class ActioWebDataServiceTests : IDisposable
         Assert.Equal("secure-baseline", run.RunnerSecurity.EffectiveProfile);
         Assert.Contains("no-new-privileges=true", run.RunnerSecurity.AppliedSecurityOptions);
         Assert.Equal("not-evaluated", run.RunnerSecurity.DaemonPlatformState);
+        Assert.Equal("image-default-user-with-root-warning", run.RunnerSecurity.UserPolicy);
+        Assert.Equal("writable", run.RunnerSecurity.RootFilesystemPolicy);
+        Assert.Contains("/workspace/.actio/secrets.env", run.RunnerSecurity.ProtectedPaths);
+        Assert.Equal("root", Assert.Single(run.RunnerSecurity.ImageUserObservations).Status);
     }
 
     [Fact]

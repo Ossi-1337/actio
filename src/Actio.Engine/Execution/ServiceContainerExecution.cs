@@ -23,10 +23,15 @@ public sealed record ServiceContainerDefinition(
 public sealed record ServiceContainerStartResult(
     bool Success,
     JobServiceNetwork? Network,
-    IReadOnlyList<string> Errors)
+    IReadOnlyList<string> Errors,
+    IReadOnlyList<string>? Warnings = null)
 {
-    public static ServiceContainerStartResult Started(JobServiceNetwork? network)
-        => new(true, network, []);
+    public IReadOnlyList<string> Warnings { get; init; } = Warnings ?? [];
+
+    public static ServiceContainerStartResult Started(
+        JobServiceNetwork? network,
+        IReadOnlyList<string>? warnings = null)
+        => new(true, network, [], warnings);
 
     public static ServiceContainerStartResult Failed(IReadOnlyList<string> errors)
         => new(false, null, errors);

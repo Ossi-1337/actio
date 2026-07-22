@@ -453,7 +453,11 @@ internal sealed class ActionResolver
         var environment = MergeEnvironment(
             inputBinding.Environment,
             CreateActionPathEnvironment());
-        var actionMount = new StepExecutionMount(actionDirectory, ActionContainerPath, ReadOnly: true);
+        var actionMount = new StepExecutionMount(
+            actionDirectory,
+            ActionContainerPath,
+            ReadOnly: true,
+            StepExecutionMountKind.ActionSource);
 
         if (string.Equals(action.Runtime, ActionRuntime.Node20, StringComparison.Ordinal))
         {
@@ -502,7 +506,11 @@ internal sealed class ActionResolver
         var environment = MergeEnvironment(
             inputBinding.Environment,
             CreateActionPathEnvironment());
-        var actionMount = new StepExecutionMount(actionDirectory, ActionContainerPath, ReadOnly: true);
+        var actionMount = new StepExecutionMount(
+            actionDirectory,
+            ActionContainerPath,
+            ReadOnly: true,
+            StepExecutionMountKind.ActionSource);
 
         return AddWarnings(ActionResolutionResult.ResolvedCompositeAction(
             action,
@@ -547,7 +555,11 @@ internal sealed class ActionResolver
             var environment = MergeEnvironment(
                 inputBinding.Environment,
                 CreateActionPathEnvironment());
-            var actionMount = new StepExecutionMount(actionDirectory, ActionContainerPath, ReadOnly: true);
+            var actionMount = new StepExecutionMount(
+                actionDirectory,
+                ActionContainerPath,
+                ReadOnly: true,
+                StepExecutionMountKind.ActionSource);
 
             return ActionResolutionResult.ResolvedDockerfileAction(
                 action,

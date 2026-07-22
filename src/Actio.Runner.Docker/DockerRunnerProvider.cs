@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using Actio.Core.Workflows;
 using Actio.Engine.Execution;
@@ -14,6 +15,9 @@ public sealed class DockerRunnerProvider : IRunnerProvider
     private static readonly TimeSpan ServiceHealthPollInterval = TimeSpan.FromMilliseconds(500);
 
     private readonly DockerImageResolver _imageResolver;
+    private readonly ConcurrentDictionary<string, RunnerImageUserObservation> _imageUserObservations = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, (string ConfiguredUser, string Status)> _imageUsers = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, byte> _warnedRootImages = new(StringComparer.Ordinal);
 
     public DockerRunnerProvider()
         : this(new DockerImageResolver())
@@ -25,7 +29,27 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         _imageResolver = imageResolver;
     }
 
-    public RunnerSecurityMetadata SecurityMetadata => DockerRuntimeSecurityPolicy.Metadata;
+    public RunnerSecurityMetadata SecurityMetadata
+    {
+        get
+        {
+            var observations = _imageUserObservations.Values
+                .OrderBy(item => item.Surface, StringComparer.Ordinal)
+                .ThenBy(item => item.Image, StringComparer.Ordinal)
+                .ToArray();
+            var degraded = DockerRuntimeSecurityPolicy.Metadata.DegradedControls.ToList();
+            if (observations.Any(item => item.Status == "unknown"))
+            {
+                degraded.Add("one-or-more-image-users-not-evaluated");
+            }
+
+            return DockerRuntimeSecurityPolicy.Metadata with
+            {
+                DegradedControls = degraded,
+                ImageUserObservations = observations
+            };
+        }
+    }
 
     public bool SupportsRunner(string runsOn)
     {
@@ -51,9 +75,19 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             {
                 return ServiceContainerStartResult.Failed([policyError]);
             }
+
+            var filesystemError = DockerRuntimeSecurityPolicy.ValidateFilesystem(
+                request.ProjectRoot,
+                service.Volumes,
+                $"service '{service.Name}'");
+            if (filesystemError is not null)
+            {
+                return ServiceContainerStartResult.Failed([filesystemError]);
+            }
         }
 
         var errors = new List<string>();
+        var warnings = new List<string>();
         var containerNames = new List<string>();
         var networkName = CreateNetworkName(request.JobName);
 
@@ -83,6 +117,15 @@ public sealed class DockerRunnerProvider : IRunnerProvider
                     break;
                 }
 
+                var observation = await ObserveImageUserAsync(
+                    service.Image,
+                    $"service:{service.Name}",
+                    cancellationToken);
+                if (observation.Status == "root" && _warnedRootImages.TryAdd(observation.Image, 0))
+                {
+                    warnings.Add(CreateRootUserWarning(observation));
+                }
+
                 errors.AddRange(await WaitForServiceHealthAsync(service.Name, containerName, cancellationToken));
                 if (errors.Count > 0)
                 {
@@ -105,7 +148,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             return ServiceContainerStartResult.Failed(errors);
         }
 
-        return ServiceContainerStartResult.Started(new JobServiceNetwork(networkName, containerNames));
+        return ServiceContainerStartResult.Started(new JobServiceNetwork(networkName, containerNames), warnings);
     }
 
     public async Task<ServiceContainerStopResult> StopServiceContainersAsync(
@@ -150,6 +193,17 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             return new StepExecutionResult(1);
         }
 
+        var stepMounts = (request.Container?.Volumes ?? []).Concat(request.AdditionalMounts).ToArray();
+        var filesystemError = DockerRuntimeSecurityPolicy.ValidateFilesystem(
+            request.ProjectRoot,
+            stepMounts,
+            $"job '{request.JobName}' step '{request.StepName}'");
+        if (filesystemError is not null)
+        {
+            await output.WriteErrorLineAsync(filesystemError, cancellationToken);
+            return new StepExecutionResult(1);
+        }
+
         if (!TryResolveStepImage(request, out var image))
         {
             var message = $"Runner '{request.RunsOn}' is not mapped to a Docker image.";
@@ -158,13 +212,28 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         }
 
         var containerName = CreateContainerName(request.JobName, request.StepName);
+        var observation = await ObserveImageUserAsync(
+            image,
+            $"shell:{request.JobName}/{request.StepName}",
+            cancellationToken);
+        await WriteRootWarningAsync(observation, output, cancellationToken);
         using var process = new Process
         {
             StartInfo = CreateShellStepStartInfo(request, image, containerName),
             EnableRaisingEvents = true
         };
 
-        return await ExecuteDockerProcessAsync(process, containerName, output, cancellationToken);
+        var result = await ExecuteDockerProcessAsync(process, containerName, output, cancellationToken);
+        if (observation.Status == "unknown" && result.Success)
+        {
+            observation = await ObserveImageUserAsync(
+                image,
+                $"shell:{request.JobName}/{request.StepName}",
+                cancellationToken);
+            await WriteRootWarningAsync(observation, output, cancellationToken);
+        }
+
+        return result;
     }
 
     private bool TryResolveStepImage(StepExecutionRequest request, out string image)
@@ -178,10 +247,17 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         return _imageResolver.TryResolveImage(request.RunsOn, out image!);
     }
 
-    public async Task<StepExecutionResult> ExecuteDockerActionAsync(
+    public Task<StepExecutionResult> ExecuteDockerActionAsync(
         DockerActionExecutionRequest request,
         IStepOutputSink output,
         CancellationToken cancellationToken = default)
+        => ExecuteDockerActionCoreAsync(request, output, "docker-action", cancellationToken);
+
+    private async Task<StepExecutionResult> ExecuteDockerActionCoreAsync(
+        DockerActionExecutionRequest request,
+        IStepOutputSink output,
+        string surfaceKind,
+        CancellationToken cancellationToken)
     {
         var policyError = DockerRuntimeSecurityPolicy.Validate(
             [],
@@ -193,14 +269,39 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             return new StepExecutionResult(1);
         }
 
+        var filesystemError = DockerRuntimeSecurityPolicy.ValidateFilesystem(
+            request.ProjectRoot,
+            request.AdditionalMounts,
+            $"Docker action '{request.StepName}'");
+        if (filesystemError is not null)
+        {
+            await output.WriteErrorLineAsync(filesystemError, cancellationToken);
+            return new StepExecutionResult(1);
+        }
+
         var containerName = CreateContainerName(request.JobName, request.StepName);
+        var observation = await ObserveImageUserAsync(
+            request.Image,
+            $"{surfaceKind}:{request.JobName}/{request.StepName}",
+            cancellationToken);
+        await WriteRootWarningAsync(observation, output, cancellationToken);
         using var process = new Process
         {
             StartInfo = CreateDockerActionStartInfo(request, containerName),
             EnableRaisingEvents = true
         };
 
-        return await ExecuteDockerProcessAsync(process, containerName, output, cancellationToken);
+        var result = await ExecuteDockerProcessAsync(process, containerName, output, cancellationToken);
+        if (observation.Status == "unknown" && result.Success)
+        {
+            observation = await ObserveImageUserAsync(
+                request.Image,
+                $"{surfaceKind}:{request.JobName}/{request.StepName}",
+                cancellationToken);
+            await WriteRootWarningAsync(observation, output, cancellationToken);
+        }
+
+        return result;
     }
 
     public async Task<StepExecutionResult> ExecuteDockerfileActionAsync(
@@ -218,13 +319,23 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             return new StepExecutionResult(1);
         }
 
+        var filesystemError = DockerRuntimeSecurityPolicy.ValidateFilesystem(
+            request.ProjectRoot,
+            request.AdditionalMounts,
+            $"Dockerfile action '{request.StepName}'");
+        if (filesystemError is not null)
+        {
+            await output.WriteErrorLineAsync(filesystemError, cancellationToken);
+            return new StepExecutionResult(1);
+        }
+
         var buildResult = await EnsureDockerfileActionImageAsync(request, output, cancellationToken);
         if (!buildResult.Success)
         {
             return buildResult;
         }
 
-        return await ExecuteDockerActionAsync(
+        return await ExecuteDockerActionCoreAsync(
             new DockerActionExecutionRequest(
                 request.JobName,
                 request.StepName,
@@ -236,6 +347,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
                 request.EntryPoint,
                 request.Arguments),
             output,
+            "dockerfile-action",
             cancellationToken);
     }
 
@@ -253,9 +365,16 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             return new StepExecutionResult(0);
         }
 
+        var buildContext = DockerfileBuildContextPreparer.Prepare(request);
+        if (!buildContext.Success)
+        {
+            await output.WriteErrorLineAsync(buildContext.Error!, cancellationToken);
+            return new StepExecutionResult(1);
+        }
+
         using var process = new Process
         {
-            StartInfo = CreateDockerfileActionBuildStartInfo(request),
+            StartInfo = CreateDockerfileActionBuildStartInfo(buildContext.Request!),
             EnableRaisingEvents = true
         };
 
@@ -274,6 +393,16 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         if (policyError is not null)
         {
             await output.WriteErrorLineAsync(policyError, cancellationToken);
+            return new StepExecutionResult(1);
+        }
+
+        var filesystemError = DockerRuntimeSecurityPolicy.ValidateFilesystem(
+            request.ProjectRoot,
+            request.AdditionalMounts,
+            $"JavaScript action '{request.StepName}'");
+        if (filesystemError is not null)
+        {
+            await output.WriteErrorLineAsync(filesystemError, cancellationToken);
             return new StepExecutionResult(1);
         }
 
@@ -301,7 +430,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         return result;
     }
 
-    private static async Task<StepExecutionResult> ExecuteJavaScriptActionPhaseAsync(
+    private async Task<StepExecutionResult> ExecuteJavaScriptActionPhaseAsync(
         JavaScriptActionExecutionRequest request,
         string scriptPath,
         string phase,
@@ -309,13 +438,28 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         CancellationToken cancellationToken)
     {
         var containerName = CreateContainerName(request.JobName, $"{request.StepName}-{phase}");
+        var observation = await ObserveImageUserAsync(
+            JavaScriptActionNodeImage,
+            $"javascript-action:{request.JobName}/{request.StepName}/{phase}",
+            cancellationToken);
+        await WriteRootWarningAsync(observation, output, cancellationToken);
         using var process = new Process
         {
             StartInfo = CreateJavaScriptActionStartInfo(request, scriptPath, containerName),
             EnableRaisingEvents = true
         };
 
-        return await ExecuteDockerProcessAsync(process, containerName, output, cancellationToken);
+        var result = await ExecuteDockerProcessAsync(process, containerName, output, cancellationToken);
+        if (observation.Status == "unknown" && result.Success)
+        {
+            observation = await ObserveImageUserAsync(
+                JavaScriptActionNodeImage,
+                $"javascript-action:{request.JobName}/{request.StepName}/{phase}",
+                cancellationToken);
+            await WriteRootWarningAsync(observation, output, cancellationToken);
+        }
+
+        return result;
     }
 
     private static async Task<StepExecutionResult> ExecuteDockerProcessAsync(
@@ -460,6 +604,10 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             service.Options,
             service.Volumes,
             $"service '{service.Name}'");
+        DockerRuntimeSecurityPolicy.ThrowIfFilesystemDenied(
+            request.ProjectRoot,
+            service.Volumes,
+            $"service '{service.Name}'");
         var startInfo = CreateDockerStartInfo();
 
         startInfo.ArgumentList.Add("run");
@@ -520,6 +668,10 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             container?.Options ?? [],
             mounts,
             $"job '{jobName}' step '{stepName}'");
+        DockerRuntimeSecurityPolicy.ThrowIfFilesystemDenied(
+            projectRoot,
+            mounts,
+            $"job '{jobName}' step '{stepName}'");
         var startInfo = CreateDockerStartInfo();
 
         startInfo.ArgumentList.Add("run");
@@ -552,8 +704,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             startInfo.ArgumentList.Add(option);
         }
 
-        startInfo.ArgumentList.Add("-v");
-        startInfo.ArgumentList.Add($"{Path.GetFullPath(projectRoot)}:/workspace");
+        AddBindMount(startInfo, Path.GetFullPath(projectRoot), "/workspace", readOnly: false);
         startInfo.ArgumentList.Add("-w");
         startInfo.ArgumentList.Add(ToContainerWorkingDirectory(workingDirectory));
 
@@ -589,9 +740,22 @@ public sealed class DockerRunnerProvider : IRunnerProvider
 
     private static void AddMount(ProcessStartInfo startInfo, StepExecutionMount mount)
     {
-        var suffix = mount.ReadOnly ? ":ro" : string.Empty;
-        startInfo.ArgumentList.Add("-v");
-        startInfo.ArgumentList.Add($"{Path.GetFullPath(mount.HostPath)}:{mount.ContainerPath}{suffix}");
+        AddBindMount(
+            startInfo,
+            FilesystemPathBoundary.ResolveExistingPath(mount.HostPath),
+            ContainerFilesystemPolicy.NormalizeContainerPath(mount.ContainerPath),
+            mount.ReadOnly);
+    }
+
+    private static void AddBindMount(
+        ProcessStartInfo startInfo,
+        string hostPath,
+        string containerPath,
+        bool readOnly)
+    {
+        startInfo.ArgumentList.Add("--mount");
+        var specification = $"type=bind,src={hostPath},dst={containerPath}";
+        startInfo.ArgumentList.Add(readOnly ? specification + ",readonly" : specification);
     }
 
     private static string NormalizeShell(string? shell)
@@ -727,6 +891,77 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         startInfo.ArgumentList.Add(image);
         return startInfo;
     }
+
+    private static ProcessStartInfo CreateImageUserInspectStartInfo(string image)
+    {
+        var startInfo = CreateDockerStartInfo();
+        startInfo.ArgumentList.Add("image");
+        startInfo.ArgumentList.Add("inspect");
+        startInfo.ArgumentList.Add("--format");
+        startInfo.ArgumentList.Add("{{json .Config.User}}");
+        startInfo.ArgumentList.Add(image);
+        return startInfo;
+    }
+
+    private async Task<RunnerImageUserObservation> ObserveImageUserAsync(
+        string image,
+        string surface,
+        CancellationToken cancellationToken)
+    {
+        string configuredUser;
+        string status;
+        if (_imageUsers.TryGetValue(image, out var cached))
+        {
+            (configuredUser, status) = cached;
+        }
+        else
+        {
+            var result = await RunDockerCommandAsync(CreateImageUserInspectStartInfo(image), cancellationToken);
+            configuredUser = result.Success
+                ? result.StandardOutput.Trim().Trim('"')
+                : string.Empty;
+            status = result.Success
+                ? IsRootConfiguredUser(configuredUser) ? "root" : "non-root"
+                : "unknown";
+            if (status != "unknown")
+            {
+                _imageUsers[image] = (configuredUser, status);
+            }
+        }
+        var observation = new RunnerImageUserObservation(
+            surface,
+            image,
+            string.IsNullOrWhiteSpace(configuredUser) ? "<image-default-root>" : configuredUser,
+            status);
+        _imageUserObservations[$"{surface}|{image}"] = observation;
+        return observation;
+    }
+
+    private static bool IsRootConfiguredUser(string configuredUser)
+    {
+        if (string.IsNullOrWhiteSpace(configuredUser))
+        {
+            return true;
+        }
+
+        var user = configuredUser.Split(':', 2)[0];
+        return user.Equals("0", StringComparison.Ordinal) ||
+            user.Equals("root", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task WriteRootWarningAsync(
+        RunnerImageUserObservation observation,
+        IStepOutputSink output,
+        CancellationToken cancellationToken)
+    {
+        if (observation.Status == "root" && _warnedRootImages.TryAdd(observation.Image, 0))
+        {
+            await output.WriteErrorLineAsync($"warning: {CreateRootUserWarning(observation)}", cancellationToken);
+        }
+    }
+
+    private static string CreateRootUserWarning(RunnerImageUserObservation observation)
+        => $"secure-baseline image '{observation.Image}' uses root as its configured user for {observation.Surface}; use an image with a non-root USER when compatible.";
 
     private static async Task<IReadOnlyList<string>> WaitForServiceHealthAsync(
         string serviceName,

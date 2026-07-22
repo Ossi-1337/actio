@@ -51,10 +51,20 @@ public sealed class FileSystemRunStore : IRunStore
         var runDirectory = Path.Combine(RunsPath, SanitizePathSegment(runId));
         Directory.CreateDirectory(runDirectory);
 
+        var isolationDirectory = Path.Combine(runDirectory, "isolation");
+        Directory.CreateDirectory(isolationDirectory);
+        var workspaceMaskFiles = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [".actio/secrets.env"] = CreateEmptyMaskFile(isolationDirectory, "secrets.env.mask"),
+            [".actio/vars.env"] = CreateEmptyMaskFile(isolationDirectory, "vars.env.mask")
+        };
+
         return Task.FromResult(new RunStoragePaths(
             runId,
             runDirectory,
-            Path.Combine(runDirectory, "run.json")));
+            Path.Combine(runDirectory, "run.json"),
+            GetFullActioHomePath(),
+            workspaceMaskFiles));
     }
 
     public async Task<IStepLog> OpenStepLogAsync(
@@ -487,6 +497,13 @@ public sealed class FileSystemRunStore : IRunStore
     private string GetFullActioHomePath()
     {
         return Path.GetFullPath(ActioHomePath);
+    }
+
+    private static string CreateEmptyMaskFile(string directory, string fileName)
+    {
+        var path = Path.Combine(directory, fileName);
+        File.WriteAllText(path, string.Empty);
+        return path;
     }
 
     private string GetCancellationMarkerPath(string runId)

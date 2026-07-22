@@ -320,9 +320,26 @@ function renderSecurity(run) {
           ${summaryCell("Security options", (metadata.appliedSecurityOptions ?? []).join(", ") || "None")}
           ${summaryCell("Capabilities", metadata.capabilityPolicy)}
           ${summaryCell("Confinement", metadata.confinementPolicy)}
+          ${summaryCell("User policy", metadata.userPolicy)}
+          ${summaryCell("Root filesystem", metadata.rootFilesystemPolicy)}
+          ${summaryCell("Workspace", metadata.workspacePolicy)}
+          ${summaryCell("Mount policy", metadata.mountPolicy)}
+          ${summaryCell("Protected paths", (metadata.protectedPaths ?? []).join(", ") || "None")}
           ${summaryCell("Daemon/platform", metadata.daemonPlatformState)}
           ${summaryCell("Degraded controls", (metadata.degradedControls ?? []).join(", ") || "None")}
         </div>
+        ${(metadata.imageUserObservations ?? []).length ? `<div class="security-list">
+          ${(metadata.imageUserObservations ?? []).map(observation => `
+            <div class="security-row">
+              <span class="security-level ${observation.status === "root" ? "warning" : "info"}">${escapeHtml(observation.status)}</span>
+              <span>
+                <span class="job-name">${escapeHtml(observation.image)}</span>
+                <span class="run-sub muted">${escapeHtml(observation.surface)}</span>
+                <span class="security-message">Configured user: ${escapeHtml(observation.configuredUser)}</span>
+              </span>
+            </div>
+          `).join("")}
+        </div>` : ""}
       ` : ""}
       ${findings.length ? `<div class="security-list">
         ${findings.map(finding => `

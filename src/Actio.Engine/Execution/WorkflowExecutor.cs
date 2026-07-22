@@ -65,8 +65,19 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         var expansion = MatrixJobExpander.Expand(executableWorkflow.Jobs);
         var totalSteps = expansion.Jobs.Values.Sum(job => job.ExecutionStepCount);
         var securityFindings = WorkflowSecurityPolicy.Analyze(workflow);
-        var runnerSecurity = _runnerProvider.SecurityMetadata;
         RunStoragePaths storagePaths;
+
+        if (_runStore.ActioHomePath is not null &&
+            FilesystemPathBoundary.IsWithin(_runStore.ActioHomePath, options.ProjectRoot))
+        {
+            return new WorkflowExecutionResult(
+                WorkflowExecutionStatus.Failed,
+                0,
+                totalSteps,
+                [$"secure-baseline blocked execution because ACTIO_HOME '{Path.GetFullPath(_runStore.ActioHomePath)}' is inside project root. Move ACTIO_HOME to user-local storage."],
+                runId: runId,
+                securityFindings: securityFindings);
+        }
 
         try
         {
@@ -82,6 +93,44 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 runId: runId,
                 securityFindings: securityFindings);
         }
+
+        var isolationResult = RunFilesystemIsolationPolicy.Prepare(options.ProjectRoot, storagePaths);
+        if (!isolationResult.Success)
+        {
+            var isolationErrors = isolationResult.Errors.ToList();
+            var failureTime = DateTimeOffset.UtcNow;
+            var failureRecord = CreateRunRecord(
+                runId,
+                workflow,
+                options,
+                FailedStatus,
+                failureTime,
+                failureTime,
+                [],
+                [],
+                [],
+                isolationErrors,
+                securityFindings,
+                _runnerProvider.SecurityMetadata);
+            var isolationSaveError = await TrySaveRunRecordAsync(failureRecord, CancellationToken.None);
+            var isolationRunRecordPath = storagePaths.RunRecordPath;
+            if (isolationSaveError is not null)
+            {
+                isolationErrors.Add(isolationSaveError);
+                isolationRunRecordPath = null;
+            }
+
+            return new WorkflowExecutionResult(
+                WorkflowExecutionStatus.Failed,
+                0,
+                totalSteps,
+                isolationErrors,
+                runId: runId,
+                runRecordPath: isolationRunRecordPath,
+                securityFindings: securityFindings);
+        }
+
+        options = options with { FilesystemIsolation = isolationResult.Isolation };
 
         var startedAt = DateTimeOffset.UtcNow;
         var successfulSteps = 0;
@@ -111,7 +160,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 runArtifacts,
                 errors,
                 securityFindings,
-                runnerSecurity);
+                _runnerProvider.SecurityMetadata);
             var resolutionSaveError = await TrySaveRunRecordAsync(resolutionFailureRecord, CancellationToken.None);
             var resolutionRunRecordPath = storagePaths.RunRecordPath;
             if (resolutionSaveError is not null)
@@ -145,7 +194,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 runArtifacts,
                 errors,
                 securityFindings,
-                runnerSecurity),
+                _runnerProvider.SecurityMetadata),
             cancellationToken);
 
         if (initialSaveError is not null)
@@ -244,7 +293,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                                 runArtifacts,
                                 errors,
                                 securityFindings,
-                                runnerSecurity),
+                                _runnerProvider.SecurityMetadata),
                             executionToken);
 
                         if (progressSaveError is not null)
@@ -286,7 +335,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             runArtifacts,
             errors,
             securityFindings,
-            runnerSecurity);
+            _runnerProvider.SecurityMetadata);
         var runRecordPath = storagePaths.RunRecordPath;
 
         var saveError = await TrySaveRunRecordAsync(runRecord, CancellationToken.None);
@@ -391,6 +440,7 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             availableArtifacts,
             options.ProjectRoot,
             runId,
+            options.FilesystemIsolation,
             output,
             error,
             cancellationToken);

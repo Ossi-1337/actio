@@ -57,6 +57,7 @@ internal sealed class JobExecutor
         IReadOnlyList<WorkflowRunArtifact> availableArtifacts,
         string projectRoot,
         string runId,
+        RunFilesystemIsolation filesystemIsolation,
         TextWriter output,
         TextWriter error,
         CancellationToken cancellationToken)
@@ -107,6 +108,11 @@ internal sealed class JobExecutor
                 errors.AddRange(serviceStart.Errors);
                 stepRecords.AddRange(CreateSkippedStepRecords(job.Steps));
                 return CompleteJob(job, FailedStatus, startedAt, outputs, stepRecords, artifacts, errors, 0, 0, job.Steps.Count, 0);
+            }
+
+            foreach (var warning in serviceStart.Warnings)
+            {
+                output.WriteLine($"warning: {warning}");
             }
 
             serviceNetwork = serviceStart.Network;
@@ -194,6 +200,7 @@ internal sealed class JobExecutor
                     artifacts,
                     projectRoot,
                     runId,
+                    filesystemIsolation,
                     runTrigger,
                     stepStatuses,
                     serviceNetwork,
@@ -474,6 +481,7 @@ internal sealed class JobExecutor
         IReadOnlyList<WorkflowRunArtifact> jobArtifacts,
         string projectRoot,
         string runId,
+        RunFilesystemIsolation filesystemIsolation,
         WorkflowRunTrigger runTrigger,
         IReadOnlyDictionary<string, string> stepStatuses,
         JobServiceNetwork? serviceNetwork,
@@ -605,13 +613,19 @@ internal sealed class JobExecutor
                     effectiveRunDefaults,
                     projectRoot,
                     runId,
+                    filesystemIsolation,
                     serviceNetwork,
                     collector,
                     stepCancellationToken);
             }
 
             var additionalMounts = plan.AdditionalMounts
-                .Concat([new StepExecutionMount(environmentFiles.DirectoryPath, StepEnvironmentFileContainerDirectory, ReadOnly: false)])
+                .Concat(filesystemIsolation.WorkspaceMasks)
+                .Append(new StepExecutionMount(
+                    environmentFiles.DirectoryPath,
+                    StepEnvironmentFileContainerDirectory,
+                    ReadOnly: false,
+                    StepExecutionMountKind.EnvironmentFiles))
                 .ToArray();
             var result = plan.Kind switch
             {
@@ -627,7 +641,8 @@ internal sealed class JobExecutor
                         additionalMounts,
                         serviceNetwork,
                         plan.DockerEntryPoint,
-                        plan.DockerArguments),
+                        plan.DockerArguments,
+                        filesystemIsolation.BuildContextStagingRoot),
                     collector,
                     stepCancellationToken),
                 StepExecutionKind.DockerImageAction => await _runnerProvider.ExecuteDockerActionAsync(
@@ -752,6 +767,7 @@ internal sealed class JobExecutor
         WorkflowRunDefaults effectiveRunDefaults,
         string projectRoot,
         string runId,
+        RunFilesystemIsolation filesystemIsolation,
         JobServiceNetwork? serviceNetwork,
         StepOutputCollector collector,
         CancellationToken cancellationToken)
@@ -778,6 +794,7 @@ internal sealed class JobExecutor
                     effectiveRunDefaults,
                     projectRoot,
                     runId,
+                    filesystemIsolation,
                     serviceNetwork,
                     collector,
                     cancellationToken)
@@ -794,6 +811,7 @@ internal sealed class JobExecutor
                     effectiveRunDefaults,
                     projectRoot,
                     runId,
+                    filesystemIsolation,
                     serviceNetwork,
                     collector,
                     cancellationToken);
@@ -1135,6 +1153,7 @@ internal sealed class JobExecutor
         WorkflowRunDefaults effectiveRunDefaults,
         string projectRoot,
         string runId,
+        RunFilesystemIsolation filesystemIsolation,
         JobServiceNetwork? serviceNetwork,
         StepOutputCollector collector,
         CancellationToken cancellationToken)
@@ -1165,7 +1184,12 @@ internal sealed class JobExecutor
         }
 
         var additionalMounts = plan.AdditionalMounts
-            .Concat([new StepExecutionMount(environmentFiles.DirectoryPath, StepEnvironmentFileContainerDirectory, ReadOnly: false)])
+            .Concat(filesystemIsolation.WorkspaceMasks)
+            .Append(new StepExecutionMount(
+                environmentFiles.DirectoryPath,
+                StepEnvironmentFileContainerDirectory,
+                ReadOnly: false,
+                StepExecutionMountKind.EnvironmentFiles))
             .ToArray();
         var request = new StepExecutionRequest(
             job.Name,
@@ -1241,6 +1265,7 @@ internal sealed class JobExecutor
         WorkflowRunDefaults effectiveRunDefaults,
         string projectRoot,
         string runId,
+        RunFilesystemIsolation filesystemIsolation,
         JobServiceNetwork? serviceNetwork,
         StepOutputCollector collector,
         CancellationToken cancellationToken)
@@ -1275,6 +1300,7 @@ internal sealed class JobExecutor
                 effectiveRunDefaults,
                 projectRoot,
                 runId,
+                filesystemIsolation,
                 serviceNetwork,
                 collector,
                 cancellationToken);
@@ -1290,6 +1316,7 @@ internal sealed class JobExecutor
             effectiveRunDefaults,
             projectRoot,
             runId,
+            filesystemIsolation,
             serviceNetwork,
             collector,
             cancellationToken);
@@ -1305,6 +1332,7 @@ internal sealed class JobExecutor
         WorkflowRunDefaults effectiveRunDefaults,
         string projectRoot,
         string runId,
+        RunFilesystemIsolation filesystemIsolation,
         JobServiceNetwork? serviceNetwork,
         StepOutputCollector collector,
         CancellationToken cancellationToken)
@@ -1331,7 +1359,12 @@ internal sealed class JobExecutor
         }
 
         var additionalMounts = nestedPlan.AdditionalMounts
-            .Concat([new StepExecutionMount(environmentFiles.DirectoryPath, StepEnvironmentFileContainerDirectory, ReadOnly: false)])
+            .Concat(filesystemIsolation.WorkspaceMasks)
+            .Append(new StepExecutionMount(
+                environmentFiles.DirectoryPath,
+                StepEnvironmentFileContainerDirectory,
+                ReadOnly: false,
+                StepExecutionMountKind.EnvironmentFiles))
             .ToArray();
         var result = nestedPlan.Kind switch
         {
@@ -1347,7 +1380,8 @@ internal sealed class JobExecutor
                     additionalMounts,
                     serviceNetwork,
                     nestedPlan.DockerEntryPoint,
-                    nestedPlan.DockerArguments),
+                    nestedPlan.DockerArguments,
+                    filesystemIsolation.BuildContextStagingRoot),
                 collector,
                 cancellationToken),
             StepExecutionKind.DockerImageAction => await _runnerProvider.ExecuteDockerActionAsync(

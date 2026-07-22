@@ -18,7 +18,12 @@ internal static class DockerRuntimeSecurityPolicy
         "docker-default-no-additions",
         "docker-default-seccomp-and-lsm-preserved",
         "not-evaluated",
-        ["daemon-platform-security-not-evaluated"]);
+        ["daemon-platform-security-not-evaluated"],
+        "image-default-user-with-root-warning",
+        "writable",
+        "read-write-with-protected-value-file-masks",
+        "canonical-existing-bind-sources-only",
+        ["/workspace/.actio/secrets.env", "/workspace/.actio/vars.env"]);
 
     internal static void AddRuntimeArguments(ProcessStartInfo startInfo)
     {
@@ -53,12 +58,38 @@ internal static class DockerRuntimeSecurityPolicy
         return null;
     }
 
+    internal static string? ValidateFilesystem(
+        string projectRoot,
+        IEnumerable<StepExecutionMount> mounts,
+        string surface)
+    {
+        var errors = ContainerFilesystemPolicy.ValidateMounts(projectRoot, mounts);
+        if (errors.Count > 0)
+        {
+            return $"{surface}: {string.Join(" ", errors)}";
+        }
+
+        return null;
+    }
+
     internal static void ThrowIfDenied(
         IEnumerable<string> options,
         IEnumerable<StepExecutionMount> mounts,
         string surface)
     {
         var error = Validate(options, mounts, surface);
+        if (error is not null)
+        {
+            throw new InvalidOperationException(error);
+        }
+    }
+
+    internal static void ThrowIfFilesystemDenied(
+        string projectRoot,
+        IEnumerable<StepExecutionMount> mounts,
+        string surface)
+    {
+        var error = ValidateFilesystem(projectRoot, mounts, surface);
         if (error is not null)
         {
             throw new InvalidOperationException(error);
