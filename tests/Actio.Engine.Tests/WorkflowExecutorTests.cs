@@ -156,6 +156,9 @@ public sealed class WorkflowExecutorTests
             var finding = Assert.Single(record.SecurityFindings);
             Assert.Equal("unsafe-trigger", finding.Category);
             Assert.Equal("workflow.on.pull_request_target", finding.Location);
+            Assert.NotNull(record.RunnerSecurity);
+            Assert.Equal("fake", record.RunnerSecurity.Provider);
+            Assert.Equal("test", record.RunnerSecurity.EffectiveProfile);
         });
         Assert.Equal("unsafe-trigger", Assert.Single(result.SecurityFindings).Category);
     }
@@ -2132,10 +2135,16 @@ public sealed class WorkflowExecutorTests
                             "./.actio/actions/secure",
                             With: new Dictionary<string, string>
                             {
-                                ["token"] = "${{ secrets.NUGET_TOKEN }}",
+                                ["token"] = "${{ env.ACTION_TOKEN }}",
                                 ["mode"] = "${{ vars.CONFIGURATION }}"
                             })
-                    ]));
+                    ])) with
+            {
+                Env = new Dictionary<string, string>
+                {
+                    ["ACTION_TOKEN"] = "${{ secrets.NUGET_TOKEN }}"
+                }
+            };
 
             using var output = new StringWriter();
             var result = await new WorkflowExecutor(runner, runStore: store).ExecuteAsync(
@@ -4214,34 +4223,71 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_UsesLocalVarsAndSecretsInConditionsAndStepEnvironment()
+    public async Task ExecuteAsync_BindsSecretsExplicitlyAcrossEnvironmentScopes()
     {
         var runner = new FakeRunnerProvider(
             [
                 new FakeRunnerStep(
                     0,
-                    ["token is local-secret"],
+                    ["token is step-secret"],
                     onExecute: (environment, _) =>
                     {
                         Assert.Equal("true", environment["ACTIO_VAR_RUN_TESTS"]);
-                        Assert.Equal("local-secret", environment["ACTIO_SECRET_NUGET_TOKEN"]);
+                        Assert.Equal("workflow-secret", environment["WORKFLOW_TOKEN"]);
+                        Assert.Equal("job-secret", environment["JOB_TOKEN"]);
+                        Assert.Equal("container-secret", environment["CONTAINER_TOKEN"]);
+                        Assert.Equal("step-secret", environment["STEP_TOKEN"]);
+                        Assert.DoesNotContain("ACTIO_SECRET_UNUSED", environment.Keys);
+                        Assert.DoesNotContain("ACTIO_SECRET_STEP_TOKEN", environment.Keys);
                     })
             ]);
-        var workflow = CreateWorkflow(
-            new WorkflowJob(
+        var job = new WorkflowJob(
                 "test",
                 [],
-                "${{ vars.RUN_TESTS == 'true' && secrets.NUGET_TOKEN != '' }}",
+                "${{ vars.RUN_TESTS == 'true' && env.JOB_TOKEN != '' }}",
                 "ubuntu-latest",
                 new Dictionary<string, string>(),
-                [new WorkflowStep("Use local values", "echo local", null)]));
+                [new WorkflowStep(
+                    "Use local values",
+                    "echo local",
+                    null,
+                    Env: new Dictionary<string, string>
+                    {
+                        ["STEP_TOKEN"] = "${{ secrets.STEP_TOKEN }}"
+                    })]) with
+        {
+            Env = new Dictionary<string, string>
+            {
+                ["JOB_TOKEN"] = "${{ secrets.JOB_TOKEN }}"
+            },
+            Container = new WorkflowJobContainer(
+                "ubuntu:24.04",
+                new Dictionary<string, string>
+                {
+                    ["CONTAINER_TOKEN"] = "${{ secrets.CONTAINER_TOKEN }}"
+                })
+        };
+        var workflow = CreateWorkflow(job) with
+        {
+            Env = new Dictionary<string, string>
+            {
+                ["WORKFLOW_TOKEN"] = "${{ secrets.WORKFLOW_TOKEN }}"
+            }
+        };
 
         using var output = new StringWriter();
         var result = await new WorkflowExecutor(runner).ExecuteAsync(
             workflow,
             new WorkflowExecutionOptions(
                 Environment.CurrentDirectory,
-                Secrets: new Dictionary<string, string> { ["NUGET_TOKEN"] = "local-secret" },
+                Secrets: new Dictionary<string, string>
+                {
+                    ["WORKFLOW_TOKEN"] = "workflow-secret",
+                    ["JOB_TOKEN"] = "job-secret",
+                    ["CONTAINER_TOKEN"] = "container-secret",
+                    ["STEP_TOKEN"] = "step-secret",
+                    ["UNUSED"] = "unused-secret"
+                },
                 Variables: new Dictionary<string, string> { ["RUN_TESTS"] = "true" }),
             output,
             TextWriter.Null);
@@ -4249,7 +4295,44 @@ public sealed class WorkflowExecutorTests
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
         Assert.Single(runner.Requests);
         Assert.Contains("token is ***", output.ToString());
-        Assert.DoesNotContain("local-secret", output.ToString());
+        Assert.DoesNotContain("step-secret", output.ToString());
+        Assert.DoesNotContain("unused-secret", output.ToString());
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_FailsBeforeRunnerWhenEnvironmentReferencesMissingSecret()
+    {
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+        var store = new RecordingRunStore();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Use secret", "echo local", null)])) with
+        {
+            Env = new Dictionary<string, string>
+            {
+                ["TOKEN"] = "${{ secrets.NUGET_TOKEN }}"
+            }
+        };
+
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(Environment.CurrentDirectory),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Empty(runner.Requests);
+        Assert.Contains(result.Errors, error =>
+            error.Contains("workflow.env.TOKEN", StringComparison.Ordinal) &&
+            error.Contains("secrets.NUGET_TOKEN", StringComparison.Ordinal));
+        var record = Assert.Single(store.SavedRecords);
+        Assert.Equal("Failed", record.Status);
+        Assert.NotNull(record.RunnerSecurity);
     }
 
     [Fact]
@@ -4575,6 +4658,11 @@ public sealed class WorkflowExecutorTests
         public List<ServiceContainerStartRequest> ServiceStartRequests { get; } = [];
 
         public List<JobServiceNetwork> StoppedServiceNetworks { get; } = [];
+
+        public RunnerSecurityMetadata SecurityMetadata { get; } = new(
+            "fake",
+            "test",
+            "test");
 
         public ServiceContainerStartResult? ServiceStartResult { get; set; }
 

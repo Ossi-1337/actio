@@ -60,9 +60,12 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         var synchronizedOutput = TextWriter.Synchronized(output);
         var synchronizedError = TextWriter.Synchronized(error);
         var runId = options.RunId ?? _runStore.CreateRunId();
-        var expansion = MatrixJobExpander.Expand(workflow.Jobs);
+        var environmentResolution = WorkflowEnvironmentResolver.Resolve(workflow, options.Secrets);
+        var executableWorkflow = environmentResolution.Workflow ?? workflow;
+        var expansion = MatrixJobExpander.Expand(executableWorkflow.Jobs);
         var totalSteps = expansion.Jobs.Values.Sum(job => job.ExecutionStepCount);
         var securityFindings = WorkflowSecurityPolicy.Analyze(workflow);
+        var runnerSecurity = _runnerProvider.SecurityMetadata;
         RunStoragePaths storagePaths;
 
         try
@@ -92,6 +95,42 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         var jobStatuses = new Dictionary<string, string>(StringComparer.Ordinal);
         var actualJobStatuses = new Dictionary<string, string>(StringComparer.Ordinal);
         var jobOutputs = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal);
+        if (!environmentResolution.Success)
+        {
+            errors.AddRange(environmentResolution.Errors);
+            var resolutionFinishedAt = DateTimeOffset.UtcNow;
+            var resolutionFailureRecord = CreateRunRecord(
+                runId,
+                workflow,
+                options,
+                FailedStatus,
+                startedAt,
+                resolutionFinishedAt,
+                jobRecords,
+                runOutputs,
+                runArtifacts,
+                errors,
+                securityFindings,
+                runnerSecurity);
+            var resolutionSaveError = await TrySaveRunRecordAsync(resolutionFailureRecord, CancellationToken.None);
+            var resolutionRunRecordPath = storagePaths.RunRecordPath;
+            if (resolutionSaveError is not null)
+            {
+                errors.Add(resolutionSaveError);
+                resolutionRunRecordPath = null;
+            }
+
+            return new WorkflowExecutionResult(
+                WorkflowExecutionStatus.Failed,
+                0,
+                totalSteps,
+                errors,
+                runId: runId,
+                runRecordPath: resolutionRunRecordPath,
+                securityFindings: securityFindings);
+        }
+
+        workflow = executableWorkflow;
         var plan = JobGraphPlanner.Plan(expansion.Jobs);
         var initialSaveError = await TrySaveRunRecordAsync(
             CreateRunRecord(
@@ -105,7 +144,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 runOutputs,
                 runArtifacts,
                 errors,
-                securityFindings),
+                securityFindings,
+                runnerSecurity),
             cancellationToken);
 
         if (initialSaveError is not null)
@@ -203,7 +243,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                                 runOutputs,
                                 runArtifacts,
                                 errors,
-                                securityFindings),
+                                securityFindings,
+                                runnerSecurity),
                             executionToken);
 
                         if (progressSaveError is not null)
@@ -244,7 +285,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             runOutputs,
             runArtifacts,
             errors,
-            securityFindings);
+            securityFindings,
+            runnerSecurity);
         var runRecordPath = storagePaths.RunRecordPath;
 
         var saveError = await TrySaveRunRecordAsync(runRecord, CancellationToken.None);
@@ -876,7 +918,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         IReadOnlyList<WorkflowRunOutput> runOutputs,
         IReadOnlyList<WorkflowRunArtifact> runArtifacts,
         IReadOnlyList<string> errors,
-        IReadOnlyList<WorkflowSecurityFinding> securityFindings)
+        IReadOnlyList<WorkflowSecurityFinding> securityFindings,
+        RunnerSecurityMetadata runnerSecurity)
     {
         return new WorkflowRunRecord(
             runId,
@@ -893,7 +936,8 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             errors.ToArray(),
             workflow.Triggers,
             options.RunTrigger,
-            securityFindings.ToArray());
+            securityFindings.ToArray(),
+            runnerSecurity);
     }
 
     private async Task<string?> TrySaveRunRecordAsync(

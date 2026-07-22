@@ -585,7 +585,6 @@ internal sealed class JobExecutor
                 pathEntries,
                 step.Env,
                 workflowVariables,
-                workflowSecrets,
                 DefaultEnvironmentVariables.Create(workflowName, job, step, stepIndex, runId, runTrigger),
                 CreateEnvironmentFileVariables(),
                 plan.Environment);
@@ -2071,7 +2070,6 @@ internal sealed class JobExecutor
         IReadOnlyList<string> pathEntries,
         IReadOnlyDictionary<string, string> stepEnv,
         IReadOnlyDictionary<string, string> workflowVariables,
-        IReadOnlyDictionary<string, string> workflowSecrets,
         IReadOnlyDictionary<string, string> defaultEnv,
         IReadOnlyDictionary<string, string> environmentFileEnv,
         IReadOnlyDictionary<string, string> actionEnv)
@@ -2083,7 +2081,6 @@ internal sealed class JobExecutor
         environment.Merge(CreateStepOutputEnvironment(stepOutputs));
         environment.Merge(stepEnv);
         environment.Merge(CreateLocalValueEnvironment("ACTIO_VAR_", workflowVariables));
-        environment.Merge(CreateLocalValueEnvironment("ACTIO_SECRET_", workflowSecrets));
         environment.ApplyPathEntries(pathEntries);
         environment.MergeDefaultEnvironment(defaultEnv);
         environment.Merge(environmentFileEnv);

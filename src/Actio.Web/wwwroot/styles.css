@@ -620,6 +620,10 @@ pre {
   padding: 12px 14px;
 }
 
+.security-profile {
+  border-bottom: 1px solid var(--line-soft);
+}
+
 .security-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);

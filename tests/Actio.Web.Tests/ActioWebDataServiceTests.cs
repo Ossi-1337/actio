@@ -193,6 +193,34 @@ public sealed class ActioWebDataServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task GetRunAsync_ReturnsRunnerSecurityMetadata()
+    {
+        var workflowPath = WriteWorkflow("ci.yml", "CI");
+        await SaveRunAsync(CreateRun(
+            "run-1",
+            "CI",
+            workflowPath,
+            runnerSecurity: new RunnerSecurityMetadata(
+                "docker",
+                "secure-baseline",
+                "secure-baseline",
+                ["no-new-privileges=true"],
+                "docker-default-no-additions",
+                "docker-default-seccomp-and-lsm-preserved",
+                "not-evaluated",
+                ["daemon-platform-security-not-evaluated"])));
+
+        var run = await CreateService().GetRunAsync("run-1");
+
+        Assert.NotNull(run);
+        Assert.NotNull(run.RunnerSecurity);
+        Assert.Equal("docker", run.RunnerSecurity.Provider);
+        Assert.Equal("secure-baseline", run.RunnerSecurity.EffectiveProfile);
+        Assert.Contains("no-new-privileges=true", run.RunnerSecurity.AppliedSecurityOptions);
+        Assert.Equal("not-evaluated", run.RunnerSecurity.DaemonPlatformState);
+    }
+
+    [Fact]
     public async Task GetStepLogAsync_ReturnsLogContent()
     {
         var workflowPath = WriteWorkflow("ci.yml", "CI");
@@ -586,7 +614,8 @@ public sealed class ActioWebDataServiceTests : IDisposable
         string? stepSummary = null,
         IReadOnlyList<StepLogAnnotation>? annotations = null,
         WorkflowJobEnvironment? environment = null,
-        IReadOnlyList<WorkflowSecurityFinding>? securityFindings = null)
+        IReadOnlyList<WorkflowSecurityFinding>? securityFindings = null,
+        RunnerSecurityMetadata? runnerSecurity = null)
     {
         var start = startedAt ?? DateTimeOffset.UtcNow;
         var finish = finishedAt ?? start;
@@ -624,7 +653,8 @@ public sealed class ActioWebDataServiceTests : IDisposable
             artifact,
             [],
             RunTrigger: runTrigger,
-            SecurityFindings: securityFindings);
+            SecurityFindings: securityFindings,
+            RunnerSecurity: runnerSecurity);
     }
 
     private sealed class FakeWorkflowExecutor : IWorkflowExecutor

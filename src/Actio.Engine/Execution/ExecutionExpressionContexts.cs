@@ -115,6 +115,13 @@ internal static class ExecutionExpressionContexts
             options.ProjectRoot);
     }
 
+    public static ExpressionContextData ForSecretBindings(IReadOnlyDictionary<string, string> secrets)
+    {
+        return new ExpressionContextData(
+            CreateUnavailableRoots(includeSecrets: false)
+                .Prepend(CreateSecretsRoot(secrets)));
+    }
+
     private static ExpressionContextData Create(
         string workflowName,
         WorkflowJob job,

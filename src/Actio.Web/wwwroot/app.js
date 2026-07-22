@@ -303,15 +303,29 @@ function renderRunActions(run) {
 }
 
 function renderSecurity(run) {
-  if (!run.securityFindings || run.securityFindings.length === 0) {
+  const findings = run.securityFindings ?? [];
+  const metadata = run.runnerSecurity;
+  if (!metadata && findings.length === 0) {
     return "";
   }
 
   return `
     <section class="summary">
       <div class="summary-head"><h2>Security</h2></div>
-      <div class="security-list">
-        ${run.securityFindings.map(finding => `
+      ${metadata ? `
+        <div class="summary-grid security-profile">
+          ${summaryCell("Provider", metadata.provider)}
+          ${summaryCell("Requested profile", metadata.requestedProfile)}
+          ${summaryCell("Effective profile", metadata.effectiveProfile)}
+          ${summaryCell("Security options", (metadata.appliedSecurityOptions ?? []).join(", ") || "None")}
+          ${summaryCell("Capabilities", metadata.capabilityPolicy)}
+          ${summaryCell("Confinement", metadata.confinementPolicy)}
+          ${summaryCell("Daemon/platform", metadata.daemonPlatformState)}
+          ${summaryCell("Degraded controls", (metadata.degradedControls ?? []).join(", ") || "None")}
+        </div>
+      ` : ""}
+      ${findings.length ? `<div class="security-list">
+        ${findings.map(finding => `
           <div class="security-row">
             <span class="security-level ${securityLevelClass(finding.severity)}">${escapeHtml(finding.severity)}</span>
             <span>
@@ -322,7 +336,7 @@ function renderSecurity(run) {
             </span>
           </div>
         `).join("")}
-      </div>
+      </div>` : ""}
     </section>
   `;
 }

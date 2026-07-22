@@ -38,6 +38,7 @@ public sealed class DockerRunnerProviderTests
         Assert.Contains("actio-test", args);
         Assert.Contains("A=1", args);
         Assert.Contains("B=2", args);
+        AssertSecureBaseline(args);
         Assert.True(imageIndex >= 0);
         Assert.Equal(args.Length - 1, imageIndex);
     }
@@ -140,6 +141,7 @@ public sealed class DockerRunnerProviderTests
         Assert.Contains("actio-test", args);
         Assert.Contains("INPUT_NAME=Actio", args);
         Assert.Contains($"{Path.GetFullPath(actionPath)}:/actio/action:ro", args);
+        AssertSecureBaseline(args);
         Assert.True(imageIndex >= 0);
         Assert.Equal("node", args[imageIndex + 1]);
         Assert.Equal("/actio/action/dist/index.js", args[imageIndex + 2]);
@@ -195,6 +197,7 @@ public sealed class DockerRunnerProviderTests
         Assert.Contains("--init", args);
         Assert.Contains($"{Path.GetFullPath(cachePath)}:/cache:ro", args);
         Assert.Contains("NODE_ENV=test", args);
+        AssertSecureBaseline(args);
         Assert.True(imageIndex >= 0);
         Assert.Equal("--entrypoint", args[imageIndex - 2]);
         Assert.Equal("sh", args[imageIndex - 1]);
@@ -277,6 +280,7 @@ public sealed class DockerRunnerProviderTests
         Assert.Contains("--health-interval=5s", args);
         Assert.Contains($"{Path.GetFullPath(dbPath)}:/var/lib/postgresql/data", args);
         Assert.Contains("POSTGRES_PASSWORD=postgres", args);
+        AssertSecureBaseline(args);
         Assert.Equal(args.Length - 1, imageIndex);
     }
 
@@ -326,6 +330,93 @@ public sealed class DockerRunnerProviderTests
         Assert.Contains("exit $LASTEXITCODE", args[imageIndex + 5]);
     }
 
+    [Fact]
+    public void CreateDockerfileActionBuildStartInfo_DoesNotRequestUnsafeEntitlements()
+    {
+        var actionRoot = Path.Combine(Directory.GetCurrentDirectory(), "cached-action");
+        var request = new DockerfileActionExecutionRequest(
+            "test",
+            "Use Dockerfile action",
+            "actio/action:abc123",
+            Directory.GetCurrentDirectory(),
+            actionRoot,
+            Path.Combine(actionRoot, "Dockerfile"),
+            new Dictionary<string, string>());
+
+        var args = DockerRunnerProvider.CreateDockerfileActionBuildStartInfo(request).ArgumentList.ToArray();
+
+        Assert.DoesNotContain("--allow", args);
+        Assert.DoesNotContain("--privileged", args);
+        Assert.DoesNotContain("--ssh", args);
+        Assert.DoesNotContain(args, argument => argument.Contains("docker.sock", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Theory]
+    [InlineData("--privileged")]
+    [InlineData("--cap-add=SYS_ADMIN")]
+    [InlineData("--device=/dev/sda")]
+    [InlineData("--device-cgroup-rule=c 1:3 rmw")]
+    [InlineData("--device-read-bps=/dev/sda:1mb")]
+    [InlineData("--device-read-iops=/dev/sda:1000")]
+    [InlineData("--device-write-bps=/dev/sda:1mb")]
+    [InlineData("--device-write-iops=/dev/sda:1000")]
+    [InlineData("--blkio-weight-device=/dev/sda:200")]
+    [InlineData("--pid=host")]
+    [InlineData("--ipc=host")]
+    [InlineData("--uts=host")]
+    [InlineData("--cgroupns=host")]
+    [InlineData("--userns=host")]
+    [InlineData("--network=host")]
+    [InlineData("--security-opt=seccomp=unconfined")]
+    [InlineData("--mount")]
+    [InlineData("--volume")]
+    [InlineData("-v")]
+    [InlineData("--volumes-from=another-container")]
+    [InlineData("--volume-driver=local")]
+    [InlineData("--use-api-socket")]
+    [InlineData("--net=host")]
+    [InlineData("--runtime=runc")]
+    [InlineData("--gpus=all")]
+    public void SecurityPolicy_RejectsPrivilegeAndConfinementOptions(string option)
+    {
+        var error = DockerRuntimeSecurityPolicy.Validate([option], [], "test container");
+
+        Assert.NotNull(error);
+        Assert.Contains("secure-baseline", error, StringComparison.Ordinal);
+        Assert.Contains(option.Split('=')[0], error, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("/var/run/docker.sock")]
+    [InlineData("/run/user/1000/podman.sock")]
+    [InlineData("/run/containerd/containerd.sock")]
+    [InlineData("\\\\.\\pipe\\docker_engine")]
+    public void SecurityPolicy_RejectsContainerRuntimeSocketMounts(string hostPath)
+    {
+        var error = DockerRuntimeSecurityPolicy.Validate(
+            [],
+            [new StepExecutionMount(hostPath, "/runtime.sock", ReadOnly: false)],
+            "test container");
+
+        Assert.NotNull(error);
+        Assert.Contains("secure-baseline", error, StringComparison.Ordinal);
+        Assert.Contains("socket", error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void SecurityMetadata_ReportsAppliedBaselineAndUnknownDaemonState()
+    {
+        var metadata = new DockerRunnerProvider().SecurityMetadata;
+
+        Assert.Equal("docker", metadata.Provider);
+        Assert.Equal("secure-baseline", metadata.RequestedProfile);
+        Assert.Equal("secure-baseline", metadata.EffectiveProfile);
+        Assert.Contains("no-new-privileges=true", metadata.AppliedSecurityOptions);
+        Assert.Equal("docker-default-no-additions", metadata.CapabilityPolicy);
+        Assert.Equal("not-evaluated", metadata.DaemonPlatformState);
+        Assert.Contains("daemon-platform-security-not-evaluated", metadata.DegradedControls);
+    }
+
     [Theory]
     [InlineData(null, "/workspace")]
     [InlineData("", "/workspace")]
@@ -348,5 +439,14 @@ public sealed class DockerRunnerProviderTests
         string expected)
     {
         Assert.Equal(expected, DockerRunnerProvider.ToActionContainerPath(actionPath, scriptPath));
+    }
+
+    private static void AssertSecureBaseline(IReadOnlyList<string> args)
+    {
+        var securityOptionIndex = Array.IndexOf(args.ToArray(), "--security-opt");
+        Assert.True(securityOptionIndex >= 0);
+        Assert.Equal("no-new-privileges=true", args[securityOptionIndex + 1]);
+        Assert.DoesNotContain("--cap-add", args);
+        Assert.DoesNotContain("--privileged", args);
     }
 }

@@ -1,7 +1,11 @@
+using Actio.Engine.Runs;
+
 namespace Actio.Engine.Execution;
 
 public interface IRunnerProvider
 {
+    RunnerSecurityMetadata SecurityMetadata { get; }
+
     bool SupportsRunner(string runsOn);
 
     Task<ServiceContainerStartResult> StartServiceContainersAsync(

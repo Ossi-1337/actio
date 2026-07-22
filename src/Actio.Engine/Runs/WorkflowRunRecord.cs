@@ -18,7 +18,8 @@ public sealed record WorkflowRunRecord(
     IReadOnlyList<string> Errors,
     IReadOnlyList<WorkflowTrigger>? Triggers = null,
     WorkflowRunTrigger? RunTrigger = null,
-    IReadOnlyList<WorkflowSecurityFinding>? SecurityFindings = null)
+    IReadOnlyList<WorkflowSecurityFinding>? SecurityFindings = null,
+    RunnerSecurityMetadata? RunnerSecurity = null)
 {
     public IReadOnlyList<WorkflowTrigger> Triggers { get; init; } = Triggers ?? [];
 

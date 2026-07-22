@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using Actio.Core.Workflows;
 using Actio.Engine.Execution;
+using Actio.Engine.Runs;
 
 namespace Actio.Runner.Docker;
 
@@ -24,6 +25,8 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         _imageResolver = imageResolver;
     }
 
+    public RunnerSecurityMetadata SecurityMetadata => DockerRuntimeSecurityPolicy.Metadata;
+
     public bool SupportsRunner(string runsOn)
     {
         return _imageResolver.TryResolveImage(runsOn, out _);
@@ -36,6 +39,18 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         if (request.Services.Count == 0)
         {
             return ServiceContainerStartResult.Started(null);
+        }
+
+        foreach (var service in request.Services)
+        {
+            var policyError = DockerRuntimeSecurityPolicy.Validate(
+                service.Options,
+                service.Volumes,
+                $"service '{service.Name}'");
+            if (policyError is not null)
+            {
+                return ServiceContainerStartResult.Failed([policyError]);
+            }
         }
 
         var errors = new List<string>();
@@ -125,6 +140,16 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         IStepOutputSink output,
         CancellationToken cancellationToken = default)
     {
+        var policyError = DockerRuntimeSecurityPolicy.Validate(
+            request.Container?.Options ?? [],
+            (request.Container?.Volumes ?? []).Concat(request.AdditionalMounts),
+            $"job '{request.JobName}' step '{request.StepName}'");
+        if (policyError is not null)
+        {
+            await output.WriteErrorLineAsync(policyError, cancellationToken);
+            return new StepExecutionResult(1);
+        }
+
         if (!TryResolveStepImage(request, out var image))
         {
             var message = $"Runner '{request.RunsOn}' is not mapped to a Docker image.";
@@ -158,6 +183,16 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         IStepOutputSink output,
         CancellationToken cancellationToken = default)
     {
+        var policyError = DockerRuntimeSecurityPolicy.Validate(
+            [],
+            request.AdditionalMounts,
+            $"Docker action '{request.StepName}'");
+        if (policyError is not null)
+        {
+            await output.WriteErrorLineAsync(policyError, cancellationToken);
+            return new StepExecutionResult(1);
+        }
+
         var containerName = CreateContainerName(request.JobName, request.StepName);
         using var process = new Process
         {
@@ -173,6 +208,16 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         IStepOutputSink output,
         CancellationToken cancellationToken = default)
     {
+        var policyError = DockerRuntimeSecurityPolicy.Validate(
+            [],
+            request.AdditionalMounts,
+            $"Dockerfile action '{request.StepName}'");
+        if (policyError is not null)
+        {
+            await output.WriteErrorLineAsync(policyError, cancellationToken);
+            return new StepExecutionResult(1);
+        }
+
         var buildResult = await EnsureDockerfileActionImageAsync(request, output, cancellationToken);
         if (!buildResult.Success)
         {
@@ -222,6 +267,16 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         IStepOutputSink output,
         CancellationToken cancellationToken = default)
     {
+        var policyError = DockerRuntimeSecurityPolicy.Validate(
+            [],
+            request.AdditionalMounts,
+            $"JavaScript action '{request.StepName}'");
+        if (policyError is not null)
+        {
+            await output.WriteErrorLineAsync(policyError, cancellationToken);
+            return new StepExecutionResult(1);
+        }
+
         var result = new StepExecutionResult(0);
 
         if (!string.IsNullOrWhiteSpace(request.Pre))
@@ -401,6 +456,10 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         string networkName,
         string containerName)
     {
+        DockerRuntimeSecurityPolicy.ThrowIfDenied(
+            service.Options,
+            service.Volumes,
+            $"service '{service.Name}'");
         var startInfo = CreateDockerStartInfo();
 
         startInfo.ArgumentList.Add("run");
@@ -413,6 +472,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         startInfo.ArgumentList.Add($"actio.job={request.JobName}");
         startInfo.ArgumentList.Add("--label");
         startInfo.ArgumentList.Add($"actio.service={service.Name}");
+        DockerRuntimeSecurityPolicy.AddRuntimeArguments(startInfo);
         startInfo.ArgumentList.Add("--network");
         startInfo.ArgumentList.Add(networkName);
         startInfo.ArgumentList.Add("--network-alias");
@@ -455,6 +515,11 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         JobContainerExecutionOptions? container,
         JobServiceNetwork? services)
     {
+        var mounts = (container?.Volumes ?? []).Concat(additionalMounts ?? []);
+        DockerRuntimeSecurityPolicy.ThrowIfDenied(
+            container?.Options ?? [],
+            mounts,
+            $"job '{jobName}' step '{stepName}'");
         var startInfo = CreateDockerStartInfo();
 
         startInfo.ArgumentList.Add("run");
@@ -468,6 +533,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         startInfo.ArgumentList.Add($"actio.job={jobName}");
         startInfo.ArgumentList.Add("--label");
         startInfo.ArgumentList.Add($"actio.step={stepName}");
+        DockerRuntimeSecurityPolicy.AddRuntimeArguments(startInfo);
 
         if (services is not null)
         {

@@ -1996,7 +1996,7 @@ public sealed partial class WorkflowParser
                 var optionValue = token[(separatorIndex + 1)..];
                 if (!SupportedContainerOptionsWithValues.Contains(optionName))
                 {
-                    errors.Add($"{path}.options contains unsupported Docker option '{optionName}'.");
+                    AddUnsupportedDockerOptionError(errors, path, optionName);
                     continue;
                 }
 
@@ -2018,7 +2018,7 @@ public sealed partial class WorkflowParser
 
             if (!SupportedContainerOptionsWithValues.Contains(token))
             {
-                errors.Add($"{path}.options contains unsupported Docker option '{token}'.");
+                AddUnsupportedDockerOptionError(errors, path, token);
                 continue;
             }
 
@@ -2033,6 +2033,13 @@ public sealed partial class WorkflowParser
         }
 
         return parsedOptions;
+    }
+
+    private static void AddUnsupportedDockerOptionError(List<string> errors, string path, string option)
+    {
+        errors.Add(ContainerSecurityOptionPolicy.IsDenied(option)
+            ? $"{path}.options Docker option '{option}' is blocked by {ContainerSecurityOptionPolicy.ProfileName}. Use an unprivileged image and Actio's declared container features."
+            : $"{path}.options contains unsupported Docker option '{option}'.");
     }
 
     private static WorkflowRunDefaults ReadRunDefaults(

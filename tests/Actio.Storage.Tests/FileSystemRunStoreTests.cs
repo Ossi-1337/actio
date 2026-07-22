@@ -37,7 +37,12 @@ public sealed class FileSystemRunStoreTests : IDisposable
             new WorkflowRunTrigger(
                 "workflow_dispatch",
                 "CLI",
-                new Dictionary<string, string> { ["environment"] = "staging" }));
+                new Dictionary<string, string> { ["environment"] = "staging" }),
+            RunnerSecurity: new RunnerSecurityMetadata(
+                "docker",
+                "secure-baseline",
+                "secure-baseline",
+                ["no-new-privileges=true"]));
 
         await store.SaveRunRecordAsync(record);
         var loaded = await store.ReadRunRecordAsync(runId);
@@ -54,6 +59,9 @@ public sealed class FileSystemRunStoreTests : IDisposable
         Assert.Equal("workflow_dispatch", loaded.RunTrigger.EventPayload.EventName);
         Assert.Equal("CLI", loaded.RunTrigger.EventPayload.Source);
         Assert.Equal("staging", loaded.RunTrigger.EventPayload.Inputs["environment"]);
+        Assert.NotNull(loaded.RunnerSecurity);
+        Assert.Equal("docker", loaded.RunnerSecurity.Provider);
+        Assert.Contains("no-new-privileges=true", loaded.RunnerSecurity.AppliedSecurityOptions);
         Assert.True(File.Exists(Path.Combine(_root, "runs", runId, "run.json")));
     }
 
@@ -114,6 +122,7 @@ public sealed class FileSystemRunStoreTests : IDisposable
         Assert.Equal("workflow_dispatch", loaded.RunTrigger.EventName);
         Assert.Equal("CLI", loaded.RunTrigger.Source);
         Assert.Empty(loaded.SecurityFindings);
+        Assert.Null(loaded.RunnerSecurity);
         Assert.Equal("workflow_dispatch", loaded.RunTrigger.EventPayload.EventName);
         Assert.Equal("CLI", loaded.RunTrigger.EventPayload.Source);
     }

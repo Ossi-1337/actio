@@ -578,7 +578,7 @@ public sealed class WorkflowParserTests
                     - ./cache:cache
                     - ./state:/actio/env
                     - ./cache:/cache:shared
-                  options: --privileged --cpus --memory=
+                  options: --privileged --use-api-socket --cpus --memory=
                   credentials:
                     username: oskar
                 steps:
@@ -594,7 +594,10 @@ public sealed class WorkflowParserTests
         Assert.Contains(result.Errors, error => error.Contains("source must be a relative path inside the workspace", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, error => error.Contains("target must be an absolute container path outside /actio/env", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, error => error.Contains("mode must be ro or rw", StringComparison.OrdinalIgnoreCase));
-        Assert.Contains(result.Errors, error => error.Contains("unsupported Docker option '--privileged'", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error =>
+            error.Contains("Docker option '--privileged' is blocked by secure-baseline", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error =>
+            error.Contains("Docker option '--use-api-socket' is blocked by secure-baseline", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, error => error.Contains("option '--cpus' requires a value", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, error => error.Contains("option '--memory' requires a value", StringComparison.OrdinalIgnoreCase));
     }
@@ -674,7 +677,8 @@ public sealed class WorkflowParserTests
         Assert.Contains(result.Errors, error => error == "workflow.jobs.unsafe.services.redis.image is required.");
         Assert.Contains(result.Errors, error => error.Contains("invalid Docker port mapping", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, error => error.Contains("source must be a relative path inside the workspace", StringComparison.OrdinalIgnoreCase));
-        Assert.Contains(result.Errors, error => error.Contains("unsupported Docker option '--network'", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error =>
+            error.Contains("Docker option '--network' is blocked by secure-baseline", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
