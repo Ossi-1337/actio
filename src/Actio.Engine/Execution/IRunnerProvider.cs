@@ -8,6 +8,17 @@ public interface IRunnerProvider
 
     bool SupportsRunner(string runsOn);
 
+    Task<RunnerPreflightResult> PreflightAsync(
+        RunnerPreflightRequest request,
+        CancellationToken cancellationToken = default)
+        => Task.FromResult(RunnerPreflightResult.Passed(
+            new RunnerExecutionContext(
+                request.RunId,
+                request.Policy.RequestedProfile,
+                request.Policy.RequestedProfile,
+                ContainerResourceLimits.Defaults,
+                request.Policy.InstanceIdentity)));
+
     Task<JobRuntimeStartResult> StartJobRuntimeAsync(
         JobRuntimeStartRequest request,
         CancellationToken cancellationToken = default);

@@ -1,4 +1,5 @@
 using Actio.Engine.Runs;
+using System.Text;
 
 namespace Actio.Engine.Execution;
 
@@ -12,19 +13,25 @@ internal sealed class StepOutputCollector : IStepOutputSink, IAsyncDisposable
     private readonly Dictionary<string, string> _capturedOutputs = new(StringComparer.Ordinal);
     private readonly List<StepLogAnnotation> _annotations = [];
     private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private readonly long _maxLogBytes;
+    private long _storedLogBytes;
+    private bool _logTruncated;
+    private const string TruncationMarker = "[actio] step log truncated because the configured size limit was reached.";
 
     public StepOutputCollector(
         TextWriter output,
         TextWriter error,
         IStepLog stepLog,
         OutputMarkerParser outputMarkerParser,
-        SecretMasker? secretMasker = null)
+        SecretMasker? secretMasker = null,
+        long maxLogBytes = long.MaxValue)
     {
         _output = output;
         _error = error;
         _stepLog = stepLog;
         _outputMarkerParser = outputMarkerParser;
         _workflowCommandProcessor = new WorkflowCommandProcessor(secretMasker);
+        _maxLogBytes = maxLogBytes;
     }
 
     public string? LogPath => _stepLog.LogPath;
@@ -53,7 +60,7 @@ internal sealed class StepOutputCollector : IStepOutputSink, IAsyncDisposable
                 _capturedOutputs[output.Key] = output.Value;
             }
 
-            await _stepLog.WriteOutputLineAsync(result.Line, cancellationToken);
+            await WriteLogLineAsync(result.Line, isError: false, cancellationToken);
         }
         finally
         {
@@ -70,7 +77,7 @@ internal sealed class StepOutputCollector : IStepOutputSink, IAsyncDisposable
             var result = _workflowCommandProcessor.Process(line);
             AddAnnotation(result);
             _error.WriteLine(result.Line);
-            await _stepLog.WriteErrorLineAsync(result.Line, cancellationToken);
+            await WriteLogLineAsync(result.Line, isError: true, cancellationToken);
         }
         finally
         {
@@ -90,5 +97,36 @@ internal sealed class StepOutputCollector : IStepOutputSink, IAsyncDisposable
         {
             _annotations.Add(result.Annotation);
         }
+    }
+
+    private async Task WriteLogLineAsync(
+        string line,
+        bool isError,
+        CancellationToken cancellationToken)
+    {
+        if (_logTruncated)
+        {
+            return;
+        }
+
+        var prefix = isError ? "[stderr] " : "[stdout] ";
+        var byteCount = Encoding.UTF8.GetByteCount(prefix + line + Environment.NewLine);
+        if (_storedLogBytes + byteCount <= _maxLogBytes)
+        {
+            _storedLogBytes += byteCount;
+            if (isError)
+            {
+                await _stepLog.WriteErrorLineAsync(line, cancellationToken);
+            }
+            else
+            {
+                await _stepLog.WriteOutputLineAsync(line, cancellationToken);
+            }
+
+            return;
+        }
+
+        _logTruncated = true;
+        await _stepLog.WriteErrorLineAsync(TruncationMarker, cancellationToken);
     }
 }

@@ -58,6 +58,7 @@ internal sealed class JobExecutor
         string projectRoot,
         string runId,
         RunFilesystemIsolation filesystemIsolation,
+        RunnerExecutionContext runnerContext,
         TextWriter output,
         TextWriter error,
         CancellationToken cancellationToken)
@@ -102,7 +103,12 @@ internal sealed class JobExecutor
 
         try
         {
-            var serviceStart = await StartJobRuntimeAsync(job, projectRoot, output, jobCancellationToken);
+            var serviceStart = await StartJobRuntimeAsync(
+                job,
+                projectRoot,
+                runnerContext,
+                output,
+                jobCancellationToken);
             if (!serviceStart.Success)
             {
                 errors.AddRange(serviceStart.Errors);
@@ -431,6 +437,7 @@ internal sealed class JobExecutor
     private async Task<JobRuntimeStartResult> StartJobRuntimeAsync(
         WorkflowJob job,
         string projectRoot,
+        RunnerExecutionContext runnerContext,
         TextWriter output,
         CancellationToken cancellationToken)
     {
@@ -444,7 +451,8 @@ internal sealed class JobExecutor
                 job.Name,
                 projectRoot,
                 job.Container?.Ports ?? [],
-                CreateServiceDefinitions(job, projectRoot)),
+                CreateServiceDefinitions(job, projectRoot),
+                runnerContext),
             cancellationToken);
     }
 
@@ -512,7 +520,14 @@ internal sealed class JobExecutor
             return StepExecutionOutcome.StorageFailed(StorageError.Format($"opening log for job '{job.Name}' step '{step.Name}'", ex));
         }
 
-        await using var collector = new StepOutputCollector(output, error, stepLog, _outputMarkerParser, secretMasker);
+        await using var collector = new StepOutputCollector(
+            output,
+            error,
+            stepLog,
+            _outputMarkerParser,
+            secretMasker,
+            serviceNetwork?.Execution?.ResourceLimits.StepLogBytes ??
+                ContainerResourceLimits.Defaults.StepLogBytes);
         var effectiveRunDefaults = runDefaults.Merge(new WorkflowRunDefaults(step.Shell, step.WorkingDirectory));
         StepExecutionPlan? plan = null;
         StepEnvironmentFiles environmentFiles;

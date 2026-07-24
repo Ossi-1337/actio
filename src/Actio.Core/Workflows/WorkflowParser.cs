@@ -180,7 +180,6 @@ public sealed partial class WorkflowParser
         "--hostname",
         "--memory",
         "--memory-reservation",
-        "--memory-swap",
         "--shm-size",
         "--ulimit"
     };

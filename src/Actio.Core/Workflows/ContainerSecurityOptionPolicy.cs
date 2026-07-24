@@ -41,7 +41,23 @@ public static class ContainerSecurityOptionPolicy
         "--volume-driver",
         "--use-api-socket",
         "--runtime",
-        "--gpus"
+        "--gpus",
+        "--cpu-period",
+        "--cpu-quota",
+        "--cpu-rt-period",
+        "--cpu-rt-runtime",
+        "--cpu-shares",
+        "--cpuset-cpus",
+        "--cpuset-mems",
+        "--pids-limit",
+        "--tmpfs",
+        "--log-driver",
+        "--log-opt",
+        "--memory-swap",
+        "--memory-swappiness",
+        "--oom-kill-disable",
+        "--oom-score-adj",
+        "--restart"
     };
 
     public static bool IsDenied(string option)

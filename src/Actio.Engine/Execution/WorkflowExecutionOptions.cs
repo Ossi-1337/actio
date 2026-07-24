@@ -10,7 +10,9 @@ public sealed record WorkflowExecutionOptions(
     IReadOnlyList<string>? ReusableWorkflowCallStack = null,
     IReadOnlyDictionary<string, string>? Secrets = null,
     IReadOnlyDictionary<string, string>? Variables = null,
-    RunFilesystemIsolation? FilesystemIsolation = null)
+    RunFilesystemIsolation? FilesystemIsolation = null,
+    RunnerExecutionPolicy? RunnerPolicy = null,
+    RunnerExecutionContext? RunnerContext = null)
 {
     public WorkflowRunTrigger RunTrigger { get; init; } = RunTrigger ?? WorkflowRunTrigger.CliWorkflowDispatch;
 
@@ -21,4 +23,6 @@ public sealed record WorkflowExecutionOptions(
     public IReadOnlyDictionary<string, string> Variables { get; init; } = Variables ?? new Dictionary<string, string>();
 
     public RunFilesystemIsolation FilesystemIsolation { get; init; } = FilesystemIsolation ?? RunFilesystemIsolation.None;
+
+    public RunnerExecutionPolicy RunnerPolicy { get; init; } = RunnerPolicy ?? RunnerExecutionPolicy.CreateDefault();
 }

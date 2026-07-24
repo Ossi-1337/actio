@@ -662,7 +662,7 @@ public sealed class WorkflowParserTests
                     - ./cache:cache
                     - ./state:/actio/env
                     - ./cache:/cache:shared
-                  options: --privileged --use-api-socket --publish=8080:80 --cpus --memory=
+                  options: --privileged --use-api-socket --publish=8080:80 --memory-swap=1g --cpus --memory=
                   credentials:
                     username: oskar
                 steps:
@@ -684,6 +684,8 @@ public sealed class WorkflowParserTests
             error.Contains("Docker option '--use-api-socket' is blocked by secure-baseline", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, error =>
             error.Contains("Docker option '--publish' is blocked by secure-baseline", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error =>
+            error.Contains("Docker option '--memory-swap' is blocked by secure-baseline", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, error => error.Contains("option '--cpus' requires a value", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, error => error.Contains("option '--memory' requires a value", StringComparison.OrdinalIgnoreCase));
     }

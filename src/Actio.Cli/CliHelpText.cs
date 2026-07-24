@@ -32,6 +32,7 @@ public static class CliHelpText
         Options:
           -h, --help              Show help.
           --version               Show version.
+          --security-profile NAME Run workflows with secure-baseline or strict.
 
         Examples:
           actio run ci.yml
@@ -58,6 +59,7 @@ public static class CliHelpText
         Options:
           -h, --help              Show help for the run command.
           --input NAME=VALUE      Provide a workflow_dispatch input. Can be repeated.
+          --security-profile NAME Use secure-baseline (default) or strict.
 
         Description:
           Resolves .workflows/<workflow>.yml first, then .github/workflows/<workflow>.yml
@@ -70,6 +72,7 @@ public static class CliHelpText
         Examples:
           actio run ci.yml
           actio run ci.yml --input environment=staging
+          actio run ci.yml --security-profile strict
           actio ci.yml
         """;
 

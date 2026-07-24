@@ -116,10 +116,10 @@ public sealed class CliParser
             return CliCommand.UsageError("Workflow argument for 'run' must end with .yml or .yaml.");
         }
 
-        var inputs = ParseRunOptions(args, 2, "run");
-        return inputs.Success
-            ? CliCommand.RunWorkflow(args[1], inputs.Inputs)
-            : CliCommand.UsageError(inputs.ErrorMessage!);
+        var options = ParseRunOptions(args, 2, "run");
+        return options.Success
+            ? CliCommand.RunWorkflow(args[1], options.Inputs, options.SecurityProfile)
+            : CliCommand.UsageError(options.ErrorMessage!);
     }
 
     private static CliCommand ParseShorthandRunCommand(IReadOnlyList<string> args)
@@ -131,10 +131,10 @@ public sealed class CliParser
             return CliCommand.RunWorkflow(workflowName);
         }
 
-        var inputs = ParseRunOptions(args, 1, null);
-        return inputs.Success
-            ? CliCommand.RunWorkflow(workflowName, inputs.Inputs)
-            : CliCommand.UsageError(inputs.ErrorMessage!);
+        var options = ParseRunOptions(args, 1, null);
+        return options.Success
+            ? CliCommand.RunWorkflow(workflowName, options.Inputs, options.SecurityProfile)
+            : CliCommand.UsageError(options.ErrorMessage!);
     }
 
     private static RunOptionsParseResult ParseRunOptions(
@@ -143,6 +143,8 @@ public sealed class CliParser
         string? commandName)
     {
         var inputs = new Dictionary<string, string>(StringComparer.Ordinal);
+        var securityProfile = Actio.Engine.Execution.RunnerSecurityProfiles.SecureBaseline;
+        var securityProfileProvided = false;
 
         for (var index = startIndex; index < args.Count; index++)
         {
@@ -152,6 +154,29 @@ public sealed class CliParser
                 return RunOptionsParseResult.Failed(commandName is null
                     ? $"Unexpected argument '{option}'."
                     : $"Unexpected argument '{option}' for '{commandName}'.");
+            }
+
+            if (string.Equals(option, "--security-profile", StringComparison.Ordinal))
+            {
+                if (securityProfileProvided)
+                {
+                    return RunOptionsParseResult.Failed("'--security-profile' was provided more than once.");
+                }
+
+                if (index + 1 >= args.Count)
+                {
+                    return RunOptionsParseResult.Failed("Missing value for '--security-profile'.");
+                }
+
+                securityProfile = args[++index];
+                if (!Actio.Engine.Execution.RunnerSecurityProfiles.IsSupported(securityProfile))
+                {
+                    return RunOptionsParseResult.Failed(
+                        $"Security profile '{securityProfile}' is invalid. Use 'secure-baseline' or 'strict'.");
+                }
+
+                securityProfileProvided = true;
+                continue;
             }
 
             if (!string.Equals(option, "--input", StringComparison.Ordinal))
@@ -186,7 +211,7 @@ public sealed class CliParser
             }
         }
 
-        return RunOptionsParseResult.Parsed(inputs);
+        return RunOptionsParseResult.Parsed(inputs, securityProfile);
     }
 
     private static CliCommand ParseWebCommand(IReadOnlyList<string> args)
@@ -344,12 +369,19 @@ public sealed class CliParser
     private sealed record RunOptionsParseResult(
         bool Success,
         IReadOnlyDictionary<string, string> Inputs,
+        string SecurityProfile,
         string? ErrorMessage)
     {
-        public static RunOptionsParseResult Parsed(IReadOnlyDictionary<string, string> inputs)
-            => new(true, inputs, null);
+        public static RunOptionsParseResult Parsed(
+            IReadOnlyDictionary<string, string> inputs,
+            string securityProfile)
+            => new(true, inputs, securityProfile, null);
 
         public static RunOptionsParseResult Failed(string errorMessage)
-            => new(false, new Dictionary<string, string>(), errorMessage);
+            => new(
+                false,
+                new Dictionary<string, string>(),
+                Actio.Engine.Execution.RunnerSecurityProfiles.SecureBaseline,
+                errorMessage);
     }
 }

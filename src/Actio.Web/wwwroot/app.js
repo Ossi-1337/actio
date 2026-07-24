@@ -329,6 +329,12 @@ function renderSecurity(run) {
           ${summaryCell("Published ports", metadata.publishedPortPolicy)}
           ${summaryCell("Daemon/platform", metadata.daemonPlatformState)}
           ${summaryCell("Degraded controls", (metadata.degradedControls ?? []).join(", ") || "None")}
+          ${summaryCell("Resource limits", formatResourceLimits(metadata.effectiveResourceLimits))}
+          ${summaryCell("Preflight", metadata.preflight?.status ?? "not-reported")}
+          ${summaryCell("Docker Engine", metadata.preflight?.engineVersion ?? "not-reported")}
+          ${summaryCell("Cgroups", [metadata.preflight?.cgroupVersion, metadata.preflight?.cgroupDriver].filter(Boolean).join(" / ") || "not-reported")}
+          ${summaryCell("Strict controls", (metadata.strictControls ?? []).join(", ") || "None")}
+          ${summaryCell("Cleanup", formatCleanup(metadata.cleanup))}
         </div>
         ${(metadata.imageUserObservations ?? []).length ? `<div class="security-list">
           ${(metadata.imageUserObservations ?? []).map(observation => `
@@ -372,6 +378,22 @@ function renderSecurity(run) {
       </div>` : ""}
     </section>
   `;
+}
+
+function formatResourceLimits(limits) {
+  if (!limits) {
+    return "not-reported";
+  }
+
+  return `${limits.cpu} CPU · ${formatBytes(limits.memoryBytes)} memory · ${limits.pids} PIDs · ${formatBytes(limits.tempBytes)} /tmp`;
+}
+
+function formatCleanup(cleanup) {
+  if (!cleanup) {
+    return "not-reported";
+  }
+
+  return `${cleanup.removedContainers}/${cleanup.candidateContainers} containers · ${cleanup.removedNetworks}/${cleanup.candidateNetworks} networks removed`;
 }
 
 function renderGraph(run) {

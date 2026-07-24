@@ -6,7 +6,8 @@ public sealed record JobRuntimeStartRequest(
     string JobName,
     string ProjectRoot,
     IReadOnlyList<ContainerPortMapping> JobContainerPorts,
-    IReadOnlyList<ServiceContainerDefinition> Services);
+    IReadOnlyList<ServiceContainerDefinition> Services,
+    RunnerExecutionContext? Execution = null);
 
 public sealed record ServiceContainerDefinition(
     string Name,
@@ -44,7 +45,9 @@ public sealed record JobRuntimeContext(
     string NetworkName,
     IReadOnlyList<string> ServiceContainerNames,
     IReadOnlyList<ContainerPortMapping>? ReservedPorts = null,
-    string? PortLeaseOwner = null)
+    string? PortLeaseOwner = null,
+    RunnerExecutionContext? Execution = null,
+    bool OwnsNetwork = true)
 {
     public IReadOnlyList<ContainerPortMapping> ReservedPorts { get; init; } = ReservedPorts ?? [];
 }

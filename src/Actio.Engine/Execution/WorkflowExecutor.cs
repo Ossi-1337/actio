@@ -181,6 +181,56 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
 
         workflow = executableWorkflow;
         var plan = JobGraphPlanner.Plan(expansion.Jobs);
+        if (options.RunnerContext is null && expansion.Errors.Count == 0 && plan.Errors.Count == 0)
+        {
+            var preflight = await _runnerProvider.PreflightAsync(
+                new RunnerPreflightRequest(
+                    runId,
+                    options.RunnerPolicy,
+                    expansion.Jobs.Values.Any(HasPublishedPorts)),
+                cancellationToken);
+
+            foreach (var warning in preflight.Warnings)
+            {
+                synchronizedError.WriteLine($"warning: {warning}");
+            }
+
+            if (!preflight.Success)
+            {
+                errors.AddRange(preflight.Errors);
+                var preflightFinishedAt = DateTimeOffset.UtcNow;
+                var preflightRecord = CreateRunRecord(
+                    runId,
+                    workflow,
+                    options,
+                    FailedStatus,
+                    startedAt,
+                    preflightFinishedAt,
+                    jobRecords,
+                    runOutputs,
+                    runArtifacts,
+                    errors,
+                    securityFindings,
+                    _runnerProvider.SecurityMetadata);
+                var preflightSaveError = await TrySaveRunRecordAsync(preflightRecord, CancellationToken.None);
+                if (preflightSaveError is not null)
+                {
+                    errors.Add(preflightSaveError);
+                }
+
+                return new WorkflowExecutionResult(
+                    WorkflowExecutionStatus.Failed,
+                    0,
+                    totalSteps,
+                    errors,
+                    runId: runId,
+                    runRecordPath: preflightSaveError is null ? storagePaths.RunRecordPath : null,
+                    securityFindings: securityFindings);
+            }
+
+            options = options with { RunnerContext = preflight.Context };
+        }
+
         var initialSaveError = await TrySaveRunRecordAsync(
             CreateRunRecord(
                 runId,
@@ -441,10 +491,15 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             options.ProjectRoot,
             runId,
             options.FilesystemIsolation,
+            options.RunnerContext ?? throw new InvalidOperationException("Runner preflight context is missing."),
             output,
             error,
             cancellationToken);
     }
+
+    private static bool HasPublishedPorts(WorkflowJob job)
+        => (job.Container?.Ports.Count ?? 0) > 0 ||
+            job.Services.Values.Any(service => service.Ports.Count > 0);
 
     private async Task<IReadOnlyList<PlannedJobOutcome>> ExecuteMatrixJobGroupAsync(
         WorkflowDocument workflow,
@@ -589,6 +644,11 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             options.ReusableWorkflowCallStack.Append(calleePath).ToArray(),
             Secrets: binding.Secrets,
             Variables: options.Variables);
+        nestedOptions = nestedOptions with
+        {
+            RunnerPolicy = options.RunnerPolicy,
+            RunnerContext = options.RunnerContext
+        };
         var nestedResult = await nestedExecutor.ExecuteAsync(
             calleeWorkflow,
             nestedOptions,

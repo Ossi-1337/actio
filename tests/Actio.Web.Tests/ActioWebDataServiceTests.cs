@@ -226,7 +226,16 @@ public sealed class ActioWebDataServiceTests : IDisposable
                         Internal: false,
                         ["postgres"],
                         [new RunnerPublishedPort("service:postgres", "127.0.0.1", 5432, 15432, "tcp")])
-                ])));
+                ],
+                EffectiveResourceLimits: ContainerResourceLimits.Defaults,
+                Preflight: new RunnerPreflightEvidence(
+                    Status: "passed",
+                    EngineVersion: "29.0.0",
+                    CgroupVersion: "2"),
+                Cleanup: new RunnerCleanupEvidence(
+                    CandidateContainers: 1,
+                    RemovedContainers: 1),
+                StrictControls: ["cap-drop-all"])));
 
         var run = await CreateService().GetRunAsync("run-1");
 
@@ -242,6 +251,10 @@ public sealed class ActioWebDataServiceTests : IDisposable
         Assert.Equal("writable", run.RunnerSecurity.RootFilesystemPolicy);
         Assert.Contains("/workspace/.actio/secrets.env", run.RunnerSecurity.ProtectedPaths);
         Assert.Equal("root", Assert.Single(run.RunnerSecurity.ImageUserObservations).Status);
+        Assert.Equal(2, run.RunnerSecurity.EffectiveResourceLimits?.Cpu);
+        Assert.Equal("passed", run.RunnerSecurity.Preflight?.Status);
+        Assert.Equal(1, run.RunnerSecurity.Cleanup?.RemovedContainers);
+        Assert.Contains("cap-drop-all", run.RunnerSecurity.StrictControls);
     }
 
     [Fact]

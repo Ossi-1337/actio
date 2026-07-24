@@ -47,6 +47,118 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_StopsBeforeRuntimeWhenPreflightFails()
+    {
+        var runner = new FakeRunnerProvider([0])
+        {
+            PreflightResult = RunnerPreflightResult.Failed(["Docker preflight failed."])
+        };
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Test", "dotnet test", null)]));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Contains("Docker preflight failed.", result.Errors);
+        Assert.Empty(runner.RuntimeStartRequests);
+        Assert.Single(runner.PreflightRequests);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_PropagatesRequestedProfileAndEffectiveLimits()
+    {
+        var limits = ContainerResourceLimits.Defaults with { Cpu = 1 };
+        var runner = new FakeRunnerProvider([0])
+        {
+            PreflightResult = RunnerPreflightResult.Passed(
+                new RunnerExecutionContext(
+                    "run-1",
+                    RunnerSecurityProfiles.Strict,
+                    RunnerSecurityProfiles.Strict,
+                    limits,
+                    new ActioInstanceIdentity("instance", 1, 1)))
+        };
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Test", "dotnet test", null)]));
+
+        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(
+                "C:\\repo",
+                RunId: "run-1",
+                RunnerPolicy: new RunnerExecutionPolicy(
+                    RunnerSecurityProfiles.Strict,
+                    new ContainerResourceConfiguration(),
+                    new ActioInstanceIdentity("instance", 1, 1))),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success);
+        var runtime = Assert.Single(runner.RuntimeStartRequests);
+        Assert.Equal(RunnerSecurityProfiles.Strict, runtime.Execution?.EffectiveProfile);
+        Assert.Equal(1, runtime.Execution?.ResourceLimits.Cpu);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_TruncatesPersistedStepLogAndContinuesDrainingOutput()
+    {
+        var runner = new FakeRunnerProvider(
+            [new FakeRunnerStep(0, ["1234567890", "abcdefghij", "still-drained"])])
+        {
+            PreflightResult = RunnerPreflightResult.Passed(
+                new RunnerExecutionContext(
+                    "run-1",
+                    RunnerSecurityProfiles.SecureBaseline,
+                    RunnerSecurityProfiles.SecureBaseline,
+                    ContainerResourceLimits.Defaults with { StepLogBytes = 45 },
+                    new ActioInstanceIdentity("instance", 1, 1)))
+        };
+        var store = new RecordingRunStore();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Test", "echo test", null)]));
+        using var output = new StringWriter();
+
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo", RunId: "run-1"),
+            output,
+            TextWriter.Null);
+
+        Assert.True(result.Success);
+        Assert.Contains("still-drained", output.ToString());
+        Assert.Contains("[stdout] 1234567890", store.LogLines);
+        Assert.Contains("[stdout] abcdefghij", store.LogLines);
+        Assert.Contains(
+            store.LogLines,
+            line => line.Contains("step log truncated", StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            store.LogLines,
+            line => line.Contains("still-drained", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task ExecuteAsync_SavesRunningRunRecordsBeforeFinalRecord()
     {
         var runner = new FakeRunnerProvider([0]);
@@ -4695,12 +4807,32 @@ public sealed class WorkflowExecutorTests
 
         public List<JobRuntimeContext> StoppedRuntimes { get; } = [];
 
+        public List<RunnerPreflightRequest> PreflightRequests { get; } = [];
+
         public RunnerSecurityMetadata SecurityMetadata { get; } = new(
             "fake",
             "test",
             "test");
 
         public JobRuntimeStartResult? RuntimeStartResult { get; set; }
+
+        public RunnerPreflightResult? PreflightResult { get; set; }
+
+        public Task<RunnerPreflightResult> PreflightAsync(
+            RunnerPreflightRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            PreflightRequests.Add(request);
+            return Task.FromResult(
+                PreflightResult ??
+                RunnerPreflightResult.Passed(
+                    new RunnerExecutionContext(
+                        request.RunId,
+                        request.Policy.RequestedProfile,
+                        request.Policy.RequestedProfile,
+                        ContainerResourceLimits.Defaults,
+                        request.Policy.InstanceIdentity)));
+        }
 
         public bool SupportsRunner(string runsOn)
         {
@@ -4716,7 +4848,8 @@ public sealed class WorkflowExecutorTests
                 RuntimeStartResult ??
                 JobRuntimeStartResult.Started(new JobRuntimeContext(
                     "actio-test-network",
-                    request.Services.Select(service => $"actio-{service.Name}").ToArray())));
+                    request.Services.Select(service => $"actio-{service.Name}").ToArray(),
+                    Execution: request.Execution)));
         }
 
         public Task<JobRuntimeStopResult> StopJobRuntimeAsync(

@@ -3,6 +3,7 @@ using Actio.Core.Security;
 using Actio.Core.Workflows;
 using Actio.Engine.Actions;
 using Actio.Engine.Caching;
+using Actio.Engine.Configuration;
 using Actio.Engine.Execution;
 using Actio.Engine.Runs;
 using Actio.Runner.Docker;
@@ -24,6 +25,7 @@ public sealed class CliApplication
     private readonly FileSystemLocalValueProvider _localValueProvider;
     private readonly FileSystemRunStore _runStore;
     private readonly Func<string> _createRunId;
+    private readonly IActioConfigurationProvider _configurationProvider;
 
     public CliApplication()
         : this(
@@ -35,7 +37,8 @@ public sealed class CliApplication
             new FileSystemActionCache(),
             new FileSystemDependencyCache(),
             new CliOutputFormatter(),
-            new FileSystemLocalValueProvider())
+            new FileSystemLocalValueProvider(),
+            configurationProvider: new FileSystemActioConfigurationProvider())
     {
     }
 
@@ -50,7 +53,8 @@ public sealed class CliApplication
         CliOutputFormatter? outputFormatter = null,
         FileSystemLocalValueProvider? localValueProvider = null,
         FileSystemRunStore? runStore = null,
-        Func<string>? createRunId = null)
+        Func<string>? createRunId = null,
+        IActioConfigurationProvider? configurationProvider = null)
     {
         _resolver = resolver;
         _parser = parser;
@@ -63,6 +67,7 @@ public sealed class CliApplication
         _localValueProvider = localValueProvider ?? new FileSystemLocalValueProvider();
         _runStore = runStore ?? new FileSystemRunStore();
         _createRunId = createRunId ?? _runStore.CreateRunId;
+        _configurationProvider = configurationProvider ?? new FileSystemActioConfigurationProvider();
     }
 
     public int Run(string[] args, string workingDirectory, TextWriter output, TextWriter error)
@@ -169,6 +174,7 @@ public sealed class CliApplication
             resolution.WorkflowPath,
             command.Inputs,
             "CLI",
+            command.SecurityProfile,
             output,
             error,
             cancellationToken);
@@ -212,6 +218,7 @@ public sealed class CliApplication
             sourceRun.WorkflowPath,
             sourceRun.RunTrigger.Inputs,
             $"rerun:{sourceRun.RunId}",
+            sourceRun.RunnerSecurity?.RequestedProfile ?? RunnerSecurityProfiles.SecureBaseline,
             output,
             error,
             cancellationToken);
@@ -278,6 +285,7 @@ public sealed class CliApplication
         string? workflowPath,
         IReadOnlyDictionary<string, string> inputs,
         string triggerSource,
+        string securityProfile,
         TextWriter output,
         TextWriter error,
         CancellationToken cancellationToken)
@@ -303,6 +311,13 @@ public sealed class CliApplication
             return ExitCodes.ValidationError;
         }
 
+        var configuration = _configurationProvider.Load();
+        if (!configuration.Success)
+        {
+            WriteErrors(error, configuration.Errors);
+            return ExitCodes.ValidationError;
+        }
+
         var runId = _createRunId();
         var wrotePipelineLink = await WriteViewPipelineLinkAsync(
             projectRoot,
@@ -325,7 +340,11 @@ public sealed class CliApplication
                 runId,
                 new WorkflowRunTrigger("workflow_dispatch", triggerSource, inputResolution.Inputs),
                 Secrets: localValues.Values.Secrets,
-                Variables: localValues.Values.Variables),
+                Variables: localValues.Values.Variables,
+                RunnerPolicy: new RunnerExecutionPolicy(
+                    securityProfile,
+                    configuration.Configuration,
+                    configuration.InstanceIdentity)),
             output,
             error,
             cancellationToken);

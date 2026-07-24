@@ -304,16 +304,21 @@ public sealed class CliApplicationTests : IDisposable
                     required: true
             """);
         var runStore = new FileSystemRunStore(Path.Combine(_root, "actio-home"));
-        await SaveRunAsync(
-            runStore,
-            CreateRun(
+        var sourceRun = CreateRun(
                 "run-source",
                 "CI",
                 workflowPath,
                 runTrigger: new WorkflowRunTrigger(
                     "workflow_dispatch",
                     "CLI",
-                    new Dictionary<string, string> { ["environment"] = "staging" })));
+                    new Dictionary<string, string> { ["environment"] = "staging" })) with
+        {
+            RunnerSecurity = new RunnerSecurityMetadata(
+                "docker",
+                RunnerSecurityProfiles.Strict,
+                RunnerSecurityProfiles.Strict)
+        };
+        await SaveRunAsync(runStore, sourceRun);
         var executor = new FakeWorkflowExecutor(new WorkflowExecutionResult(WorkflowExecutionStatus.Success, 1, 1, []));
 
         using var output = new StringWriter();
@@ -329,6 +334,7 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Equal("run-rerun", executor.Options!.RunId);
         Assert.Equal("rerun:run-source", executor.Options.RunTrigger.Source);
         Assert.Equal("staging", executor.Options.RunTrigger.Inputs["environment"]);
+        Assert.Equal(RunnerSecurityProfiles.Strict, executor.Options.RunnerPolicy.RequestedProfile);
         Assert.Contains("Workflow warnings:", error.ToString());
         Assert.Contains("workflow.on is parsed as trigger metadata", error.ToString());
     }

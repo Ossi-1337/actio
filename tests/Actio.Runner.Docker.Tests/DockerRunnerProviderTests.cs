@@ -1,5 +1,6 @@
 using Actio.Core.Workflows;
 using Actio.Engine.Execution;
+using System.Diagnostics;
 
 namespace Actio.Runner.Docker.Tests;
 
@@ -42,6 +43,49 @@ public sealed class DockerRunnerProviderTests
         AssertSecureBaseline(args);
         Assert.True(imageIndex >= 0);
         Assert.Equal(args.Length - 1, imageIndex);
+    }
+
+    [Fact]
+    public void CreateDockerActionStartInfo_AppliesResourcesOwnershipAndStrictControls()
+    {
+        var execution = new RunnerExecutionContext(
+            "run-1",
+            RunnerSecurityProfiles.Strict,
+            RunnerSecurityProfiles.Strict,
+            new ContainerResourceLimits(
+                1.5,
+                1024L * 1024 * 1024,
+                256,
+                128L * 1024 * 1024,
+                5L * 1024 * 1024,
+                2,
+                25L * 1024 * 1024),
+            new ActioInstanceIdentity("instance-1", 42, 1234));
+        var runtime = new JobRuntimeContext(
+            "none",
+            [],
+            Execution: execution,
+            OwnsNetwork: false);
+        var request = new DockerActionExecutionRequest(
+            "test",
+            "Use image",
+            "alpine:3.20",
+            Directory.GetCurrentDirectory(),
+            new Dictionary<string, string>(),
+            Runtime: runtime);
+
+        var args = DockerRunnerProvider.CreateDockerActionStartInfo(request, "actio-test")
+            .ArgumentList
+            .ToArray();
+
+        AssertOptionValue(args, "--cpus", "1.5");
+        AssertOptionValue(args, "--memory", "1073741824");
+        AssertOptionValue(args, "--pids-limit", "256");
+        Assert.Contains("--cap-drop", args);
+        Assert.Contains("ALL", args);
+        Assert.Contains("--read-only", args);
+        Assert.Contains("io.actio.instance=instance-1", args);
+        AssertOptionValue(args, "--network", "none");
     }
 
     [Fact]
@@ -189,7 +233,7 @@ public sealed class DockerRunnerProviderTests
             Container: new JobContainerExecutionOptions(
                 "node:22",
                 [new ContainerPortMapping(3000, 3000)],
-                ["--cpus", "1", "--init"],
+                ["--cpus", "1", "--memory", "512m", "--init"],
                 [new StepExecutionMount(cachePath, "/cache", ReadOnly: true)]));
 
         var startInfo = DockerRunnerProvider.CreateShellStepStartInfo(request, "node:22", "actio-test");
@@ -200,6 +244,7 @@ public sealed class DockerRunnerProviderTests
         Assert.Contains("--cpus", args);
         Assert.Contains("1", args);
         Assert.Contains("--init", args);
+        AssertOptionValue(args, "--memory-swap", "536870912");
         Assert.Contains($"type=bind,src={Path.GetFullPath(cachePath)},dst=/cache,readonly", args);
         Assert.Contains("NODE_ENV=test", args);
         AssertSecureBaseline(args);
@@ -478,6 +523,9 @@ public sealed class DockerRunnerProviderTests
     [InlineData("-P")]
     [InlineData("--expose=80")]
     [InlineData("--security-opt=seccomp=unconfined")]
+    [InlineData("--log-driver=none")]
+    [InlineData("--memory-swappiness=100")]
+    [InlineData("--cpu-quota=100000")]
     [InlineData("--mount")]
     [InlineData("--volume")]
     [InlineData("-v")]
@@ -588,6 +636,28 @@ public sealed class DockerRunnerProviderTests
     }
 
     [Fact]
+    public void GetOwnerState_RecognizesActiveOwnerAndPidReuse()
+    {
+        using var process = Process.GetCurrentProcess();
+        var start = process.StartTime.ToUniversalTime().Ticks;
+
+        Assert.Equal(
+            DockerResourceOwnerState.Active,
+            DockerCleanupPolicy.GetOwnerState(process.Id, start));
+        Assert.Equal(
+            DockerResourceOwnerState.Stale,
+            DockerCleanupPolicy.GetOwnerState(process.Id, start - 1));
+    }
+
+    [Fact]
+    public void GetOwnerState_TreatsMissingProcessAsStale()
+    {
+        Assert.Equal(
+            DockerResourceOwnerState.Stale,
+            DockerCleanupPolicy.GetOwnerState(int.MaxValue, 1));
+    }
+
+    [Fact]
     public void CreateNetworkObservation_RecordsServicesAndLoopbackPortPolicy()
     {
         var request = new JobRuntimeStartRequest(
@@ -625,6 +695,49 @@ public sealed class DockerRunnerProviderTests
             });
     }
 
+    [Fact]
+    public void CreateNetworkCreateStartInfo_StrictNetworkIsInternalAndOwned()
+    {
+        var execution = new RunnerExecutionContext(
+            "run-1",
+            RunnerSecurityProfiles.Strict,
+            RunnerSecurityProfiles.Strict,
+            ContainerResourceLimits.Defaults,
+            new ActioInstanceIdentity("instance-1", 42, 1234));
+
+        var args = DockerRunnerProvider.CreateNetworkCreateStartInfo(
+                "test",
+                "actio-test-network",
+                execution,
+                internalNetwork: true)
+            .ArgumentList
+            .ToArray();
+
+        Assert.Contains("--internal", args);
+        Assert.Contains("io.actio.managed=true", args);
+        Assert.Contains("io.actio.instance=instance-1", args);
+        Assert.Contains("io.actio.resource=network", args);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(18080)]
+    public void ValidatePublishedPorts_StrictRejectsDynamicAndFixedHostPorts(int? hostPort)
+    {
+        var execution = new RunnerExecutionContext(
+            "run-1",
+            RunnerSecurityProfiles.Strict,
+            RunnerSecurityProfiles.Strict,
+            ContainerResourceLimits.Defaults,
+            new ActioInstanceIdentity("instance-1", 42, 1234));
+
+        var error = DockerRuntimeSecurityPolicy.ValidatePublishedPorts(
+            [new ContainerPortMapping(8080, hostPort)],
+            execution);
+
+        Assert.Contains("Strict profile blocks host port publication", error);
+    }
+
     [Theory]
     [InlineData(null, "/workspace")]
     [InlineData("", "/workspace")]
@@ -656,5 +769,12 @@ public sealed class DockerRunnerProviderTests
         Assert.Equal("no-new-privileges=true", args[securityOptionIndex + 1]);
         Assert.DoesNotContain("--cap-add", args);
         Assert.DoesNotContain("--privileged", args);
+    }
+
+    private static void AssertOptionValue(IReadOnlyList<string> args, string option, string expected)
+    {
+        var index = Array.IndexOf(args.ToArray(), option);
+        Assert.True(index >= 0, $"Option '{option}' was not present.");
+        Assert.Equal(expected, args[index + 1]);
     }
 }

@@ -1,3 +1,5 @@
+using Actio.Engine.Execution;
+
 namespace Actio.Cli;
 
 public sealed record CliCommand(
@@ -9,6 +11,7 @@ public sealed record CliCommand(
     string? Url = null,
     bool Background = false,
     IReadOnlyDictionary<string, string>? Inputs = null,
+    string SecurityProfile = RunnerSecurityProfiles.SecureBaseline,
     string? ErrorMessage = null)
 {
     public IReadOnlyDictionary<string, string> Inputs { get; init; } = Inputs ?? new Dictionary<string, string>();
@@ -16,8 +19,15 @@ public sealed record CliCommand(
     public static CliCommand RunWorkflow(string workflowName)
         => RunWorkflow(workflowName, new Dictionary<string, string>());
 
-    public static CliCommand RunWorkflow(string workflowName, IReadOnlyDictionary<string, string> inputs)
-        => new(CliCommandKind.RunWorkflow, WorkflowName: workflowName, Inputs: inputs);
+    public static CliCommand RunWorkflow(
+        string workflowName,
+        IReadOnlyDictionary<string, string> inputs,
+        string securityProfile = RunnerSecurityProfiles.SecureBaseline)
+        => new(
+            CliCommandKind.RunWorkflow,
+            WorkflowName: workflowName,
+            Inputs: inputs,
+            SecurityProfile: securityProfile);
 
     public static CliCommand RerunWorkflow(string runId)
         => new(CliCommandKind.RerunWorkflow, RunId: runId);

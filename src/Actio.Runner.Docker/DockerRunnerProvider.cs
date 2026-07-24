@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Text.Json;
 using Actio.Core.Workflows;
 using Actio.Engine.Execution;
 using Actio.Engine.Runs;
@@ -20,6 +21,11 @@ public sealed class DockerRunnerProvider : IRunnerProvider
     private readonly ConcurrentDictionary<string, byte> _warnedRootImages = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, RunnerNetworkObservation> _networkObservations = new(StringComparer.Ordinal);
     private readonly DockerPortLeaseManager _portLeases = new();
+    private RunnerPreflightEvidence? _preflightEvidence;
+    private RunnerCleanupEvidence? _cleanupEvidence;
+    private ContainerResourceLimits? _requestedResourceLimits;
+    private ContainerResourceLimits? _effectiveResourceLimits;
+    private string _requestedProfile = RunnerSecurityProfiles.SecureBaseline;
 
     public DockerRunnerProvider()
         : this(new DockerImageResolver())
@@ -40,6 +46,15 @@ public sealed class DockerRunnerProvider : IRunnerProvider
                 .ThenBy(item => item.Image, StringComparer.Ordinal)
                 .ToArray();
             var degraded = DockerRuntimeSecurityPolicy.Metadata.DegradedControls.ToList();
+            if (_preflightEvidence?.Status == "passed")
+            {
+                degraded.Remove("daemon-platform-security-not-evaluated");
+            }
+
+            if (_preflightEvidence is { SwapLimitSupported: false })
+            {
+                degraded.Add("swap-limit-not-verified");
+            }
             if (observations.Any(item => item.Status == "unknown"))
             {
                 degraded.Add("one-or-more-image-users-not-evaluated");
@@ -56,9 +71,30 @@ public sealed class DockerRunnerProvider : IRunnerProvider
 
             return DockerRuntimeSecurityPolicy.Metadata with
             {
+                RequestedProfile = _requestedProfile,
+                EffectiveProfile = _requestedProfile,
                 DegradedControls = degraded,
                 ImageUserObservations = observations,
-                NetworkObservations = networkObservations
+                NetworkObservations = networkObservations,
+                RequestedResourceLimits = _requestedResourceLimits,
+                EffectiveResourceLimits = _effectiveResourceLimits,
+                Preflight = _preflightEvidence,
+                Cleanup = _cleanupEvidence,
+                DaemonPlatformState = _preflightEvidence?.Status == "passed"
+                    ? $"verified:{_preflightEvidence.OperatingSystem}"
+                    : DockerRuntimeSecurityPolicy.Metadata.DaemonPlatformState,
+                NetworkPolicy = string.Equals(_requestedProfile, RunnerSecurityProfiles.Strict, StringComparison.Ordinal)
+                    ? "none-without-services-internal-job-network-with-services"
+                    : DockerRuntimeSecurityPolicy.Metadata.NetworkPolicy,
+                RootFilesystemPolicy = string.Equals(_requestedProfile, RunnerSecurityProfiles.Strict, StringComparison.Ordinal)
+                    ? "read-only-with-bounded-tmpfs"
+                    : DockerRuntimeSecurityPolicy.Metadata.RootFilesystemPolicy,
+                UserPolicy = string.Equals(_requestedProfile, RunnerSecurityProfiles.Strict, StringComparison.Ordinal)
+                    ? "verified-non-root"
+                    : DockerRuntimeSecurityPolicy.Metadata.UserPolicy,
+                StrictControls = string.Equals(_requestedProfile, RunnerSecurityProfiles.Strict, StringComparison.Ordinal)
+                    ? ["verified-non-root", "cap-drop-all", "read-only-rootfs", "restricted-network", "no-host-ports"]
+                    : []
             };
         }
     }
@@ -67,6 +103,60 @@ public sealed class DockerRunnerProvider : IRunnerProvider
     {
         return _imageResolver.TryResolveImage(runsOn, out _);
     }
+
+    public async Task<RunnerPreflightResult> PreflightAsync(
+        RunnerPreflightRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        _imageUserObservations.Clear();
+        _warnedRootImages.Clear();
+        _networkObservations.Clear();
+        _requestedProfile = request.Policy.RequestedProfile;
+        _cleanupEvidence = await CleanupStaleResourcesAsync(request.Policy.InstanceIdentity, cancellationToken);
+        var result = await RunDockerCommandAsync(CreateDockerInfoStartInfo(), cancellationToken);
+        if (!result.Success)
+        {
+            _preflightEvidence = new RunnerPreflightEvidence(Status: "failed");
+            return RunnerPreflightResult.Failed(
+                [FormatDockerCommandError("running container security preflight", result)]);
+        }
+
+        var evaluation = DockerPreflightEvaluator.Evaluate(result.StandardOutput, request);
+        _preflightEvidence = evaluation.Evidence;
+        _requestedResourceLimits = CreateRequestedResourceLimits(
+            request.Policy.ResourceConfiguration);
+        _effectiveResourceLimits = evaluation.Limits;
+        if (!evaluation.Success)
+        {
+            return RunnerPreflightResult.Failed(evaluation.Errors);
+        }
+
+        return RunnerPreflightResult.Passed(
+            new RunnerExecutionContext(
+                request.RunId,
+                request.Policy.RequestedProfile,
+                request.Policy.RequestedProfile,
+                evaluation.Limits,
+                request.Policy.InstanceIdentity),
+            evaluation.Warnings);
+    }
+
+    private static ContainerResourceLimits CreateRequestedResourceLimits(
+        ContainerResourceConfiguration configuration)
+    {
+        var defaults = ContainerResourceLimits.Defaults;
+        return new ContainerResourceLimits(
+            configuration.Cpu ?? defaults.Cpu,
+            ToBytes(configuration.MemoryMiB) ?? defaults.MemoryBytes,
+            configuration.Pids ?? defaults.Pids,
+            ToBytes(configuration.TempMiB) ?? defaults.TempBytes,
+            ToBytes(configuration.DockerLogMiB) ?? defaults.DockerLogBytes,
+            configuration.DockerLogFiles ?? defaults.DockerLogFiles,
+            ToBytes(configuration.StepLogMiB) ?? defaults.StepLogBytes);
+    }
+
+    private static long? ToBytes(long? mebibytes)
+        => mebibytes is null ? null : mebibytes.Value * 1024 * 1024;
 
     public async Task<JobRuntimeStartResult> StartJobRuntimeAsync(
         JobRuntimeStartRequest request,
@@ -77,7 +167,8 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             var policyError = DockerRuntimeSecurityPolicy.Validate(
                 service.Options,
                 service.Volumes,
-                $"service '{service.Name}'");
+                $"service '{service.Name}'",
+                request.Execution);
             if (policyError is not null)
             {
                 return JobRuntimeStartResult.Failed([policyError]);
@@ -96,8 +187,18 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         var errors = new List<string>();
         var warnings = new List<string>();
         var containerNames = new List<string>();
-        var reservedPorts = request.JobContainerPorts
+        var publishedPorts = request.JobContainerPorts
             .Concat(request.Services.SelectMany(service => service.Ports))
+            .ToArray();
+        var portPolicyError = DockerRuntimeSecurityPolicy.ValidatePublishedPorts(
+            publishedPorts,
+            request.Execution);
+        if (portPolicyError is not null)
+        {
+            return JobRuntimeStartResult.Failed([portPolicyError]);
+        }
+
+        var reservedPorts = publishedPorts
             .Where(port => port.HostPort is not null)
             .ToArray();
         if (!_portLeases.TryAcquire(request.JobName, reservedPorts, out var leaseError))
@@ -105,28 +206,60 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             return JobRuntimeStartResult.Failed([leaseError!]);
         }
 
-        var networkName = CreateNetworkName(request.JobName);
-        var runtime = new JobRuntimeContext(networkName, containerNames, reservedPorts, request.JobName);
+        var strict = IsStrict(request.Execution);
+        var ownsNetwork = !strict || request.Services.Count > 0;
+        var networkName = ownsNetwork ? CreateNetworkName(request.JobName) : "none";
+        var runtime = new JobRuntimeContext(
+            networkName,
+            containerNames,
+            reservedPorts,
+            request.JobName,
+            request.Execution,
+            ownsNetwork);
 
         try
         {
-            var networkResult = await RunDockerCommandAsync(
-                CreateNetworkCreateStartInfo(request.JobName, networkName),
-                cancellationToken);
-
-            if (!networkResult.Success)
+            if (ownsNetwork)
             {
-                _portLeases.Release(request.JobName, reservedPorts);
-                return JobRuntimeStartResult.Failed(
-                    [FormatDockerCommandError($"creating job network for job '{request.JobName}'", networkResult)]);
-            }
+                var networkResult = await RunDockerCommandAsync(
+                    CreateNetworkCreateStartInfo(
+                        request.JobName,
+                        networkName,
+                        request.Execution,
+                        internalNetwork: strict),
+                    cancellationToken);
 
-            _networkObservations[networkName] = CreateNetworkObservation(request, networkName);
+                if (!networkResult.Success)
+                {
+                    _portLeases.Release(request.JobName, reservedPorts);
+                    return JobRuntimeStartResult.Failed(
+                        [FormatDockerCommandError($"creating job network for job '{request.JobName}'", networkResult)]);
+                }
+
+                var networkId = networkResult.StandardOutput.Trim();
+                if (!string.IsNullOrWhiteSpace(networkId))
+                {
+                    runtime = runtime with { NetworkName = networkId };
+                    networkName = networkId;
+                }
+
+                _networkObservations[networkName] = CreateNetworkObservation(request, networkName);
+            }
 
             foreach (var service in request.Services)
             {
+                var userError = await ValidateStrictImageUserAsync(
+                    service.Image,
+                    $"service:{service.Name}",
+                    request.Execution,
+                    cancellationToken);
+                if (userError is not null)
+                {
+                    errors.Add(userError);
+                    break;
+                }
+
                 var containerName = CreateServiceContainerName(request.JobName, service.Name);
-                containerNames.Add(containerName);
                 var startResult = await RunDockerCommandAsync(
                     CreateServiceContainerStartInfo(request, service, networkName, containerName),
                     cancellationToken);
@@ -137,6 +270,9 @@ public sealed class DockerRunnerProvider : IRunnerProvider
                     break;
                 }
 
+                var containerId = startResult.StandardOutput.Trim();
+                containerNames.Add(string.IsNullOrWhiteSpace(containerId) ? containerName : containerId);
+
                 var observation = await ObserveImageUserAsync(
                     service.Image,
                     $"service:{service.Name}",
@@ -146,7 +282,10 @@ public sealed class DockerRunnerProvider : IRunnerProvider
                     warnings.Add(CreateRootUserWarning(observation));
                 }
 
-                errors.AddRange(await WaitForServiceHealthAsync(service.Name, containerName, cancellationToken));
+                errors.AddRange(await WaitForServiceHealthAsync(
+                    service.Name,
+                    string.IsNullOrWhiteSpace(containerId) ? containerName : containerId,
+                    cancellationToken));
                 if (errors.Count > 0)
                 {
                     break;
@@ -192,12 +331,15 @@ public sealed class DockerRunnerProvider : IRunnerProvider
                 }
             }
 
-            var networkRemoveResult = await RunDockerCommandAsync(
-                CreateNetworkRemoveStartInfo(runtime.NetworkName),
-                cancellationToken);
-            if (!networkRemoveResult.Success)
+            if (runtime.OwnsNetwork)
             {
-                errors.Add(FormatDockerCommandError($"removing job network '{runtime.NetworkName}'", networkRemoveResult));
+                var networkRemoveResult = await RunDockerCommandAsync(
+                    CreateNetworkRemoveStartInfo(runtime.NetworkName),
+                    cancellationToken);
+                if (!networkRemoveResult.Success)
+                {
+                    errors.Add(FormatDockerCommandError($"removing job network '{runtime.NetworkName}'", networkRemoveResult));
+                }
             }
         }
         finally
@@ -219,7 +361,8 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         var policyError = DockerRuntimeSecurityPolicy.Validate(
             request.Container?.Options ?? [],
             (request.Container?.Volumes ?? []).Concat(request.AdditionalMounts),
-            $"job '{request.JobName}' step '{request.StepName}'");
+            $"job '{request.JobName}' step '{request.StepName}'",
+            request.Runtime?.Execution);
         if (policyError is not null)
         {
             await output.WriteErrorLineAsync(policyError, cancellationToken);
@@ -245,6 +388,17 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         }
 
         var containerName = CreateContainerName(request.JobName, request.StepName);
+        var strictUserError = await ValidateStrictImageUserAsync(
+            image,
+            $"shell:{request.JobName}/{request.StepName}",
+            request.Runtime?.Execution,
+            cancellationToken);
+        if (strictUserError is not null)
+        {
+            await output.WriteErrorLineAsync(strictUserError, cancellationToken);
+            return new StepExecutionResult(1);
+        }
+
         var observation = await ObserveImageUserAsync(
             image,
             $"shell:{request.JobName}/{request.StepName}",
@@ -313,6 +467,17 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         }
 
         var containerName = CreateContainerName(request.JobName, request.StepName);
+        var strictUserError = await ValidateStrictImageUserAsync(
+            request.Image,
+            $"{surfaceKind}:{request.JobName}/{request.StepName}",
+            request.Runtime?.Execution,
+            cancellationToken);
+        if (strictUserError is not null)
+        {
+            await output.WriteErrorLineAsync(strictUserError, cancellationToken);
+            return new StepExecutionResult(1);
+        }
+
         var observation = await ObserveImageUserAsync(
             request.Image,
             $"{surfaceKind}:{request.JobName}/{request.StepName}",
@@ -342,6 +507,14 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         IStepOutputSink output,
         CancellationToken cancellationToken = default)
     {
+        if (IsStrict(request.Runtime?.Execution))
+        {
+            await output.WriteErrorLineAsync(
+                "Strict profile blocks Dockerfile actions because build-time daemon resources and network are outside the runtime security policy.",
+                cancellationToken);
+            return new StepExecutionResult(1);
+        }
+
         var policyError = DockerRuntimeSecurityPolicy.Validate(
             [],
             request.AdditionalMounts,
@@ -471,11 +644,25 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         CancellationToken cancellationToken)
     {
         var containerName = CreateContainerName(request.JobName, $"{request.StepName}-{phase}");
-        var observation = await ObserveImageUserAsync(
-            JavaScriptActionNodeImage,
-            $"javascript-action:{request.JobName}/{request.StepName}/{phase}",
-            cancellationToken);
-        await WriteRootWarningAsync(observation, output, cancellationToken);
+        var surface = $"javascript-action:{request.JobName}/{request.StepName}/{phase}";
+        RunnerImageUserObservation observation;
+        if (IsStrict(request.Runtime?.Execution))
+        {
+            observation = new RunnerImageUserObservation(
+                surface,
+                JavaScriptActionNodeImage,
+                "node",
+                "non-root");
+            _imageUserObservations[$"{surface}|{JavaScriptActionNodeImage}"] = observation;
+        }
+        else
+        {
+            observation = await ObserveImageUserAsync(
+                JavaScriptActionNodeImage,
+                surface,
+                cancellationToken);
+            await WriteRootWarningAsync(observation, output, cancellationToken);
+        }
         using var process = new Process
         {
             StartInfo = CreateJavaScriptActionStartInfo(request, scriptPath, containerName),
@@ -483,7 +670,9 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         };
 
         var result = await ExecuteDockerProcessAsync(process, containerName, output, cancellationToken);
-        if (observation.Status == "unknown" && result.Success)
+        if (!IsStrict(request.Runtime?.Execution) &&
+            observation.Status == "unknown" &&
+            result.Success)
         {
             observation = await ObserveImageUserAsync(
                 JavaScriptActionNodeImage,
@@ -619,6 +808,11 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             request.AdditionalMounts,
             null,
             request.Runtime);
+        if (IsStrict(request.Runtime?.Execution))
+        {
+            startInfo.ArgumentList.Add("--user");
+            startInfo.ArgumentList.Add("node");
+        }
 
         startInfo.ArgumentList.Add(JavaScriptActionNodeImage);
         startInfo.ArgumentList.Add("node");
@@ -636,7 +830,8 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         DockerRuntimeSecurityPolicy.ThrowIfDenied(
             service.Options,
             service.Volumes,
-            $"service '{service.Name}'");
+            $"service '{service.Name}'",
+            request.Execution);
         DockerRuntimeSecurityPolicy.ThrowIfFilesystemDenied(
             request.ProjectRoot,
             service.Volumes,
@@ -653,7 +848,15 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         startInfo.ArgumentList.Add($"actio.job={request.JobName}");
         startInfo.ArgumentList.Add("--label");
         startInfo.ArgumentList.Add($"actio.service={service.Name}");
-        DockerRuntimeSecurityPolicy.AddRuntimeArguments(startInfo);
+        DockerRuntimeSecurityPolicy.AddOwnershipLabels(
+            startInfo,
+            request.Execution,
+            request.JobName,
+            $"service:{service.Name}");
+        DockerRuntimeSecurityPolicy.AddRuntimeArguments(
+            startInfo,
+            request.Execution,
+            service.Options);
         startInfo.ArgumentList.Add("--network");
         startInfo.ArgumentList.Add(networkName);
         startInfo.ArgumentList.Add("--network-alias");
@@ -700,7 +903,8 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         DockerRuntimeSecurityPolicy.ThrowIfDenied(
             container?.Options ?? [],
             mounts,
-            $"job '{jobName}' step '{stepName}'");
+            $"job '{jobName}' step '{stepName}'",
+            runtime?.Execution);
         DockerRuntimeSecurityPolicy.ThrowIfFilesystemDenied(
             projectRoot,
             mounts,
@@ -718,7 +922,15 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         startInfo.ArgumentList.Add($"actio.job={jobName}");
         startInfo.ArgumentList.Add("--label");
         startInfo.ArgumentList.Add($"actio.step={stepName}");
-        DockerRuntimeSecurityPolicy.AddRuntimeArguments(startInfo);
+        DockerRuntimeSecurityPolicy.AddOwnershipLabels(
+            startInfo,
+            runtime?.Execution,
+            jobName,
+            $"step:{stepName}");
+        DockerRuntimeSecurityPolicy.AddRuntimeArguments(
+            startInfo,
+            runtime?.Execution,
+            container?.Options);
 
         if (runtime is not null)
         {
@@ -769,6 +981,23 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             UseShellExecute = false,
             CreateNoWindow = true
         };
+    }
+
+    private static ProcessStartInfo CreateDockerInfoStartInfo()
+    {
+        var startInfo = CreateDockerStartInfo();
+        startInfo.ArgumentList.Add("info");
+        startInfo.ArgumentList.Add("--format");
+        startInfo.ArgumentList.Add("{{json .}}");
+        return startInfo;
+    }
+
+    private static ProcessStartInfo CreateImagePullStartInfo(string image)
+    {
+        var startInfo = CreateDockerStartInfo();
+        startInfo.ArgumentList.Add("pull");
+        startInfo.ArgumentList.Add(image);
+        return startInfo;
     }
 
     private static void AddMount(ProcessStartInfo startInfo, StepExecutionMount mount)
@@ -865,7 +1094,11 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             """;
     }
 
-    internal static ProcessStartInfo CreateNetworkCreateStartInfo(string jobName, string networkName)
+    internal static ProcessStartInfo CreateNetworkCreateStartInfo(
+        string jobName,
+        string networkName,
+        RunnerExecutionContext? execution = null,
+        bool internalNetwork = false)
     {
         var startInfo = CreateDockerStartInfo();
         startInfo.ArgumentList.Add("network");
@@ -874,10 +1107,16 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         startInfo.ArgumentList.Add("bridge");
         startInfo.ArgumentList.Add("--opt");
         startInfo.ArgumentList.Add("com.docker.network.bridge.host_binding_ipv4=127.0.0.1");
+        if (internalNetwork)
+        {
+            startInfo.ArgumentList.Add("--internal");
+        }
+
         startInfo.ArgumentList.Add("--label");
         startInfo.ArgumentList.Add("actio=true");
         startInfo.ArgumentList.Add("--label");
         startInfo.ArgumentList.Add($"actio.job={jobName}");
+        DockerRuntimeSecurityPolicy.AddOwnershipLabels(startInfo, execution, jobName, "network");
         startInfo.ArgumentList.Add(networkName);
         return startInfo;
     }
@@ -911,8 +1150,8 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             request.JobName,
             networkName,
             "user-defined-bridge",
-            OutboundAllowed: true,
-            Internal: false,
+            OutboundAllowed: !IsStrict(request.Execution),
+            Internal: IsStrict(request.Execution),
             request.Services.Select(service => service.Name).OrderBy(name => name, StringComparer.Ordinal).ToArray(),
             ports);
     }
@@ -925,6 +1164,16 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         var startInfo = CreateDockerStartInfo();
         startInfo.ArgumentList.Add("rm");
         startInfo.ArgumentList.Add("-f");
+        startInfo.ArgumentList.Add(containerName);
+        return startInfo;
+    }
+
+    private static ProcessStartInfo CreateContainerIdInspectStartInfo(string containerName)
+    {
+        var startInfo = CreateDockerStartInfo();
+        startInfo.ArgumentList.Add("inspect");
+        startInfo.ArgumentList.Add("--format");
+        startInfo.ArgumentList.Add("{{.Id}}");
         startInfo.ArgumentList.Add(containerName);
         return startInfo;
     }
@@ -1001,6 +1250,212 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             status);
         _imageUserObservations[$"{surface}|{image}"] = observation;
         return observation;
+    }
+
+    private async Task<string?> ValidateStrictImageUserAsync(
+        string image,
+        string surface,
+        RunnerExecutionContext? execution,
+        CancellationToken cancellationToken)
+    {
+        if (!IsStrict(execution))
+        {
+            return null;
+        }
+
+        var observation = await ObserveImageUserAsync(image, surface, cancellationToken);
+        if (observation.Status == "unknown")
+        {
+            var pull = await RunDockerCommandAsync(CreateImagePullStartInfo(image), cancellationToken);
+            if (!pull.Success)
+            {
+                return FormatDockerCommandError(
+                    $"pulling image '{image}' for Strict user verification",
+                    pull);
+            }
+
+            observation = await ObserveImageUserAsync(image, surface, cancellationToken);
+        }
+
+        return observation.Status switch
+        {
+            "non-root" => null,
+            "root" => $"Strict profile requires a verified non-root image user, but '{image}' is configured as root for {surface}.",
+            _ => $"Strict profile could not verify a non-root image user for '{image}' on {surface}."
+        };
+    }
+
+    private static bool IsStrict(RunnerExecutionContext? execution)
+        => string.Equals(execution?.EffectiveProfile, RunnerSecurityProfiles.Strict, StringComparison.Ordinal);
+
+    private async Task<RunnerCleanupEvidence> CleanupStaleResourcesAsync(
+        ActioInstanceIdentity currentIdentity,
+        CancellationToken cancellationToken)
+    {
+        var counters = new CleanupCounters();
+        await CleanupResourceKindAsync(
+            "container",
+            CreateManagedResourceListStartInfo("container", currentIdentity.InstanceId),
+            currentIdentity,
+            counters,
+            cancellationToken);
+        await CleanupResourceKindAsync(
+            "network",
+            CreateManagedResourceListStartInfo("network", currentIdentity.InstanceId),
+            currentIdentity,
+            counters,
+            cancellationToken);
+        return new RunnerCleanupEvidence(
+            counters.ContainerCandidates,
+            counters.RemovedContainers,
+            counters.NetworkCandidates,
+            counters.RemovedNetworks,
+            counters.SkippedActive,
+            counters.SkippedUnverifiable,
+            counters.Errors);
+    }
+
+    private async Task CleanupResourceKindAsync(
+        string resourceKind,
+        ProcessStartInfo listStartInfo,
+        ActioInstanceIdentity currentIdentity,
+        CleanupCounters counters,
+        CancellationToken cancellationToken)
+    {
+        var list = await RunDockerCommandAsync(listStartInfo, cancellationToken);
+        if (!list.Success)
+        {
+            counters.Errors.Add(FormatDockerCommandError($"listing managed {resourceKind}s", list));
+            return;
+        }
+
+        foreach (var id in list.StandardOutput.Split(
+            ['\r', '\n'],
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (resourceKind == "container")
+            {
+                counters.ContainerCandidates++;
+            }
+            else
+            {
+                counters.NetworkCandidates++;
+            }
+
+            var inspect = await RunDockerCommandAsync(
+                CreateManagedResourceInspectStartInfo(resourceKind, id),
+                cancellationToken);
+            if (!inspect.Success || !TryReadLabels(inspect.StandardOutput, out var labels))
+            {
+                counters.SkippedUnverifiable++;
+                continue;
+            }
+
+            var decision = DockerCleanupPolicy.Evaluate(labels, currentIdentity.InstanceId);
+            if (decision == DockerCleanupDecision.SkipActive)
+            {
+                counters.SkippedActive++;
+                continue;
+            }
+
+            if (decision is DockerCleanupDecision.SkipForeign or DockerCleanupDecision.SkipUnverifiable)
+            {
+                counters.SkippedUnverifiable++;
+                continue;
+            }
+
+            var remove = await RunDockerCommandAsync(
+                CreateManagedResourceRemoveStartInfo(resourceKind, id),
+                cancellationToken);
+            if (!remove.Success)
+            {
+                counters.Errors.Add(FormatDockerCommandError($"removing stale {resourceKind} '{id}'", remove));
+                continue;
+            }
+
+            if (resourceKind == "container")
+            {
+                counters.RemovedContainers++;
+            }
+            else
+            {
+                counters.RemovedNetworks++;
+            }
+        }
+    }
+
+    private static ProcessStartInfo CreateManagedResourceListStartInfo(
+        string resourceKind,
+        string instanceId)
+    {
+        var startInfo = CreateDockerStartInfo();
+        if (resourceKind == "container")
+        {
+            startInfo.ArgumentList.Add("ps");
+            startInfo.ArgumentList.Add("-aq");
+        }
+        else
+        {
+            startInfo.ArgumentList.Add("network");
+            startInfo.ArgumentList.Add("ls");
+            startInfo.ArgumentList.Add("-q");
+        }
+
+        startInfo.ArgumentList.Add("--filter");
+        startInfo.ArgumentList.Add("label=io.actio.managed=true");
+        startInfo.ArgumentList.Add("--filter");
+        startInfo.ArgumentList.Add($"label=io.actio.instance={instanceId}");
+        return startInfo;
+    }
+
+    private static ProcessStartInfo CreateManagedResourceInspectStartInfo(string resourceKind, string id)
+    {
+        var startInfo = CreateDockerStartInfo();
+        if (resourceKind == "network")
+        {
+            startInfo.ArgumentList.Add("network");
+        }
+
+        startInfo.ArgumentList.Add("inspect");
+        startInfo.ArgumentList.Add("--format");
+        startInfo.ArgumentList.Add(resourceKind == "container"
+            ? "{{json .Config.Labels}}"
+            : "{{json .Labels}}");
+        startInfo.ArgumentList.Add(id);
+        return startInfo;
+    }
+
+    private static ProcessStartInfo CreateManagedResourceRemoveStartInfo(string resourceKind, string id)
+    {
+        var startInfo = CreateDockerStartInfo();
+        if (resourceKind == "container")
+        {
+            startInfo.ArgumentList.Add("rm");
+            startInfo.ArgumentList.Add("-f");
+        }
+        else
+        {
+            startInfo.ArgumentList.Add("network");
+            startInfo.ArgumentList.Add("rm");
+        }
+
+        startInfo.ArgumentList.Add(id);
+        return startInfo;
+    }
+
+    private static bool TryReadLabels(string json, out IReadOnlyDictionary<string, string> labels)
+    {
+        try
+        {
+            labels = JsonSerializer.Deserialize<Dictionary<string, string>>(json) ??
+                new Dictionary<string, string>();
+            return true;
+        }
+        catch (JsonException)
+        {
+            labels = new Dictionary<string, string>();
+            return false;
+        }
     }
 
     private static bool IsRootConfiguredUser(string configuredUser)
@@ -1228,7 +1683,16 @@ public sealed class DockerRunnerProvider : IRunnerProvider
     {
         try
         {
-            using var cleanup = Process.Start(CreateContainerRemoveStartInfo(containerName));
+            var inspect = RunDockerCommandAsync(
+                CreateContainerIdInspectStartInfo(containerName),
+                CancellationToken.None).GetAwaiter().GetResult();
+            if (!inspect.Success || string.IsNullOrWhiteSpace(inspect.StandardOutput))
+            {
+                return;
+            }
+
+            using var cleanup = Process.Start(
+                CreateContainerRemoveStartInfo(inspect.StandardOutput.Trim()));
 
             cleanup?.WaitForExit(5000);
         }
@@ -1238,6 +1702,23 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         catch (Win32Exception)
         {
         }
+    }
+
+    private sealed class CleanupCounters
+    {
+        public int ContainerCandidates { get; set; }
+
+        public int RemovedContainers { get; set; }
+
+        public int NetworkCandidates { get; set; }
+
+        public int RemovedNetworks { get; set; }
+
+        public int SkippedActive { get; set; }
+
+        public int SkippedUnverifiable { get; set; }
+
+        public List<string> Errors { get; } = [];
     }
 
     private sealed record DockerCommandResult(

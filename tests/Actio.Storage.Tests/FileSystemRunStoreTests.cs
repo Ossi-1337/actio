@@ -1,4 +1,5 @@
 using Actio.Core.Workflows;
+using Actio.Engine.Execution;
 using Actio.Engine.Runs;
 using Actio.Storage;
 
@@ -72,7 +73,11 @@ public sealed class FileSystemRunStoreTests : IDisposable
                         Internal: false,
                         ["postgres"],
                         [new RunnerPublishedPort("service:postgres", "127.0.0.1", 5432, 15432, "tcp")])
-                ]));
+                ],
+                EffectiveResourceLimits: ContainerResourceLimits.Defaults,
+                Preflight: new RunnerPreflightEvidence(Status: "passed", EngineVersion: "29.0.0"),
+                Cleanup: new RunnerCleanupEvidence(RemovedContainers: 1),
+                StrictControls: ["cap-drop-all"]));
 
         await store.SaveRunRecordAsync(record);
         var loaded = await store.ReadRunRecordAsync(runId);
@@ -96,6 +101,10 @@ public sealed class FileSystemRunStoreTests : IDisposable
         var network = Assert.Single(loaded.RunnerSecurity.NetworkObservations);
         Assert.Equal("actio-test-network", network.NetworkName);
         Assert.Equal(15432, Assert.Single(network.PublishedPorts).HostPort);
+        Assert.Equal(2, loaded.RunnerSecurity.EffectiveResourceLimits?.Cpu);
+        Assert.Equal("passed", loaded.RunnerSecurity.Preflight?.Status);
+        Assert.Equal(1, loaded.RunnerSecurity.Cleanup?.RemovedContainers);
+        Assert.Contains("cap-drop-all", loaded.RunnerSecurity.StrictControls);
         Assert.True(File.Exists(Path.Combine(_root, "runs", runId, "run.json")));
     }
 
