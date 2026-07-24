@@ -39,8 +39,10 @@ jobs:
 
       - name: Detect changed areas
         id: filter
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         with:
+          token: ''
+          base: HEAD
           filters: |
             cli_src:
               - 'src/Actio.Cli/**'
@@ -128,7 +130,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Core tests
-        run: dotnet test tests/Actio.Core.Tests/Actio.Core.Tests.csproj --configuration Release
+        run: dotnet test tests/Actio.Core.Tests/Actio.Core.Tests.csproj --configuration Release --artifacts-path /tmp/actio-artifacts
 
   test_engine:
     name: Test Engine
@@ -148,7 +150,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Engine tests
-        run: dotnet test tests/Actio.Engine.Tests/Actio.Engine.Tests.csproj --configuration Release
+        run: dotnet test tests/Actio.Engine.Tests/Actio.Engine.Tests.csproj --configuration Release --artifacts-path /tmp/actio-artifacts
 
   test_runner_docker:
     name: Test Docker Runner
@@ -169,7 +171,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Docker Runner tests
-        run: dotnet test tests/Actio.Runner.Docker.Tests/Actio.Runner.Docker.Tests.csproj --configuration Release
+        run: dotnet test tests/Actio.Runner.Docker.Tests/Actio.Runner.Docker.Tests.csproj --configuration Release --artifacts-path /tmp/actio-artifacts
 
   test_storage:
     name: Test Storage
@@ -190,7 +192,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Storage tests
-        run: dotnet test tests/Actio.Storage.Tests/Actio.Storage.Tests.csproj --configuration Release
+        run: dotnet test tests/Actio.Storage.Tests/Actio.Storage.Tests.csproj --configuration Release --artifacts-path /tmp/actio-artifacts
 
   test_web:
     name: Test Web
@@ -212,7 +214,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Web tests
-        run: dotnet test tests/Actio.Web.Tests/Actio.Web.Tests.csproj --configuration Release
+        run: dotnet test tests/Actio.Web.Tests/Actio.Web.Tests.csproj --configuration Release --artifacts-path /tmp/actio-artifacts
 
   test_cli:
     name: Test CLI
@@ -236,4 +238,4 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run CLI tests
-        run: dotnet test tests/Actio.Cli.Tests/Actio.Cli.Tests.csproj --configuration Release
+        run: dotnet test tests/Actio.Cli.Tests/Actio.Cli.Tests.csproj --configuration Release --artifacts-path /tmp/actio-artifacts

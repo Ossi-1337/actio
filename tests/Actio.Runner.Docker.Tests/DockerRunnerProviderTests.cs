@@ -182,7 +182,8 @@ public sealed class DockerRunnerProviderTests
 
         var startInfo = DockerRunnerProvider.CreateJavaScriptActionStartInfo(request, "dist/index.js", "actio-test");
         var args = startInfo.ArgumentList.ToArray();
-        var imageIndex = Array.IndexOf(args, "node:20-bookworm-slim");
+        var runtime = JavaScriptActionRuntimeCatalog.Resolve(ActionRuntime.Node20);
+        var imageIndex = Array.IndexOf(args, runtime.Image);
 
         Assert.Equal("docker", startInfo.FileName);
         Assert.Contains("run", args);
@@ -213,7 +214,8 @@ public sealed class DockerRunnerProviderTests
         var args = DockerRunnerProvider.CreateJavaScriptActionStartInfo(request, "dist/index.js", "actio-test")
             .ArgumentList
             .ToArray();
-        var imageIndex = Array.IndexOf(args, "node:24-bookworm-slim");
+        var runtime = JavaScriptActionRuntimeCatalog.Resolve(ActionRuntime.Node24);
+        var imageIndex = Array.IndexOf(args, runtime.Image);
 
         AssertSecureBaseline(args);
         Assert.True(imageIndex >= 0);
@@ -245,7 +247,7 @@ public sealed class DockerRunnerProviderTests
             .ToArray();
 
         AssertOptionValue(args, "--user", "node");
-        Assert.Contains("node:24-bookworm-slim", args);
+        Assert.Contains(JavaScriptActionRuntimeCatalog.Resolve(ActionRuntime.Node24).Image, args);
         Assert.Contains("--read-only", args);
         Assert.Contains("--cap-drop", args);
         AssertOptionValue(args, "--network", "none");

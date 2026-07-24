@@ -343,6 +343,9 @@ function renderSecurity(run) {
               <span>
                 <span class="job-name">${escapeHtml(observation.image)}</span>
                 <span class="run-sub muted">${escapeHtml(observation.surface)}</span>
+                ${observation.baseImage ? `<span class="run-sub muted">Base: ${escapeHtml(observation.baseImage)}</span>` : ""}
+                ${observation.definitionHash ? `<span class="run-sub muted">Definition: ${escapeHtml(observation.definitionHash.slice(0, 12))}</span>` : ""}
+                ${(observation.nodeVersion || observation.gitVersion || observation.caCertificatesVersion) ? `<span class="security-message">Node ${escapeHtml(observation.nodeVersion ?? "not-reported")} · Git ${escapeHtml(observation.gitVersion ?? "not-reported")} · CA ${escapeHtml(observation.caCertificatesVersion ?? "not-reported")}</span>` : ""}
               </span>
             </div>
           `).join("")}

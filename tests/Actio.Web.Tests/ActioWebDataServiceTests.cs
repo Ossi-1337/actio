@@ -241,7 +241,12 @@ public sealed class ActioWebDataServiceTests : IDisposable
                     new RunnerJavaScriptRuntimeObservation(
                         "javascript-action:test/action/main",
                         "node24",
-                        "node:24-bookworm-slim")
+                        "actio/javascript-action:node24-example",
+                        "node:24.18.0-bookworm-slim@sha256:example",
+                        "definition-hash",
+                        "24.18.0",
+                        "1:2.39.5-0+deb12u3",
+                        "20230311+deb12u1")
                 ])));
 
         var run = await CreateService().GetRunAsync("run-1");

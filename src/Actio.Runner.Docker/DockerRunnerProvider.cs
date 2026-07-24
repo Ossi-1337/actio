@@ -14,6 +14,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
     private static readonly TimeSpan ServiceHealthPollInterval = TimeSpan.FromMilliseconds(500);
 
     private readonly DockerImageResolver _imageResolver;
+    private readonly JavaScriptActionRuntimeImageManager _javaScriptRuntimeImageManager;
     private readonly ConcurrentDictionary<string, RunnerImageUserObservation> _imageUserObservations = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, RunnerJavaScriptRuntimeObservation> _javaScriptRuntimeObservations = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, (string ConfiguredUser, string Status)> _imageUsers = new(StringComparer.Ordinal);
@@ -27,13 +28,21 @@ public sealed class DockerRunnerProvider : IRunnerProvider
     private string _requestedProfile = RunnerSecurityProfiles.SecureBaseline;
 
     public DockerRunnerProvider()
-        : this(new DockerImageResolver())
+        : this(new DockerImageResolver(), new JavaScriptActionRuntimeImageManager())
     {
     }
 
     public DockerRunnerProvider(DockerImageResolver imageResolver)
+        : this(imageResolver, new JavaScriptActionRuntimeImageManager())
+    {
+    }
+
+    internal DockerRunnerProvider(
+        DockerImageResolver imageResolver,
+        JavaScriptActionRuntimeImageManager javaScriptRuntimeImageManager)
     {
         _imageResolver = imageResolver;
+        _javaScriptRuntimeImageManager = javaScriptRuntimeImageManager;
     }
 
     public RunnerSecurityMetadata SecurityMetadata
@@ -113,6 +122,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         CancellationToken cancellationToken = default)
     {
         _imageUserObservations.Clear();
+        _javaScriptRuntimeObservations.Clear();
         _warnedRootImages.Clear();
         _networkObservations.Clear();
         _requestedProfile = request.Policy.RequestedProfile;
@@ -624,6 +634,16 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             return new StepExecutionResult(1);
         }
 
+        var preparedRuntime = await _javaScriptRuntimeImageManager.EnsureAsync(
+            runtime,
+            output,
+            cancellationToken);
+        if (!preparedRuntime.Success)
+        {
+            await output.WriteErrorLineAsync(preparedRuntime.Error!, cancellationToken);
+            return new StepExecutionResult(1);
+        }
+
         var result = new StepExecutionResult(0);
 
         if (!string.IsNullOrWhiteSpace(request.Pre))
@@ -659,7 +679,15 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         var containerName = CreateContainerName(request.JobName, $"{request.StepName}-{phase}");
         var surface = $"javascript-action:{request.JobName}/{request.StepName}/{phase}";
         _javaScriptRuntimeObservations[$"{surface}|{runtime.Runtime}|{runtime.Image}"] =
-            new RunnerJavaScriptRuntimeObservation(surface, runtime.Runtime, runtime.Image);
+            new RunnerJavaScriptRuntimeObservation(
+                surface,
+                runtime.Runtime,
+                runtime.Image,
+                runtime.BaseImage,
+                runtime.DefinitionHash,
+                runtime.NodeVersion,
+                runtime.GitVersion,
+                runtime.CaCertificatesVersion);
         RunnerImageUserObservation observation;
         if (IsStrict(request.Runtime?.Execution))
         {

@@ -153,13 +153,13 @@ public static class KnownActionCompatibilityCatalog
             "dorny",
             "paths-filter",
             string.Empty,
-            ActionCompatibilityStatus.Unvalidated,
+            ActionCompatibilityStatus.Partial,
             "Third-party JavaScript action",
-            "Not claimed",
-            "Actio does not claim compatibility with this action yet.",
-            "Local change detection needs a first-party Actio design or a dedicated compatibility validation pass before this action should be documented as supported.",
-            "19, 20, 28, 30, 39, 59",
-            "The project workflow uses this action as future compatibility syntax, but it is not Actio-smoke-tested yet."),
+            "v4 local Git mode",
+            "Actio runs v4 through its Node 24 JavaScript runtime with Git and CA certificates. The project CI uses token: '' and base: HEAD for tracked local working-tree changes.",
+            "GitHub API pull-request mode and full hosted event context are not verified. base: HEAD does not include untracked files.",
+            "19, 20, 28, 30, 39, 59, 65, 66",
+            "Runner integration and Actio CI smoke tests cover v4 output propagation and area-specific conditional jobs."),
     ];
 
     public static ActionCompatibilityEntry? Find(string uses)

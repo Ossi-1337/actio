@@ -83,7 +83,12 @@ public sealed class FileSystemRunStoreTests : IDisposable
                     new RunnerJavaScriptRuntimeObservation(
                         "javascript-action:test/action/main",
                         "node24",
-                        "node:24-bookworm-slim")
+                        "actio/javascript-action:node24-example",
+                        "node:24.18.0-bookworm-slim@sha256:example",
+                        "definition-hash",
+                        "24.18.0",
+                        "1:2.39.5-0+deb12u3",
+                        "20230311+deb12u1")
                 ]));
 
         await store.SaveRunRecordAsync(record);
@@ -113,6 +118,7 @@ public sealed class FileSystemRunStoreTests : IDisposable
         Assert.Equal(1, loaded.RunnerSecurity.Cleanup?.RemovedContainers);
         Assert.Contains("cap-drop-all", loaded.RunnerSecurity.StrictControls);
         Assert.Equal("node24", Assert.Single(loaded.RunnerSecurity.JavaScriptRuntimeObservations).Runtime);
+        Assert.Equal("24.18.0", Assert.Single(loaded.RunnerSecurity.JavaScriptRuntimeObservations).NodeVersion);
         Assert.True(File.Exists(Path.Combine(_root, "runs", runId, "run.json")));
     }
 

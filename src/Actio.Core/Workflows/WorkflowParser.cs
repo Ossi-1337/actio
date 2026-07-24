@@ -394,7 +394,12 @@ public sealed partial class WorkflowParser
             var outputs = ReadOptionalStringMap(errors, jobMap, "outputs", $"workflow.jobs.{jobName}.outputs");
             var artifacts = ReadArtifacts(errors, jobMap, jobName);
             var steps = uses is null ? ReadSteps(errors, warnings, jobMap, jobName) : [];
-            var with = ReadOptionalStringMap(errors, jobMap, "with", $"workflow.jobs.{jobName}.with");
+            var with = ReadOptionalStringMap(
+                errors,
+                jobMap,
+                "with",
+                $"workflow.jobs.{jobName}.with",
+                allowEmptyValues: true);
             var secrets = ReadJobSecrets(errors, jobMap, jobName);
 
             ValidateJobCallShape(errors, jobMap, jobName, uses, with, secrets);
@@ -474,7 +479,7 @@ public sealed partial class WorkflowParser
             return new Dictionary<string, string>();
         }
 
-        return ReadStringMapEntries(errors, secretsMap, path);
+        return ReadStringMapEntries(errors, secretsMap, path, allowEmptyValues: false);
     }
 
     private static void ValidateJobCallShape(
@@ -657,7 +662,12 @@ public sealed partial class WorkflowParser
             var workingDirectory = ReadOptionalScalar(errors, stepMap, "working-directory", $"{itemPath}.working-directory");
             var timeoutMinutes = ReadOptionalPositiveInt(errors, stepMap, "timeout-minutes", $"{itemPath}.timeout-minutes");
             var continueOnError = ReadOptionalBoolean(errors, stepMap, "continue-on-error", $"{itemPath}.continue-on-error") ?? false;
-            var with = ReadOptionalStringMap(errors, stepMap, "with", $"{itemPath}.with");
+            var with = ReadOptionalStringMap(
+                errors,
+                stepMap,
+                "with",
+                $"{itemPath}.with",
+                allowEmptyValues: true);
 
             ValidateStepId(errors, stepIds, id, $"{itemPath}.id");
 
@@ -1705,7 +1715,8 @@ public sealed partial class WorkflowParser
         List<string> errors,
         YamlMappingNode map,
         string key,
-        string path)
+        string path,
+        bool allowEmptyValues = false)
     {
         if (!TryGet(map, key, out var node))
         {
@@ -1718,13 +1729,14 @@ public sealed partial class WorkflowParser
             return new Dictionary<string, string>();
         }
 
-        return ReadStringMapEntries(errors, valueMap, path);
+        return ReadStringMapEntries(errors, valueMap, path, allowEmptyValues);
     }
 
     private static IReadOnlyDictionary<string, string> ReadStringMapEntries(
         List<string> errors,
         YamlMappingNode valueMap,
-        string path)
+        string path,
+        bool allowEmptyValues)
     {
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
 
@@ -1742,7 +1754,9 @@ public sealed partial class WorkflowParser
                 continue;
             }
 
-            var value = ReadScalarValue(errors, scalar, $"{path}.{name}");
+            var value = allowEmptyValues
+                ? scalar.Value ?? string.Empty
+                : ReadScalarValue(errors, scalar, $"{path}.{name}");
             if (value is not null)
             {
                 values[name] = value;

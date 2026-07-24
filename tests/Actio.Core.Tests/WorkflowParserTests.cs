@@ -1021,6 +1021,29 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
+    public void Parse_AcceptsEmptyActionInput()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Detect changes
+                    uses: dorny/paths-filter@v4
+                    with:
+                      token: ''
+                      base: HEAD
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        var step = Assert.Single(result.Workflow!.Jobs["test"].Steps);
+        Assert.Equal(string.Empty, step.With["token"]);
+        Assert.Equal("HEAD", step.With["base"]);
+    }
+
+    [Fact]
     public void Parse_RejectsInvalidStepIdentityAndExecutionSettings()
     {
         var result = Parse(

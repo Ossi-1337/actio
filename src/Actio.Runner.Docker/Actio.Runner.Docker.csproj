@@ -4,6 +4,10 @@
     <ProjectReference Include="..\Actio.Engine\Actio.Engine.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="RuntimeImages\JavaScriptAction.Dockerfile" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>

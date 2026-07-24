@@ -15,7 +15,7 @@ public sealed class KnownActionCompatibilityCatalogTests
     [InlineData("actions/setup-go@v5", ActionCompatibilityStatus.Partial, "51")]
     [InlineData("actions/setup-dotnet@v4", ActionCompatibilityStatus.Partial, "51")]
     [InlineData("actions/github-script@v7", ActionCompatibilityStatus.Unsupported, "52")]
-    [InlineData("dorny/paths-filter@v3", ActionCompatibilityStatus.Unvalidated, "59")]
+    [InlineData("dorny/paths-filter@v4", ActionCompatibilityStatus.Partial, "66")]
     public void Find_ReturnsKnownCompatibilityEntry(
         string uses,
         ActionCompatibilityStatus status,
