@@ -10,13 +10,12 @@ namespace Actio.Runner.Docker;
 
 public sealed class DockerRunnerProvider : IRunnerProvider
 {
-    private const string JavaScriptActionNodeImage = "node:20-bookworm-slim";
-
     private static readonly TimeSpan ServiceHealthTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan ServiceHealthPollInterval = TimeSpan.FromMilliseconds(500);
 
     private readonly DockerImageResolver _imageResolver;
     private readonly ConcurrentDictionary<string, RunnerImageUserObservation> _imageUserObservations = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, RunnerJavaScriptRuntimeObservation> _javaScriptRuntimeObservations = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, (string ConfiguredUser, string Status)> _imageUsers = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _warnedRootImages = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, RunnerNetworkObservation> _networkObservations = new(StringComparer.Ordinal);
@@ -64,6 +63,10 @@ public sealed class DockerRunnerProvider : IRunnerProvider
                 .OrderBy(item => item.JobName, StringComparer.Ordinal)
                 .ThenBy(item => item.NetworkName, StringComparer.Ordinal)
                 .ToArray();
+            var javaScriptRuntimeObservations = _javaScriptRuntimeObservations.Values
+                .OrderBy(item => item.Surface, StringComparer.Ordinal)
+                .ThenBy(item => item.Runtime, StringComparer.Ordinal)
+                .ToArray();
             if (networkObservations.Any(item => item.PublishedPorts.Count > 0))
             {
                 degraded.Add("published-port-daemon-routing-not-verified");
@@ -80,6 +83,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
                 EffectiveResourceLimits = _effectiveResourceLimits,
                 Preflight = _preflightEvidence,
                 Cleanup = _cleanupEvidence,
+                JavaScriptRuntimeObservations = javaScriptRuntimeObservations,
                 DaemonPlatformState = _preflightEvidence?.Status == "passed"
                     ? $"verified:{_preflightEvidence.OperatingSystem}"
                     : DockerRuntimeSecurityPolicy.Metadata.DaemonPlatformState,
@@ -592,6 +596,14 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         IStepOutputSink output,
         CancellationToken cancellationToken = default)
     {
+        if (!JavaScriptActionRuntimeCatalog.TryResolve(request.JavaScriptRuntime, out var runtime))
+        {
+            await output.WriteErrorLineAsync(
+                $"JavaScript action runtime '{request.JavaScriptRuntime}' is unsupported. Supported runtimes: {string.Join(", ", JavaScriptActionRuntimeCatalog.SupportedRuntimes)}.",
+                cancellationToken);
+            return new StepExecutionResult(1);
+        }
+
         var policyError = DockerRuntimeSecurityPolicy.Validate(
             [],
             request.AdditionalMounts,
@@ -616,17 +628,17 @@ public sealed class DockerRunnerProvider : IRunnerProvider
 
         if (!string.IsNullOrWhiteSpace(request.Pre))
         {
-            result = await ExecuteJavaScriptActionPhaseAsync(request, request.Pre, "pre", output, cancellationToken);
+            result = await ExecuteJavaScriptActionPhaseAsync(request, runtime, request.Pre, "pre", output, cancellationToken);
         }
 
         if (result.Success)
         {
-            result = await ExecuteJavaScriptActionPhaseAsync(request, request.Main, "main", output, cancellationToken);
+            result = await ExecuteJavaScriptActionPhaseAsync(request, runtime, request.Main, "main", output, cancellationToken);
         }
 
         if (!string.IsNullOrWhiteSpace(request.Post))
         {
-            var postResult = await ExecuteJavaScriptActionPhaseAsync(request, request.Post, "post", output, cancellationToken);
+            var postResult = await ExecuteJavaScriptActionPhaseAsync(request, runtime, request.Post, "post", output, cancellationToken);
             if (result.Success)
             {
                 result = postResult;
@@ -638,6 +650,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
 
     private async Task<StepExecutionResult> ExecuteJavaScriptActionPhaseAsync(
         JavaScriptActionExecutionRequest request,
+        JavaScriptActionRuntimeDescriptor runtime,
         string scriptPath,
         string phase,
         IStepOutputSink output,
@@ -645,27 +658,29 @@ public sealed class DockerRunnerProvider : IRunnerProvider
     {
         var containerName = CreateContainerName(request.JobName, $"{request.StepName}-{phase}");
         var surface = $"javascript-action:{request.JobName}/{request.StepName}/{phase}";
+        _javaScriptRuntimeObservations[$"{surface}|{runtime.Runtime}|{runtime.Image}"] =
+            new RunnerJavaScriptRuntimeObservation(surface, runtime.Runtime, runtime.Image);
         RunnerImageUserObservation observation;
         if (IsStrict(request.Runtime?.Execution))
         {
             observation = new RunnerImageUserObservation(
                 surface,
-                JavaScriptActionNodeImage,
-                "node",
+                runtime.Image,
+                runtime.StrictUser,
                 "non-root");
-            _imageUserObservations[$"{surface}|{JavaScriptActionNodeImage}"] = observation;
+            _imageUserObservations[$"{surface}|{runtime.Image}"] = observation;
         }
         else
         {
             observation = await ObserveImageUserAsync(
-                JavaScriptActionNodeImage,
+                runtime.Image,
                 surface,
                 cancellationToken);
             await WriteRootWarningAsync(observation, output, cancellationToken);
         }
         using var process = new Process
         {
-            StartInfo = CreateJavaScriptActionStartInfo(request, scriptPath, containerName),
+            StartInfo = CreateJavaScriptActionStartInfo(request, runtime, scriptPath, containerName),
             EnableRaisingEvents = true
         };
 
@@ -675,7 +690,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             result.Success)
         {
             observation = await ObserveImageUserAsync(
-                JavaScriptActionNodeImage,
+                runtime.Image,
                 $"javascript-action:{request.JobName}/{request.StepName}/{phase}",
                 cancellationToken);
             await WriteRootWarningAsync(observation, output, cancellationToken);
@@ -798,6 +813,19 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         string scriptPath,
         string containerName)
     {
+        return CreateJavaScriptActionStartInfo(
+            request,
+            JavaScriptActionRuntimeCatalog.Resolve(request.JavaScriptRuntime),
+            scriptPath,
+            containerName);
+    }
+
+    private static ProcessStartInfo CreateJavaScriptActionStartInfo(
+        JavaScriptActionExecutionRequest request,
+        JavaScriptActionRuntimeDescriptor runtime,
+        string scriptPath,
+        string containerName)
+    {
         var startInfo = CreateBaseStartInfo(
             request.JobName,
             request.StepName,
@@ -811,10 +839,10 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         if (IsStrict(request.Runtime?.Execution))
         {
             startInfo.ArgumentList.Add("--user");
-            startInfo.ArgumentList.Add("node");
+            startInfo.ArgumentList.Add(runtime.StrictUser);
         }
 
-        startInfo.ArgumentList.Add(JavaScriptActionNodeImage);
+        startInfo.ArgumentList.Add(runtime.Image);
         startInfo.ArgumentList.Add("node");
         startInfo.ArgumentList.Add(ToActionContainerPath(request.ActionPath, scriptPath));
 

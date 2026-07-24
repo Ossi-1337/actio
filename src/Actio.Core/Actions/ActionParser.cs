@@ -254,7 +254,8 @@ public sealed class ActionParser
             return ActionRuns.Composite(ReadSteps(errors, runsMap));
         }
 
-        if (string.Equals(usingValue, ActionRuntime.Node20, StringComparison.Ordinal))
+        if (string.Equals(usingValue, ActionRuntime.Node20, StringComparison.Ordinal) ||
+            string.Equals(usingValue, ActionRuntime.Node24, StringComparison.Ordinal))
         {
             AddUnsupportedRunKeys(errors, runsMap, ["args", "entrypoint", "image"], "action.runs");
             if (TryGet(runsMap, "steps", out _))
@@ -270,7 +271,7 @@ public sealed class ActionParser
             ValidateActionPath(errors, pre, "action.runs.pre");
             ValidateActionPath(errors, post, "action.runs.post");
 
-            return ActionRuns.JavaScript(main, pre, post);
+            return ActionRuns.JavaScript(usingValue, main, pre, post);
         }
 
         if (string.Equals(usingValue, ActionRuntime.Docker, StringComparison.Ordinal))
@@ -289,7 +290,7 @@ public sealed class ActionParser
             return ActionRuns.Docker(image);
         }
 
-        errors.Add("action.runs.using supports only 'composite', 'node20', or 'docker'.");
+        errors.Add("action.runs.using supports only 'composite', 'node20', 'node24', or 'docker'.");
         return ActionRuns.Composite([]);
     }
 
@@ -648,8 +649,8 @@ public sealed class ActionParser
         public static ActionRuns Composite(IReadOnlyList<ActionStep> steps)
             => new(ActionRuntime.Composite, steps, null, null, null, null);
 
-        public static ActionRuns JavaScript(string? main, string? pre, string? post)
-            => new(ActionRuntime.Node20, [], null, main, pre, post);
+        public static ActionRuns JavaScript(string runtime, string? main, string? pre, string? post)
+            => new(runtime, [], null, main, pre, post);
 
         public static ActionRuns Docker(string? image)
             => new(ActionRuntime.Docker, [], image, null, null, null);

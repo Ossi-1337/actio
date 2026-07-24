@@ -1,3 +1,4 @@
+using Actio.Core.Actions;
 using Actio.Core.Workflows;
 using Actio.Engine.Actions;
 using Actio.Engine.Caching;
@@ -2775,6 +2776,7 @@ public sealed class WorkflowExecutorTests
             Assert.Equal("dist/index.js", request.Main);
             Assert.Equal("dist/pre.js", request.Pre);
             Assert.Equal("dist/post.js", request.Post);
+            Assert.Equal(ActionRuntime.Node20, request.JavaScriptRuntime);
             Assert.NotNull(request.Runtime);
             Assert.Equal("Actio", request.Environment["INPUT_NAME"]);
             Assert.Equal("/actio/action", request.Environment["GITHUB_ACTION_PATH"]);
@@ -3755,8 +3757,10 @@ public sealed class WorkflowExecutorTests
               name:
                 default: Actio
             runs:
-              using: node20
+              using: node24
+              pre: dist/pre.js
               main: dist/index.js
+              post: dist/post.js
             """);
 
         try
@@ -3812,8 +3816,10 @@ public sealed class WorkflowExecutorTests
             var request = Assert.Single(runner.JavaScriptActionRequests);
             Assert.Equal("/actio/action", request.ActionPath);
             Assert.Equal("dist/index.js", request.Main);
-            Assert.Null(request.Pre);
-            Assert.Null(request.Post);
+            Assert.Equal("dist/pre.js", request.Pre);
+            Assert.Equal("dist/post.js", request.Post);
+            Assert.Equal(ActionRuntime.Node24, request.JavaScriptRuntime);
+            Assert.NotNull(request.Runtime);
             Assert.Equal("Remote", request.Environment["INPUT_NAME"]);
             var actionMount = Assert.Single(request.AdditionalMounts, mount => mount.ContainerPath == "/actio/action");
             Assert.Equal(actionRoot, actionMount.HostPath);
@@ -3822,6 +3828,61 @@ public sealed class WorkflowExecutorTests
         finally
         {
             Directory.Delete(actionRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_PreservesNode24RuntimeForNestedJavaScriptAction()
+    {
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-action-tests-{Guid.NewGuid():N}");
+        var parentRoot = Path.Combine(projectRoot, ".actio", "actions", "parent");
+        var childRoot = Path.Combine(parentRoot, "child");
+        Directory.CreateDirectory(Path.Combine(childRoot, "dist"));
+        await File.WriteAllTextAsync(
+            Path.Combine(parentRoot, "action.yml"),
+            """
+            name: Parent
+            runs:
+              using: composite
+              steps:
+                - name: Child
+                  uses: ./child
+            """);
+        await File.WriteAllTextAsync(
+            Path.Combine(childRoot, "action.yml"),
+            """
+            name: Child
+            runs:
+              using: node24
+              main: dist/index.js
+            """);
+
+        try
+        {
+            var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+            var workflow = CreateWorkflow(
+                new WorkflowJob(
+                    "test",
+                    [],
+                    null,
+                    "ubuntu-latest",
+                    new Dictionary<string, string>(),
+                    [new WorkflowStep("Use parent", null, "./.actio/actions/parent")]));
+
+            var result = await new WorkflowExecutor(runner, actionCache: new RecordingActionCache()).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+            var request = Assert.Single(runner.JavaScriptActionRequests);
+            Assert.Equal(ActionRuntime.Node24, request.JavaScriptRuntime);
+            Assert.Equal("Use parent / Child", request.StepName);
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
         }
     }
 

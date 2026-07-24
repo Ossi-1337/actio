@@ -336,6 +336,17 @@ function renderSecurity(run) {
           ${summaryCell("Strict controls", (metadata.strictControls ?? []).join(", ") || "None")}
           ${summaryCell("Cleanup", formatCleanup(metadata.cleanup))}
         </div>
+        ${(metadata.javaScriptRuntimeObservations ?? []).length ? `<div class="security-list">
+          ${(metadata.javaScriptRuntimeObservations ?? []).map(observation => `
+            <div class="security-row">
+              <span class="security-level info">${escapeHtml(observation.runtime)}</span>
+              <span>
+                <span class="job-name">${escapeHtml(observation.image)}</span>
+                <span class="run-sub muted">${escapeHtml(observation.surface)}</span>
+              </span>
+            </div>
+          `).join("")}
+        </div>` : ""}
         ${(metadata.imageUserObservations ?? []).length ? `<div class="security-list">
           ${(metadata.imageUserObservations ?? []).map(observation => `
             <div class="security-row">

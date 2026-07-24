@@ -684,7 +684,8 @@ internal sealed class JobExecutor
                         additionalMounts,
                         serviceNetwork,
                         plan.JavaScriptPre,
-                        plan.JavaScriptPost),
+                        plan.JavaScriptPost,
+                        plan.JavaScriptRuntime!),
                     collector,
                     stepCancellationToken),
                 _ => await _runnerProvider.ExecuteStepAsync(
@@ -1423,7 +1424,8 @@ internal sealed class JobExecutor
                     additionalMounts,
                     serviceNetwork,
                     nestedPlan.JavaScriptPre,
-                    nestedPlan.JavaScriptPost),
+                    nestedPlan.JavaScriptPost,
+                    nestedPlan.JavaScriptRuntime!),
                 collector,
                 cancellationToken),
             _ => await _runnerProvider.ExecuteStepAsync(
@@ -1989,6 +1991,7 @@ internal sealed class JobExecutor
                 action.JavaScriptMain!,
                 action.JavaScriptPre,
                 action.JavaScriptPost,
+                action.JavaScriptRuntime!,
                 action.Environment,
                 action.AdditionalMounts);
         }
@@ -2464,6 +2467,8 @@ internal sealed class JobExecutor
         IReadOnlyList<StepExecutionMount> AdditionalMounts,
         IReadOnlyList<string> Errors)
     {
+        public string? JavaScriptRuntime { get; init; }
+
         public static StepExecutionPlan ShellCommand(
             string command,
             IReadOnlyDictionary<string, string>? environment = null,
@@ -2590,6 +2595,7 @@ internal sealed class JobExecutor
             string main,
             string? pre,
             string? post,
+            string runtime,
             IReadOnlyDictionary<string, string> environment,
             IReadOnlyList<StepExecutionMount> additionalMounts)
         {
@@ -2613,7 +2619,10 @@ internal sealed class JobExecutor
                 null,
                 environment,
                 additionalMounts,
-                []);
+                [])
+            {
+                JavaScriptRuntime = runtime
+            };
         }
 
         public static StepExecutionPlan DependencyCache(DependencyCacheAction action)

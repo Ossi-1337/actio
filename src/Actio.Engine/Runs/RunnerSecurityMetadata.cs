@@ -24,7 +24,8 @@ public sealed record RunnerSecurityMetadata(
     ContainerResourceLimits? EffectiveResourceLimits = null,
     RunnerPreflightEvidence? Preflight = null,
     RunnerCleanupEvidence? Cleanup = null,
-    IReadOnlyList<string>? StrictControls = null)
+    IReadOnlyList<string>? StrictControls = null,
+    IReadOnlyList<RunnerJavaScriptRuntimeObservation>? JavaScriptRuntimeObservations = null)
 {
     public IReadOnlyList<string> AppliedSecurityOptions { get; init; } = AppliedSecurityOptions ?? [];
 
@@ -37,6 +38,9 @@ public sealed record RunnerSecurityMetadata(
     public IReadOnlyList<RunnerNetworkObservation> NetworkObservations { get; init; } = NetworkObservations ?? [];
 
     public IReadOnlyList<string> StrictControls { get; init; } = StrictControls ?? [];
+
+    public IReadOnlyList<RunnerJavaScriptRuntimeObservation> JavaScriptRuntimeObservations { get; init; } =
+        JavaScriptRuntimeObservations ?? [];
 }
 
 public sealed record RunnerPreflightEvidence(

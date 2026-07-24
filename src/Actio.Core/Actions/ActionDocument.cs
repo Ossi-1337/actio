@@ -23,6 +23,7 @@ public static class ActionRuntime
     public const string Composite = "composite";
     public const string Docker = "docker";
     public const string Node20 = "node20";
+    public const string Node24 = "node24";
 }
 
 public sealed record ActionInput(

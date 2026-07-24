@@ -1,3 +1,4 @@
+using Actio.Core.Actions;
 using Actio.Core.Workflows;
 using Actio.Engine.Execution;
 using System.Diagnostics;
@@ -192,6 +193,102 @@ public sealed class DockerRunnerProviderTests
         Assert.True(imageIndex >= 0);
         Assert.Equal("node", args[imageIndex + 1]);
         Assert.Equal("/actio/action/dist/index.js", args[imageIndex + 2]);
+    }
+
+    [Fact]
+    public void CreateJavaScriptActionStartInfo_RunsNode24WithActionScript()
+    {
+        var actionPath = Path.Combine(Directory.GetCurrentDirectory(), "cached-node24-action");
+        Directory.CreateDirectory(actionPath);
+        var request = new JavaScriptActionExecutionRequest(
+            "test",
+            "Use Node 24 action",
+            Directory.GetCurrentDirectory(),
+            "/actio/action",
+            "dist/index.js",
+            new Dictionary<string, string>(),
+            [new StepExecutionMount(actionPath, "/actio/action", ReadOnly: true, StepExecutionMountKind.ActionSource)],
+            JavaScriptRuntime: ActionRuntime.Node24);
+
+        var args = DockerRunnerProvider.CreateJavaScriptActionStartInfo(request, "dist/index.js", "actio-test")
+            .ArgumentList
+            .ToArray();
+        var imageIndex = Array.IndexOf(args, "node:24-bookworm-slim");
+
+        AssertSecureBaseline(args);
+        Assert.True(imageIndex >= 0);
+        Assert.Equal("node", args[imageIndex + 1]);
+        Assert.Equal("/actio/action/dist/index.js", args[imageIndex + 2]);
+    }
+
+    [Fact]
+    public void CreateJavaScriptActionStartInfo_StrictNode24UsesControlledNodeUser()
+    {
+        var execution = new RunnerExecutionContext(
+            "run-1",
+            RunnerSecurityProfiles.Strict,
+            RunnerSecurityProfiles.Strict,
+            ContainerResourceLimits.Defaults,
+            new ActioInstanceIdentity("instance-1", 42, 1234));
+        var request = new JavaScriptActionExecutionRequest(
+            "test",
+            "Use Node 24 action",
+            Directory.GetCurrentDirectory(),
+            "/actio/action",
+            "dist/index.js",
+            new Dictionary<string, string>(),
+            Runtime: new JobRuntimeContext("none", [], Execution: execution, OwnsNetwork: false),
+            JavaScriptRuntime: ActionRuntime.Node24);
+
+        var args = DockerRunnerProvider.CreateJavaScriptActionStartInfo(request, "dist/index.js", "actio-test")
+            .ArgumentList
+            .ToArray();
+
+        AssertOptionValue(args, "--user", "node");
+        Assert.Contains("node:24-bookworm-slim", args);
+        Assert.Contains("--read-only", args);
+        Assert.Contains("--cap-drop", args);
+        AssertOptionValue(args, "--network", "none");
+    }
+
+    [Fact]
+    public void CreateJavaScriptActionStartInfo_RejectsUnknownRuntime()
+    {
+        var request = new JavaScriptActionExecutionRequest(
+            "test",
+            "Use unsupported action",
+            Directory.GetCurrentDirectory(),
+            "/actio/action",
+            "dist/index.js",
+            new Dictionary<string, string>(),
+            JavaScriptRuntime: "node22");
+
+        var exception = Assert.Throws<ArgumentException>(() =>
+            DockerRunnerProvider.CreateJavaScriptActionStartInfo(request, "dist/index.js", "actio-test"));
+
+        Assert.Contains("node22", exception.Message);
+        Assert.Contains("node20, node24", exception.Message);
+    }
+
+    [Fact]
+    public async Task ExecuteJavaScriptActionAsync_RejectsUnknownRuntimeBeforeDockerStart()
+    {
+        var request = new JavaScriptActionExecutionRequest(
+            "test",
+            "Use unsupported action",
+            Directory.GetCurrentDirectory(),
+            "/actio/action",
+            "dist/index.js",
+            new Dictionary<string, string>(),
+            JavaScriptRuntime: "node22");
+        var output = new RecordingStepOutputSink();
+
+        var result = await new DockerRunnerProvider().ExecuteJavaScriptActionAsync(request, output);
+
+        Assert.False(result.Success);
+        Assert.Empty(output.Output);
+        Assert.Contains(output.Error, line => line.Contains("node22", StringComparison.Ordinal));
+        Assert.Contains(output.Error, line => line.Contains("node20, node24", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -776,5 +873,24 @@ public sealed class DockerRunnerProviderTests
         var index = Array.IndexOf(args.ToArray(), option);
         Assert.True(index >= 0, $"Option '{option}' was not present.");
         Assert.Equal(expected, args[index + 1]);
+    }
+
+    private sealed class RecordingStepOutputSink : IStepOutputSink
+    {
+        public List<string> Output { get; } = [];
+
+        public List<string> Error { get; } = [];
+
+        public Task WriteOutputLineAsync(string line, CancellationToken cancellationToken = default)
+        {
+            Output.Add(line);
+            return Task.CompletedTask;
+        }
+
+        public Task WriteErrorLineAsync(string line, CancellationToken cancellationToken = default)
+        {
+            Error.Add(line);
+            return Task.CompletedTask;
+        }
     }
 }

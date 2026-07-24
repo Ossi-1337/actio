@@ -77,7 +77,14 @@ public sealed class FileSystemRunStoreTests : IDisposable
                 EffectiveResourceLimits: ContainerResourceLimits.Defaults,
                 Preflight: new RunnerPreflightEvidence(Status: "passed", EngineVersion: "29.0.0"),
                 Cleanup: new RunnerCleanupEvidence(RemovedContainers: 1),
-                StrictControls: ["cap-drop-all"]));
+                StrictControls: ["cap-drop-all"],
+                JavaScriptRuntimeObservations:
+                [
+                    new RunnerJavaScriptRuntimeObservation(
+                        "javascript-action:test/action/main",
+                        "node24",
+                        "node:24-bookworm-slim")
+                ]));
 
         await store.SaveRunRecordAsync(record);
         var loaded = await store.ReadRunRecordAsync(runId);
@@ -105,6 +112,7 @@ public sealed class FileSystemRunStoreTests : IDisposable
         Assert.Equal("passed", loaded.RunnerSecurity.Preflight?.Status);
         Assert.Equal(1, loaded.RunnerSecurity.Cleanup?.RemovedContainers);
         Assert.Contains("cap-drop-all", loaded.RunnerSecurity.StrictControls);
+        Assert.Equal("node24", Assert.Single(loaded.RunnerSecurity.JavaScriptRuntimeObservations).Runtime);
         Assert.True(File.Exists(Path.Combine(_root, "runs", runId, "run.json")));
     }
 
@@ -206,6 +214,7 @@ public sealed class FileSystemRunStoreTests : IDisposable
         Assert.Equal("not-reported", loaded.RunnerSecurity.NetworkPolicy);
         Assert.Equal("not-reported", loaded.RunnerSecurity.PublishedPortPolicy);
         Assert.Empty(loaded.RunnerSecurity.NetworkObservations);
+        Assert.Empty(loaded.RunnerSecurity.JavaScriptRuntimeObservations);
     }
 
     [Fact]

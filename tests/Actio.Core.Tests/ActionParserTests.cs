@@ -142,6 +142,26 @@ public sealed class ActionParserTests
     }
 
     [Fact]
+    public void Parse_AcceptsNode24JavaScriptAction()
+    {
+        var result = Parse(
+            """
+            name: JavaScript hello
+            runs:
+              using: node24
+              pre: dist/pre.js
+              main: dist/index.js
+              post: dist/post.js
+            """);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal(ActionRuntime.Node24, result.Action!.Runtime);
+        Assert.Equal("dist/pre.js", result.Action.Pre);
+        Assert.Equal("dist/index.js", result.Action.Main);
+        Assert.Equal("dist/post.js", result.Action.Post);
+    }
+
+    [Fact]
     public void Parse_AcceptsDockerfileAction()
     {
         var result = Parse(
@@ -238,7 +258,8 @@ public sealed class ActionParserTests
             """);
 
         Assert.False(result.Success);
-        Assert.Contains(result.Errors, error => error.Contains("supports only 'composite', 'node20', or 'docker'", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error =>
+            error.Contains("supports only 'composite', 'node20', 'node24', or 'docker'", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

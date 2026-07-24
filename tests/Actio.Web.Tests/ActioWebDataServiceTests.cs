@@ -235,7 +235,14 @@ public sealed class ActioWebDataServiceTests : IDisposable
                 Cleanup: new RunnerCleanupEvidence(
                     CandidateContainers: 1,
                     RemovedContainers: 1),
-                StrictControls: ["cap-drop-all"])));
+                StrictControls: ["cap-drop-all"],
+                JavaScriptRuntimeObservations:
+                [
+                    new RunnerJavaScriptRuntimeObservation(
+                        "javascript-action:test/action/main",
+                        "node24",
+                        "node:24-bookworm-slim")
+                ])));
 
         var run = await CreateService().GetRunAsync("run-1");
 
@@ -255,6 +262,7 @@ public sealed class ActioWebDataServiceTests : IDisposable
         Assert.Equal("passed", run.RunnerSecurity.Preflight?.Status);
         Assert.Equal(1, run.RunnerSecurity.Cleanup?.RemovedContainers);
         Assert.Contains("cap-drop-all", run.RunnerSecurity.StrictControls);
+        Assert.Equal("node24", Assert.Single(run.RunnerSecurity.JavaScriptRuntimeObservations).Runtime);
     }
 
     [Fact]

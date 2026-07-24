@@ -459,7 +459,8 @@ internal sealed class ActionResolver
             ReadOnly: true,
             StepExecutionMountKind.ActionSource);
 
-        if (string.Equals(action.Runtime, ActionRuntime.Node20, StringComparison.Ordinal))
+        if (string.Equals(action.Runtime, ActionRuntime.Node20, StringComparison.Ordinal) ||
+            string.Equals(action.Runtime, ActionRuntime.Node24, StringComparison.Ordinal))
         {
             return AddWarnings(ActionResolutionResult.ResolvedJavaScriptAction(
                 action,
@@ -1024,6 +1025,8 @@ internal sealed record ActionResolutionResult(
     public bool IsDockerfileAction => DockerfileBuildContext is not null;
 
     public bool IsJavaScriptAction => JavaScriptMain is not null;
+
+    public string? JavaScriptRuntime => IsJavaScriptAction ? Action?.Runtime : null;
 
     public static ActionResolutionResult ResolvedCompositeAction(
         ActionDocument action,
