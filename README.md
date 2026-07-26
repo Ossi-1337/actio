@@ -1,54 +1,28 @@
 # Actio
 
 [![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
-[![Docker runner](https://img.shields.io/badge/runner-Docker-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-Actio is a local-first workflow runner for YAML pipelines, inspired by GitHub Actions and designed for fast feedback on your own machine.
+Actio is a local-first workflow runner for YAML pipelines. It executes Docker-backed workflows from `.workflows/`, stores runs, logs, caches, and artifacts locally, and provides a lightweight loopback web UI.
 
-It runs workflows from `.workflows/`, executes Docker-backed jobs and supported actions, stores local run history, logs, caches, and artifacts, and exposes a lightweight localhost web UI.
+## Start
 
-## Requirements
-
-- .NET 10 SDK
-- Docker
-
-## Quick Start
-
-Create a workflow at `.workflows/ci.yml`:
-
-```yaml
-name: CI
-
-jobs:
-  smoke:
-    runs-on: alpine-latest
-    steps:
-      - name: Smoke test
-        run: echo "Actio workflow is running"
-```
-
-Run it locally:
+Requirements: the .NET 10 SDK from `global.json` and Docker in Linux-container mode.
 
 ```bash
-dotnet run --project src/Actio.Cli -- run ci.yml
+dotnet restore Actio.slnx
+dotnet run --project src/Actio.Cli -- validate ci.yml
+dotnet run --project src/Actio.Cli -- ci.yml
 ```
 
-Common commands:
+Use `actio --help` after installing the CLI. `actio compatibility` shows the current action support matrix.
 
-```bash
-dotnet run --project src/Actio.Cli -- --help
-dotnet run --project src/Actio.Cli -- compatibility
-dotnet run --project src/Actio.Cli -- cache list
-dotnet run --project src/Actio.Cli -- web
-```
+## Platform Status
 
-## Status
+Linux and Windows are verification targets. macOS is best effort and currently unverified. Actio is under active development and does not yet promise a stable workflow compatibility surface.
 
-Actio is in early development. It intentionally does not create GitHub's automatic `GITHUB_TOKEN`; workflows that need tokens should use explicit local secrets.
+Docker containers reduce risk but are not VM security boundaries. The web UI is loopback-only and does not protect against other processes running as the same local user. Actio does not create an automatic `GITHUB_TOKEN`; external actions and mutable references must be reviewed before use.
 
-Run `dotnet run --project src/Actio.Cli -- compatibility` to see the current action compatibility matrix.
+See [Architecture](docs/architecture.md) and [Security](SECURITY.md).
 
-## License
-
-Actio is licensed under the [MIT License](LICENSE).
+Licensed under the [MIT License](LICENSE).
