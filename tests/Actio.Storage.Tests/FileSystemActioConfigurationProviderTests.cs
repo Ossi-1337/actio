@@ -25,6 +25,30 @@ public sealed class FileSystemActioConfigurationProviderTests : IDisposable
     }
 
     [Fact]
+    public void Validate_DoesNotCreateActioHomeOrInstanceIdentity()
+    {
+        var result = new FileSystemActioConfigurationProvider(_root).Validate();
+
+        Assert.True(result.Success);
+        Assert.False(Directory.Exists(_root));
+    }
+
+    [Fact]
+    public void Validate_RejectsInvalidConfigWithoutCreatingInstanceIdentity()
+    {
+        Directory.CreateDirectory(_root);
+        File.WriteAllText(
+            Path.Combine(_root, "config.json"),
+            """{ "resources": { "cpu": 9 } }""");
+
+        var result = new FileSystemActioConfigurationProvider(_root).Validate();
+
+        Assert.False(result.Success);
+        Assert.Contains("resources.cpu", Assert.Single(result.Errors));
+        Assert.False(File.Exists(Path.Combine(_root, "instance-id")));
+    }
+
+    [Fact]
     public void Load_ReadsResourceConfiguration()
     {
         Directory.CreateDirectory(_root);

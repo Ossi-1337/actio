@@ -29,6 +29,14 @@ public sealed record CliCommand(
             Inputs: inputs,
             SecurityProfile: securityProfile);
 
+    public static CliCommand ValidateWorkflow(
+        string workflowName,
+        IReadOnlyDictionary<string, string> inputs)
+        => new(
+            CliCommandKind.ValidateWorkflow,
+            WorkflowName: workflowName,
+            Inputs: inputs);
+
     public static CliCommand RerunWorkflow(string runId)
         => new(CliCommandKind.RerunWorkflow, RunId: runId);
 

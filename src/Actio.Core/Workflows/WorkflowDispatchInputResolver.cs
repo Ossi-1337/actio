@@ -16,6 +16,46 @@ public sealed record WorkflowDispatchInputResolutionResult(
 
 public static class WorkflowDispatchInputResolver
 {
+    public static WorkflowDispatchInputResolutionResult ValidateProvided(
+        WorkflowDocument workflow,
+        IReadOnlyDictionary<string, string> providedInputs)
+    {
+        var dispatch = workflow.Triggers
+            .FirstOrDefault(trigger => string.Equals(trigger.EventName, "workflow_dispatch", StringComparison.Ordinal))?
+            .Dispatch;
+
+        if (dispatch is null)
+        {
+            return providedInputs.Count == 0
+                ? WorkflowDispatchInputResolutionResult.Resolved(new Dictionary<string, string>())
+                : WorkflowDispatchInputResolutionResult.Failed(["Workflow does not define workflow_dispatch, so manual inputs cannot be used."]);
+        }
+
+        var errors = new List<string>();
+        var validated = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var input in providedInputs)
+        {
+            if (!dispatch.Inputs.TryGetValue(input.Key, out var definition))
+            {
+                errors.Add($"workflow_dispatch input '{input.Key}' is not declared.");
+                continue;
+            }
+
+            if (definition.Required && input.Value.Length == 0)
+            {
+                errors.Add($"workflow_dispatch input '{definition.Name}' is required.");
+                continue;
+            }
+
+            ValidateInputValue(errors, definition, input.Value);
+            validated[input.Key] = input.Value;
+        }
+
+        return errors.Count == 0
+            ? WorkflowDispatchInputResolutionResult.Resolved(validated)
+            : WorkflowDispatchInputResolutionResult.Failed(errors);
+    }
+
     public static WorkflowDispatchInputResolutionResult Resolve(
         WorkflowDocument workflow,
         IReadOnlyDictionary<string, string> providedInputs)

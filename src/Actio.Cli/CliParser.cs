@@ -14,6 +14,11 @@ public sealed class CliParser
             return ParseRunCommand(args);
         }
 
+        if (string.Equals(args[0], "validate", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseValidateCommand(args);
+        }
+
         if (string.Equals(args[0], "web", StringComparison.OrdinalIgnoreCase))
         {
             return ParseWebCommand(args);
@@ -135,6 +140,66 @@ public sealed class CliParser
         return options.Success
             ? CliCommand.RunWorkflow(workflowName, options.Inputs, options.SecurityProfile)
             : CliCommand.UsageError(options.ErrorMessage!);
+    }
+
+    private static CliCommand ParseValidateCommand(IReadOnlyList<string> args)
+    {
+        if (args.Count == 2 && IsHelp(args[1]))
+        {
+            return new CliCommand(CliCommandKind.ShowValidateHelp);
+        }
+
+        if (args.Count == 1)
+        {
+            return CliCommand.UsageError("Missing workflow argument for 'validate'.");
+        }
+
+        if (args[1].StartsWith("-", StringComparison.Ordinal))
+        {
+            return CliCommand.UsageError($"Unknown option '{args[1]}' for 'validate'.");
+        }
+
+        if (!IsWorkflowFilename(args[1]))
+        {
+            return CliCommand.UsageError("Workflow argument for 'validate' must end with .yml or .yaml.");
+        }
+
+        var inputs = new Dictionary<string, string>(StringComparer.Ordinal);
+        for (var index = 2; index < args.Count; index++)
+        {
+            var option = args[index];
+            if (!string.Equals(option, "--input", StringComparison.Ordinal))
+            {
+                return CliCommand.UsageError(option.StartsWith("-", StringComparison.Ordinal)
+                    ? $"Unknown option '{option}' for 'validate'."
+                    : $"Unexpected argument '{option}' for 'validate'.");
+            }
+
+            if (index + 1 >= args.Count)
+            {
+                return CliCommand.UsageError("Missing value for '--input'.");
+            }
+
+            var input = args[++index];
+            var separatorIndex = input.IndexOf('=', StringComparison.Ordinal);
+            if (separatorIndex <= 0)
+            {
+                return CliCommand.UsageError("Value for '--input' must use name=value.");
+            }
+
+            var name = input[..separatorIndex];
+            if (!IsInputName(name))
+            {
+                return CliCommand.UsageError($"Input name '{name}' is invalid.");
+            }
+
+            if (!inputs.TryAdd(name, input[(separatorIndex + 1)..]))
+            {
+                return CliCommand.UsageError($"Input '{name}' was provided more than once.");
+            }
+        }
+
+        return CliCommand.ValidateWorkflow(args[1], inputs);
     }
 
     private static RunOptionsParseResult ParseRunOptions(

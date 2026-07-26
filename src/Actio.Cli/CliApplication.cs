@@ -6,6 +6,7 @@ using Actio.Engine.Caching;
 using Actio.Engine.Configuration;
 using Actio.Engine.Execution;
 using Actio.Engine.Runs;
+using Actio.Engine.Validation;
 using Actio.Runner.Docker;
 using Actio.Storage;
 using Actio.Web;
@@ -27,6 +28,7 @@ public sealed class CliApplication
     private readonly FileSystemRunStore _runStore;
     private readonly Func<string> _createRunId;
     private readonly IActioConfigurationProvider _configurationProvider;
+    private readonly WorkflowStaticValidator _staticValidator;
 
     public CliApplication()
         : this(
@@ -39,7 +41,8 @@ public sealed class CliApplication
             new FileSystemDependencyCache(),
             new CliOutputFormatter(),
             new FileSystemLocalValueProvider(),
-            configurationProvider: new FileSystemActioConfigurationProvider())
+            configurationProvider: new FileSystemActioConfigurationProvider(),
+            staticValidator: new WorkflowStaticValidator())
     {
     }
 
@@ -55,7 +58,8 @@ public sealed class CliApplication
         FileSystemLocalValueProvider? localValueProvider = null,
         FileSystemRunStore? runStore = null,
         Func<string>? createRunId = null,
-        IActioConfigurationProvider? configurationProvider = null)
+        IActioConfigurationProvider? configurationProvider = null,
+        WorkflowStaticValidator? staticValidator = null)
     {
         _resolver = resolver;
         _parser = parser;
@@ -69,6 +73,7 @@ public sealed class CliApplication
         _runStore = runStore ?? new FileSystemRunStore();
         _createRunId = createRunId ?? _runStore.CreateRunId;
         _configurationProvider = configurationProvider ?? new FileSystemActioConfigurationProvider();
+        _staticValidator = staticValidator ?? new WorkflowStaticValidator();
     }
 
     public int Run(string[] args, string workingDirectory, TextWriter output, TextWriter error)
@@ -92,6 +97,9 @@ public sealed class CliApplication
                 return ExitCodes.Success;
             case CliCommandKind.ShowRunHelp:
                 output.WriteLine(CliHelpText.Run);
+                return ExitCodes.Success;
+            case CliCommandKind.ShowValidateHelp:
+                output.WriteLine(CliHelpText.Validate);
                 return ExitCodes.Success;
             case CliCommandKind.ShowRerunHelp:
                 output.WriteLine(CliHelpText.Rerun);
@@ -119,6 +127,8 @@ public sealed class CliApplication
                 return ExitCodes.UsageError;
             case CliCommandKind.RunWorkflow:
                 return await RunWorkflowAsync(command, workingDirectory, output, error, cancellationToken);
+            case CliCommandKind.ValidateWorkflow:
+                return ValidateWorkflow(command, workingDirectory, output, error);
             case CliCommandKind.RerunWorkflow:
                 return await RerunWorkflowAsync(command, output, error, cancellationToken);
             case CliCommandKind.CancelRun:
@@ -179,6 +189,66 @@ public sealed class CliApplication
             output,
             error,
             cancellationToken);
+    }
+
+    private int ValidateWorkflow(
+        CliCommand command,
+        string workingDirectory,
+        TextWriter output,
+        TextWriter error)
+    {
+        var resolution = _resolver.Resolve(command.WorkflowName!, workingDirectory);
+        if (!resolution.Success)
+        {
+            WriteErrors(error, resolution.Errors);
+            return ExitCodes.ValidationError;
+        }
+
+        var localValues = _localValueProvider.Load(resolution.ProjectRoot!);
+        if (!localValues.Success)
+        {
+            WriteErrors(error, localValues.Errors);
+            return ExitCodes.ValidationError;
+        }
+
+        var configuration = _configurationProvider.Validate();
+        if (!configuration.Success)
+        {
+            WriteErrors(error, configuration.Errors);
+            return ExitCodes.ValidationError;
+        }
+
+        var validation = _staticValidator.Validate(
+            resolution.WorkflowPath!,
+            resolution.ProjectRoot!,
+            command.Inputs,
+            localValues.Values.Secrets);
+
+        if (validation.Warnings.Count > 0)
+        {
+            error.WriteLine("Workflow warnings:");
+            foreach (var warning in validation.Warnings)
+            {
+                error.WriteLine($" - {warning.SourcePath}: {warning.Message}");
+            }
+        }
+
+        if (!validation.Success)
+        {
+            error.WriteLine("Workflow validation failed:");
+            foreach (var validationError in validation.Errors)
+            {
+                error.WriteLine($" - {validationError.SourcePath}: {validationError.Message}");
+            }
+
+            return ExitCodes.ValidationError;
+        }
+
+        var workflow = validation.Workflow!;
+        output.WriteLine($"Workflow '{workflow.Name}' is valid.");
+        output.WriteLine($"Jobs: {workflow.Jobs.Count}");
+        output.WriteLine($"Steps: {workflow.StepCount}");
+        return ExitCodes.Success;
     }
 
     private async Task<int> RerunWorkflowAsync(

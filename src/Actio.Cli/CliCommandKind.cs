@@ -3,6 +3,7 @@ namespace Actio.Cli;
 public enum CliCommandKind
 {
     RunWorkflow,
+    ValidateWorkflow,
     RerunWorkflow,
     CancelRun,
     ShowRunStatus,
@@ -12,6 +13,7 @@ public enum CliCommandKind
     ShowCompatibility,
     ShowRootHelp,
     ShowRunHelp,
+    ShowValidateHelp,
     ShowRerunHelp,
     ShowCancelHelp,
     ShowStatusHelp,

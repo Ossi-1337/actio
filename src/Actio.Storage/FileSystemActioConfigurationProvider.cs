@@ -23,20 +23,19 @@ public sealed class FileSystemActioConfigurationProvider : IActioConfigurationPr
 
     public ActioConfigurationLoadResult Load()
     {
+        var validation = Validate();
+        if (!validation.Success)
+        {
+            return Failed(validation.Errors);
+        }
+
         try
         {
             Directory.CreateDirectory(_actioHome);
-            var configuration = LoadConfiguration();
-            var errors = Validate(configuration);
-            if (errors.Count > 0)
-            {
-                return Failed(errors);
-            }
-
             using var process = Process.GetCurrentProcess();
             return new(
                 true,
-                configuration,
+                validation.Configuration,
                 new ActioInstanceIdentity(
                     LoadOrCreateInstanceId(),
                     Environment.ProcessId,
@@ -50,6 +49,30 @@ public sealed class FileSystemActioConfigurationProvider : IActioConfigurationPr
             or NotSupportedException)
         {
             return Failed([$"Actio configuration could not be loaded: {ex.Message}"]);
+        }
+    }
+
+    public ActioConfigurationValidationResult Validate()
+    {
+        try
+        {
+            var configuration = LoadConfiguration();
+            var errors = ValidateConfiguration(configuration);
+            return errors.Count == 0
+                ? new ActioConfigurationValidationResult(true, configuration)
+                : new ActioConfigurationValidationResult(false, new ContainerResourceConfiguration(), errors);
+        }
+        catch (Exception ex) when (ex is IOException
+            or UnauthorizedAccessException
+            or System.Security.SecurityException
+            or JsonException
+            or ArgumentException
+            or NotSupportedException)
+        {
+            return new ActioConfigurationValidationResult(
+                false,
+                new ContainerResourceConfiguration(),
+                [$"Actio configuration could not be loaded: {ex.Message}"]);
         }
     }
 
@@ -103,7 +126,7 @@ public sealed class FileSystemActioConfigurationProvider : IActioConfigurationPr
         }
     }
 
-    private static IReadOnlyList<string> Validate(ContainerResourceConfiguration value)
+    private static IReadOnlyList<string> ValidateConfiguration(ContainerResourceConfiguration value)
     {
         var errors = new List<string>();
         AddRangeError(errors, value.Cpu, "resources.cpu", 0.25, 8);

@@ -73,6 +73,113 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Null(result.Executor.Workflow);
     }
 
+    [Theory]
+    [InlineData("--help")]
+    [InlineData("-h")]
+    public void Run_PrintsValidateHelp(string option)
+    {
+        var result = RunWithFakeExecutor(["validate", option]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+        Assert.Contains("Actio validate - validate a workflow without executing it.", result.Output);
+        Assert.Contains("--input NAME=VALUE", result.Output);
+        Assert.Equal(string.Empty, result.Error);
+        Assert.Null(result.Executor.Workflow);
+    }
+
+    [Fact]
+    public void Run_ValidatesWorkflowWithoutExecutingIt()
+    {
+        WriteWorkflow("ci.yml", "CI");
+
+        var result = RunWithFakeExecutor(["validate", "ci.yml"]);
+
+        Assert.True(result.ExitCode == ExitCodes.Success, result.Error);
+        Assert.Equal(
+            $"Workflow 'CI' is valid.{Environment.NewLine}Jobs: 1{Environment.NewLine}Steps: 1{Environment.NewLine}",
+            result.Output);
+        Assert.Null(result.Executor.Workflow);
+    }
+
+    [Fact]
+    public void Run_ValidateAcceptsMissingRequiredDispatchInput()
+    {
+        WriteWorkflow(
+            "ci.yml",
+            "CI",
+            """
+            on:
+              workflow_dispatch:
+                inputs:
+                  environment:
+                    required: true
+                    type: choice
+                    options: [staging, production]
+            """);
+
+        var result = RunWithFakeExecutor(["validate", "ci.yml"]);
+
+        Assert.Equal(ExitCodes.Success, result.ExitCode);
+    }
+
+    [Fact]
+    public void Run_ValidateRejectsInvalidProvidedInput()
+    {
+        WriteWorkflow(
+            "ci.yml",
+            "CI",
+            """
+            on:
+              workflow_dispatch:
+                inputs:
+                  environment:
+                    type: choice
+                    options: [staging, production]
+            """);
+
+        var result = RunWithFakeExecutor(["validate", "ci.yml", "--input", "environment=invalid"]);
+
+        Assert.Equal(ExitCodes.ValidationError, result.ExitCode);
+        Assert.Contains("must be one of: staging, production", result.Error);
+        Assert.Null(result.Executor.Workflow);
+    }
+
+    [Theory]
+    [InlineData("validate")]
+    [InlineData("validate", "ci.yml", "--unknown")]
+    [InlineData("validate", "ci.yml", "--security-profile", "strict")]
+    public void Run_ValidateReturnsUsageErrors(params string[] args)
+    {
+        var result = RunWithFakeExecutor(args);
+
+        Assert.Equal(ExitCodes.UsageError, result.ExitCode);
+        Assert.Contains("actio --help", result.Error);
+        Assert.Null(result.Executor.Workflow);
+    }
+
+    [Fact]
+    public void Run_ValidateWarnsForUnknownExternalActionWithoutExecutingIt()
+    {
+        File.WriteAllText(
+            Path.Combine(_root, ".workflows", "ci.yml"),
+            """
+            name: CI
+            on: workflow_dispatch
+            jobs:
+              external:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: External action
+                    uses: owner/repository@v1
+            """);
+
+        var result = RunWithFakeExecutor(["validate", "ci.yml"]);
+
+        Assert.True(result.ExitCode == ExitCodes.Success, result.Error);
+        Assert.Contains("metadata was not inspected", result.Error);
+        Assert.Null(result.Executor.Workflow);
+    }
+
     [Fact]
     public void Run_PrintsWebHelp()
     {

@@ -7,6 +7,7 @@ public static class CliHelpText
 
         Usage:
           actio run <workflow>.yml
+          actio validate <workflow>.yml
           actio <workflow>.yml
           actio web
           actio status <run-id>
@@ -18,6 +19,8 @@ public static class CliHelpText
 
         Commands:
           run <workflow>.yml   Run a workflow from .workflows, with .github/workflows fallback.
+          validate <workflow>.yml
+                               Validate a workflow without executing it.
           web                  Start the local Actio web UI.
           status <run-id>      Show stored status for a workflow run.
           rerun <run-id>       Rerun a completed workflow run.
@@ -36,6 +39,7 @@ public static class CliHelpText
 
         Examples:
           actio run ci.yml
+          actio validate ci.yml
           actio ci.yml
           actio web
           actio status 20260703090029234-555a1799
@@ -44,6 +48,31 @@ public static class CliHelpText
           actio compatibility
           actio cache list
           actio run --help
+        """;
+
+    public const string Validate = """
+        Actio validate - validate a workflow without executing it.
+
+        Usage:
+          actio validate <workflow>.yml [options]
+
+        Arguments:
+          <workflow>.yml       Bare workflow filename, for example ci.yml.
+
+        Options:
+          -h, --help           Show help for the validate command.
+          --input NAME=VALUE   Validate a supplied workflow_dispatch input. Can be repeated.
+
+        Description:
+          Resolves and validates one workflow plus referenced local workflows and actions.
+          Reads Actio-owned local values and ACTIO_HOME/config.json without creating runtime
+          state. Missing required workflow_dispatch inputs are allowed unless supplied values
+          are invalid. No Docker, execution, downloads, cache writes, run records, artifacts,
+          web startup, or repository mutation occurs.
+
+        Examples:
+          actio validate ci.yml
+          actio validate ci.yml --input environment=staging
         """;
 
     public const string Run = """
