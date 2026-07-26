@@ -4,6 +4,8 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using Actio.Web.Models;
 
@@ -29,7 +31,7 @@ public sealed class ActioWebServer
         builder.Services.AddSingleton<ActioWebDataService>();
 
         var app = builder.Build();
-        MapRoutes(app);
+        MapRoutes(app, options);
         return app;
     }
 
@@ -38,7 +40,7 @@ public sealed class ActioWebServer
         await Build(options).RunAsync(cancellationToken);
     }
 
-    private static void MapRoutes(WebApplication app)
+    private static void MapRoutes(WebApplication app, ActioWebOptions options)
     {
         app.MapGet("/", () => Results.Content(EmbeddedWebAssetLoader.ReadText("index.html"), "text/html"));
         app.MapGet("/runs/{runId}", () => Results.Content(EmbeddedWebAssetLoader.ReadText("index.html"), "text/html"));
@@ -52,8 +54,28 @@ public sealed class ActioWebServer
             projectRoot = data.ProjectRoot,
             actioHome = data.ActioHome,
             serverUrl = data.ServerUrl,
-            cacheRoot = data.CacheRoot
+            cacheRoot = data.CacheRoot,
+            runtimeIdentity = options.RuntimeIdentity,
+            webInstanceId = options.WebInstanceId,
+            processId = options.ProcessId,
+            processStartTimeUtcTicks = options.ProcessStartTimeUtcTicks
         }));
+
+        if (options.Background && options.ControlToken is not null)
+        {
+            app.MapPost("/api/internal/shutdown", (
+                HttpContext context,
+                IHostApplicationLifetime lifetime) =>
+            {
+                if (!IsAuthorizedShutdown(context, options.ControlToken))
+                {
+                    return Results.NotFound();
+                }
+
+                lifetime.StopApplication();
+                return Results.Accepted();
+            });
+        }
 
         app.MapGet("/api/workflows", async (ActioWebDataService data, CancellationToken cancellationToken) =>
             Results.Ok(await data.GetWorkflowsAsync(cancellationToken)));
@@ -152,6 +174,27 @@ public sealed class ActioWebServer
                 entries = artifact.DirectoryEntries
             });
         });
+    }
+
+    internal static bool IsAuthorizedShutdown(HttpContext context, string expectedToken)
+    {
+        if (context.Connection.RemoteIpAddress is not { } remoteAddress ||
+            !IPAddress.IsLoopback(remoteAddress) ||
+            !context.Request.Headers.TryGetValue("X-Actio-Control-Token", out var providedValues))
+        {
+            return false;
+        }
+
+        var provided = providedValues.Count == 1 ? providedValues[0] : null;
+        if (provided is null)
+        {
+            return false;
+        }
+
+        var expectedBytes = Encoding.UTF8.GetBytes(expectedToken);
+        var providedBytes = Encoding.UTF8.GetBytes(provided);
+        return expectedBytes.Length == providedBytes.Length &&
+            CryptographicOperations.FixedTimeEquals(expectedBytes, providedBytes);
     }
 
 }

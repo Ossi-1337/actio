@@ -9,6 +9,7 @@ using Actio.Engine.Runs;
 using Actio.Runner.Docker;
 using Actio.Storage;
 using Actio.Web;
+using System.Diagnostics;
 
 namespace Actio.Cli;
 
@@ -383,17 +384,152 @@ public sealed class CliApplication
             output.WriteLine($"Actio web UI listening on {url}");
         }
 
+        WebRuntimeDescription runtime;
         try
         {
-            await new ActioWebServer().RunAsync(new ActioWebOptions(projectRoot, actioHome, url, command.Background), cancellationToken);
+            runtime = WebRuntimeSnapshotManager.CreateCurrent().DescribeCurrent(cancellationToken);
+        }
+        catch (Exception ex) when (IsRecoverableWebError(ex))
+        {
+            error.WriteLine($"Actio web UI runtime identity failed: {ex.Message}");
+            return ExitCodes.ValidationError;
+        }
+
+        if (!command.Background)
+        {
+            try
+            {
+                await new ActioWebServer().RunAsync(
+                    new ActioWebOptions(
+                        projectRoot,
+                        actioHome,
+                        url,
+                        RuntimeIdentity: runtime.Identity),
+                    cancellationToken);
+                return ExitCodes.Success;
+            }
+            catch (Exception ex) when (IsRecoverableWebError(ex))
+            {
+                error.WriteLine($"Actio web UI failed: {ex.Message}");
+                return ExitCodes.ValidationError;
+            }
+        }
+
+        var worker = ReadWebWorkerContext(actioHome, runtime.Identity, error);
+        if (worker is null)
+        {
+            return ExitCodes.ValidationError;
+        }
+
+        var processStore = new WebProcessMetadataStore(actioHome, url);
+        await using var runtimeLock = await WebFileLock.TryAcquireAsync(
+            WebProcessMetadataStore.GetRuntimeLockPath(actioHome, runtime.Identity),
+            TimeSpan.FromSeconds(3),
+            cancellationToken);
+        if (runtimeLock is null)
+        {
+            error.WriteLine("Actio web UI worker could not acquire its runtime snapshot lock.");
+            return ExitCodes.ValidationError;
+        }
+
+        processStore.AppendLog(
+            $"worker ready pid={Environment.ProcessId} instance={worker.InstanceId} runtime={runtime.Identity}");
+        try
+        {
+            using var process = Process.GetCurrentProcess();
+            await new ActioWebServer().RunAsync(
+                new ActioWebOptions(
+                    projectRoot,
+                    actioHome,
+                    url,
+                    Background: true,
+                    RuntimeIdentity: runtime.Identity,
+                    WebInstanceId: worker.InstanceId,
+                    ProcessId: Environment.ProcessId,
+                    ProcessStartTimeUtcTicks: process.StartTime.ToUniversalTime().Ticks,
+                    ControlToken: worker.ControlToken),
+                cancellationToken);
             return ExitCodes.Success;
         }
-        catch (IOException ex)
+        catch (Exception ex) when (IsRecoverableWebError(ex))
         {
+            processStore.AppendLog($"worker failed: {ex.GetType().Name}: {ex.Message}");
             error.WriteLine($"Actio web UI failed: {ex.Message}");
             return ExitCodes.ValidationError;
         }
+        finally
+        {
+            processStore.AppendLog(
+                $"worker stopped pid={Environment.ProcessId} instance={worker.InstanceId} runtime={runtime.Identity}");
+            processStore.DeleteIfOwned(worker.InstanceId);
+        }
     }
+
+    internal static WebWorkerContext? ReadWebWorkerContext(
+        string actioHome,
+        string runtimeIdentity,
+        TextWriter error)
+    {
+        var suppliedRuntimeIdentity = Environment.GetEnvironmentVariable(
+            LocalWebServerLauncher.RuntimeIdentityEnvironmentVariable);
+        var instanceId = Environment.GetEnvironmentVariable(
+            LocalWebServerLauncher.InstanceIdEnvironmentVariable);
+        var controlToken = Environment.GetEnvironmentVariable(
+            LocalWebServerLauncher.ControlTokenEnvironmentVariable);
+        var snapshotPath = Environment.GetEnvironmentVariable(
+            LocalWebServerLauncher.SnapshotPathEnvironmentVariable);
+
+        if (string.IsNullOrWhiteSpace(suppliedRuntimeIdentity) ||
+            string.IsNullOrWhiteSpace(instanceId) ||
+            string.IsNullOrWhiteSpace(controlToken) ||
+            string.IsNullOrWhiteSpace(snapshotPath))
+        {
+            error.WriteLine(
+                "Actio web --background is an internal managed worker mode and requires launcher metadata.");
+            return null;
+        }
+
+        var expectedSnapshotPath = Path.Combine(
+            Path.GetFullPath(actioHome),
+            "web",
+            "runtimes",
+            runtimeIdentity);
+        if (!string.Equals(suppliedRuntimeIdentity, runtimeIdentity, StringComparison.Ordinal) ||
+            !IsSamePath(snapshotPath, expectedSnapshotPath) ||
+            !IsSamePath(AppContext.BaseDirectory, expectedSnapshotPath))
+        {
+            error.WriteLine("Actio web worker runtime identity does not match its runtime snapshot.");
+            return null;
+        }
+
+        return new WebWorkerContext(instanceId, controlToken);
+    }
+
+    private static bool IsSamePath(string left, string right)
+    {
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        return string.Equals(
+            Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            comparison);
+    }
+
+    private static bool IsRecoverableWebError(Exception exception)
+    {
+        return exception is IOException
+            or UnauthorizedAccessException
+            or System.Security.SecurityException
+            or InvalidOperationException
+            or NotSupportedException
+            or ArgumentException
+            or System.Text.Json.JsonException;
+    }
+
+    internal sealed record WebWorkerContext(
+        string InstanceId,
+        string ControlToken);
 
     private async Task<int> ListCacheAsync(
         TextWriter output,
