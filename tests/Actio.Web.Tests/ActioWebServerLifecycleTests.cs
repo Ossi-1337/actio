@@ -135,7 +135,7 @@ public sealed class ActioWebServerLifecycleTests : IDisposable
         return new ActioWebOptions(
             projectRoot,
             actioHome,
-            "http://127.0.0.1:0",
+            background ? "http://127.0.0.1:0" : ActioWebDefaults.DefaultUrl,
             background,
             runtimeIdentity,
             instanceId,

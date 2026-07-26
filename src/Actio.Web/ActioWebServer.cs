@@ -15,6 +15,7 @@ public sealed class ActioWebServer
 {
     public WebApplication Build(ActioWebOptions options)
     {
+        LoopbackWebUrlPolicy.Validate(options.Url, allowDynamicPort: options.Background);
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             Args = [],
@@ -32,6 +33,7 @@ public sealed class ActioWebServer
         builder.Services.AddSingleton<ActioWebDataService>();
 
         var app = builder.Build();
+        app.Use(EnforceLocalMutationOriginAsync);
         MapRoutes(app, options);
         return app;
     }
@@ -219,6 +221,58 @@ public sealed class ActioWebServer
             CryptographicOperations.FixedTimeEquals(expectedBytes, providedBytes);
     }
 
+    internal static async Task EnforceLocalMutationOriginAsync(
+        HttpContext context,
+        RequestDelegate next)
+    {
+        if (HttpMethods.IsGet(context.Request.Method) ||
+            HttpMethods.IsHead(context.Request.Method) ||
+            HttpMethods.IsOptions(context.Request.Method))
+        {
+            await next(context);
+            return;
+        }
+
+        if (string.Equals(
+                context.Request.Headers["Sec-Fetch-Site"].ToString(),
+                "cross-site",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+
+        var origin = context.Request.Headers.Origin.ToString();
+        if (origin.Length > 0)
+        {
+            var runtime = context.RequestServices.GetRequiredService<ActioWebRuntimeState>();
+            if (!OriginsMatch(origin, runtime.ServerUrl))
+            {
+                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                return;
+            }
+        }
+
+        await next(context);
+    }
+
+    private static bool OriginsMatch(string origin, string serverUrl)
+    {
+        if (!Uri.TryCreate(origin, UriKind.Absolute, out var originUri) ||
+            !Uri.TryCreate(serverUrl, UriKind.Absolute, out var serverUri))
+        {
+            return false;
+        }
+
+        return string.Equals(originUri.Scheme, serverUri.Scheme, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(originUri.Host, serverUri.Host, StringComparison.OrdinalIgnoreCase) &&
+            originUri.Port == serverUri.Port &&
+            originUri.AbsolutePath == "/" &&
+            string.IsNullOrEmpty(originUri.Query) &&
+            string.IsNullOrEmpty(originUri.Fragment) &&
+            string.IsNullOrEmpty(originUri.UserInfo);
+    }
+
     private static string ResolveServerUrl(WebApplication app)
     {
         var urls = app.Urls
@@ -235,7 +289,7 @@ public sealed class ActioWebServer
                 $"Actio web expected one bound loopback URL, but found {urls.Length}.");
     }
 
-    private sealed class ActioWebRuntimeState(string serverUrl)
+    internal sealed class ActioWebRuntimeState(string serverUrl)
     {
         public string ServerUrl { get; set; } = serverUrl;
     }

@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Actio.Core.IO;
 using Actio.Core.Workflows;
 using Actio.Engine.Runs;
 
@@ -132,6 +133,18 @@ public sealed class FileSystemRunStore : IRunStore
     {
         var savedArtifacts = new List<WorkflowRunArtifact>();
         var errors = new List<string>();
+        foreach (var artifact in artifacts)
+        {
+            errors.AddRange(ValidateArtifactSourcePaths(
+                projectRoot,
+                [artifact.Path],
+                $"workflow.jobs.{jobName}.artifacts.{artifact.Name}"));
+        }
+
+        if (errors.Count > 0)
+        {
+            return Task.FromResult(new ArtifactSaveResult([], errors));
+        }
 
         foreach (var artifact in artifacts)
         {
@@ -211,6 +224,28 @@ public sealed class FileSystemRunStore : IRunStore
                 continue;
             }
 
+            try
+            {
+                SafeFileTree.ValidateExistingPath(fullArtifactsPath, storedPath, "artifact restore");
+                if (Directory.Exists(storedPath))
+                {
+                    SafeFileTree.Enumerate(storedPath, "artifact restore");
+                }
+            }
+            catch (SafeFileTreeException ex)
+            {
+                errors.Add(ex.Message);
+            }
+        }
+
+        if (errors.Count > 0)
+        {
+            return Task.FromResult(new ArtifactDownloadResult([], errors));
+        }
+
+        foreach (var artifact in artifacts)
+        {
+            var storedPath = Path.GetFullPath(artifact.StoredPath);
             var targetDirectory = useArtifactNameSubdirectories
                 ? Path.Combine(fullDestinationPath, SanitizePathSegment(artifact.Name))
                 : fullDestinationPath;
@@ -265,7 +300,7 @@ public sealed class FileSystemRunStore : IRunStore
                 await JsonSerializer.SerializeAsync(stream, runRecord, JsonOptions, cancellationToken);
             }
 
-            File.Move(tempPath, runPath, overwrite: true);
+            await ReplaceRunRecordAsync(tempPath, runPath, cancellationToken);
         }
         finally
         {
@@ -286,8 +321,7 @@ public sealed class FileSystemRunStore : IRunStore
             return null;
         }
 
-        await using var stream = File.OpenRead(runPath);
-        return await JsonSerializer.DeserializeAsync<WorkflowRunRecord>(stream, JsonOptions, cancellationToken);
+        return await ReadRunRecordFileAsync(runPath, cancellationToken);
     }
 
     public async Task<IReadOnlyList<WorkflowRunRecord>> ListRunRecordsAsync(
@@ -320,7 +354,7 @@ public sealed class FileSystemRunStore : IRunStore
 
             try
             {
-                await using var stream = File.OpenRead(runPath);
+                await using var stream = OpenRunRecordForRead(runPath);
                 var record = await JsonSerializer.DeserializeAsync<WorkflowRunRecord>(stream, JsonOptions, cancellationToken);
                 if (record is not null)
                 {
@@ -361,27 +395,16 @@ public sealed class FileSystemRunStore : IRunStore
             return new ArtifactSaveResult([], [$"{errorPrefix} path is required."]);
         }
 
-        foreach (var path in paths)
-        {
-            var sourcePath = Path.GetFullPath(Path.Combine(fullProjectRoot, path));
-            if (!IsUnderRoot(sourcePath, fullProjectRoot))
-            {
-                errors.Add($"{errorPrefix} path '{path}' must stay inside the project root.");
-                continue;
-            }
-
-            if (!File.Exists(sourcePath) && !Directory.Exists(sourcePath))
-            {
-                errors.Add($"{errorPrefix} path '{path}' does not exist.");
-                continue;
-            }
-
-            sourcePaths.Add(sourcePath);
-        }
-
+        errors.AddRange(ValidateArtifactSourcePaths(projectRoot, paths, errorPrefix));
         if (errors.Count > 0)
         {
             return new ArtifactSaveResult([], errors);
+        }
+
+        foreach (var path in paths)
+        {
+            var sourcePath = Path.GetFullPath(Path.Combine(fullProjectRoot, path));
+            sourcePaths.Add(sourcePath);
         }
 
         var artifactDirectory = Path.Combine(
@@ -420,14 +443,54 @@ public sealed class FileSystemRunStore : IRunStore
         return new ArtifactSaveResult([artifact], []);
     }
 
+    private static IReadOnlyList<string> ValidateArtifactSourcePaths(
+        string projectRoot,
+        IReadOnlyList<string> paths,
+        string errorPrefix)
+    {
+        var errors = new List<string>();
+        var fullProjectRoot = Path.GetFullPath(projectRoot);
+        foreach (var path in paths)
+        {
+            var sourcePath = Path.GetFullPath(Path.Combine(fullProjectRoot, path));
+            if (!IsUnderRoot(sourcePath, fullProjectRoot))
+            {
+                errors.Add($"{errorPrefix} path '{path}' must stay inside the project root.");
+                continue;
+            }
+
+            if (!File.Exists(sourcePath) && !Directory.Exists(sourcePath))
+            {
+                errors.Add($"{errorPrefix} path '{path}' does not exist.");
+                continue;
+            }
+
+            try
+            {
+                SafeFileTree.ValidateExistingPath(fullProjectRoot, sourcePath, "artifact save");
+                if (Directory.Exists(sourcePath))
+                {
+                    SafeFileTree.Enumerate(sourcePath, "artifact save");
+                }
+            }
+            catch (SafeFileTreeException ex)
+            {
+                errors.Add(ex.Message);
+            }
+        }
+
+        return errors;
+    }
+
     private static WorkflowRunArtifactAttestation CreateArtifactAttestation(string storedPath)
     {
         var fullStoredPath = Path.GetFullPath(storedPath);
         var isSingleFile = File.Exists(fullStoredPath);
         string[] files = isSingleFile
             ? [fullStoredPath]
-            : Directory.EnumerateFiles(fullStoredPath, "*", SearchOption.AllDirectories)
-                .OrderBy(path => Path.GetRelativePath(fullStoredPath, path), StringComparer.Ordinal)
+            : SafeFileTree.Enumerate(fullStoredPath, "artifact attestation")
+                .Where(entry => !entry.IsDirectory)
+                .Select(entry => entry.FullPath)
                 .ToArray();
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         long totalBytes = 0;
@@ -483,20 +546,86 @@ public sealed class FileSystemRunStore : IRunStore
 
     private static void CopyDirectory(string sourceDirectory, string targetDirectory)
     {
+        var entries = SafeFileTree.Enumerate(sourceDirectory, "artifact copy");
         Directory.CreateDirectory(targetDirectory);
 
-        foreach (var sourceFile in Directory.EnumerateFiles(sourceDirectory, "*", SearchOption.AllDirectories))
+        foreach (var directory in entries.Where(entry => entry.IsDirectory))
         {
-            var relativePath = Path.GetRelativePath(sourceDirectory, sourceFile);
-            var targetFile = Path.Combine(targetDirectory, relativePath);
+            Directory.CreateDirectory(Path.Combine(targetDirectory, directory.RelativePath));
+        }
+
+        foreach (var sourceFile in entries.Where(entry => !entry.IsDirectory))
+        {
+            var targetFile = Path.Combine(targetDirectory, sourceFile.RelativePath);
             Directory.CreateDirectory(Path.GetDirectoryName(targetFile)!);
-            File.Copy(sourceFile, targetFile, overwrite: true);
+            File.Copy(sourceFile.FullPath, targetFile, overwrite: true);
         }
     }
 
     private string GetFullActioHomePath()
     {
         return Path.GetFullPath(ActioHomePath);
+    }
+
+    private static FileStream OpenRunRecordForRead(string path)
+        => File.Open(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+
+    private static async Task<WorkflowRunRecord?> ReadRunRecordFileAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        const int attempts = 10;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await using var stream = OpenRunRecordForRead(path);
+                return await JsonSerializer.DeserializeAsync<WorkflowRunRecord>(
+                    stream,
+                    JsonOptions,
+                    cancellationToken);
+            }
+            catch (Exception ex) when (
+                attempt < attempts &&
+                ex is IOException or UnauthorizedAccessException)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(20), cancellationToken);
+            }
+        }
+    }
+
+    private static async Task ReplaceRunRecordAsync(
+        string temporaryPath,
+        string destinationPath,
+        CancellationToken cancellationToken)
+    {
+        const int attempts = 10;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                if (File.Exists(destinationPath))
+                {
+                    File.Replace(temporaryPath, destinationPath, null);
+                }
+                else
+                {
+                    File.Move(temporaryPath, destinationPath);
+                }
+
+                return;
+            }
+            catch (Exception ex) when (
+                attempt < attempts &&
+                ex is IOException or UnauthorizedAccessException)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(20), cancellationToken);
+            }
+        }
     }
 
     private static string CreateEmptyMaskFile(string directory, string fileName)

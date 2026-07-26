@@ -82,6 +82,23 @@ public sealed class FileSystemLocalValueProviderTests : IDisposable
         Assert.Empty(result.Values.Secrets);
     }
 
+    [Theory]
+    [InlineData("line-one\nline-two")]
+    [InlineData("line-one\r\nline-two")]
+    public void Load_RejectsMultilineEnvironmentSecretsWithoutEchoingValue(string secret)
+    {
+        var result = new FileSystemLocalValueProvider(() => new Dictionary<string, string>
+        {
+            ["ACTIO_SECRET_SIGNING_KEY"] = secret
+        }).Load(_root);
+
+        Assert.False(result.Success);
+        var error = Assert.Single(result.Errors);
+        Assert.Contains("SIGNING_KEY", error);
+        Assert.DoesNotContain(secret, error);
+        Assert.DoesNotContain("line-one", error);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_root))

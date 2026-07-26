@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using Actio.Core.Actions;
+using Actio.Core.IO;
 using Actio.Core.Workflows;
 using Actio.Engine.Actions;
 
@@ -226,7 +227,7 @@ internal sealed class ActionResolver
 
         if (IsCheckoutAction(githubAction!) && !IsCheckoutShim(githubAction!))
         {
-            return ActionResolutionResult.Failed(["actions/checkout is supported only as the Actio actions/checkout@v4 local checkout shim. Use actions/checkout@v4 without with: inputs. See the compatibility matrix for current limitations."]);
+            return ActionResolutionResult.Failed(["actions/checkout is supported only as the Actio local checkout shim with @v4 or a full commit SHA. Use it without with: inputs. See the compatibility matrix for current limitations."]);
         }
 
         if (IsCheckoutShim(githubAction!))
@@ -302,8 +303,12 @@ internal sealed class ActionResolver
     {
         return IsCheckoutAction(action) &&
             string.IsNullOrEmpty(action.ActionPath) &&
-            string.Equals(action.Ref, "v4", StringComparison.Ordinal);
+            (string.Equals(action.Ref, "v4", StringComparison.Ordinal) ||
+                IsFullCommitSha(action.Ref));
     }
+
+    private static bool IsFullCommitSha(string value)
+        => value.Length == 40 && value.All(Uri.IsHexDigit);
 
     private static bool IsCheckoutAction(GitHubActionReference action)
     {
@@ -630,22 +635,21 @@ internal sealed class ActionResolver
         string directoryPath,
         CancellationToken cancellationToken)
     {
-        var files = Directory
-            .EnumerateFiles(directoryPath, "*", SearchOption.AllDirectories)
-            .OrderBy(path => Path.GetRelativePath(directoryPath, path), StringComparer.Ordinal)
+        var files = SafeFileTree
+            .Enumerate(directoryPath, "local action hashing")
+            .Where(entry => !entry.IsDirectory)
             .ToArray();
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
 
-        foreach (var filePath in files)
+        foreach (var file in files)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var relativePath = Path.GetRelativePath(directoryPath, filePath)
-                .Replace('\\', '/');
+            var relativePath = file.RelativePath.Replace('\\', '/');
             var relativePathBytes = Encoding.UTF8.GetBytes(relativePath);
             hash.AppendData(relativePathBytes);
             hash.AppendData([0]);
 
-            await using var stream = File.OpenRead(filePath);
+            await using var stream = File.OpenRead(file.FullPath);
             var fileHash = await SHA256.HashDataAsync(stream, cancellationToken);
             hash.AppendData(fileHash);
             hash.AppendData([0]);

@@ -148,6 +148,46 @@ public sealed class FileSystemRunStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task RunRecordReadersAllowConcurrentAtomicProgressWrites()
+    {
+        var store = new FileSystemRunStore(_root);
+        const string runId = "run-stress";
+        await store.InitializeRunAsync(runId);
+
+        var writer = Task.Run(async () =>
+        {
+            for (var index = 0; index < 100; index++)
+            {
+                await store.SaveRunRecordAsync(new WorkflowRunRecord(
+                    runId,
+                    "CI",
+                    null,
+                    _root,
+                    "Running",
+                    DateTimeOffset.UtcNow,
+                    DateTimeOffset.UtcNow,
+                    index,
+                    [],
+                    [],
+                    [],
+                    []));
+            }
+        });
+        var readers = Enumerable.Range(0, 4).Select(_ => Task.Run(async () =>
+        {
+            while (!writer.IsCompleted)
+            {
+                await store.ReadRunRecordAsync(runId);
+                await store.ListRunRecordsAsync();
+            }
+        }));
+
+        await Task.WhenAll(readers.Append(writer));
+
+        Assert.NotNull(await store.ReadRunRecordAsync(runId));
+    }
+
+    [Fact]
     public async Task ReadRunRecordAsync_ReturnsEmptyTriggersForOlderRunRecords()
     {
         var store = new FileSystemRunStore(_root);
@@ -350,6 +390,28 @@ public sealed class FileSystemRunStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task SaveArtifactsAsync_ValidatesEverySourceBeforeWritingAnyArtifact()
+    {
+        var projectRoot = Path.Combine(_root, "repo-atomic-artifacts");
+        Directory.CreateDirectory(projectRoot);
+        await File.WriteAllTextAsync(Path.Combine(projectRoot, "coverage.txt"), "coverage");
+        var store = new FileSystemRunStore(Path.Combine(_root, "home-atomic-artifacts"));
+
+        var result = await store.SaveArtifactsAsync(
+            "run-atomic",
+            "test",
+            projectRoot,
+            [
+                new WorkflowArtifact("coverage", "coverage.txt"),
+                new WorkflowArtifact("missing", "missing.txt")
+            ]);
+
+        Assert.Empty(result.Artifacts);
+        Assert.NotEmpty(result.Errors);
+        Assert.False(Directory.Exists(Path.Combine(store.ArtifactsPath, "run-atomic")));
+    }
+
+    [Fact]
     public async Task SaveArtifactAsync_CopiesMultiplePathsAndStoresRetentionMetadata()
     {
         var projectRoot = Path.Combine(_root, "repo");
@@ -444,6 +506,44 @@ public sealed class FileSystemRunStoreTests : IDisposable
 
         Assert.Empty(result.Artifacts);
         Assert.Contains(result.Errors, error => error.Contains("must stay inside the project root", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task SaveArtifactAsync_RejectsLinksBeforeCreatingArtifactContent()
+    {
+        var projectRoot = Path.Combine(_root, "repo-link");
+        var source = Path.Combine(projectRoot, "output");
+        var outside = Path.Combine(_root, "outside.txt");
+        Directory.CreateDirectory(source);
+        await File.WriteAllTextAsync(outside, "host-secret");
+
+        try
+        {
+            try
+            {
+                File.CreateSymbolicLink(Path.Combine(source, "linked.txt"), outside);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+            {
+                return;
+            }
+
+            var store = new FileSystemRunStore(Path.Combine(_root, "home"));
+            var result = await store.SaveArtifactAsync(
+                "run-link",
+                "test",
+                projectRoot,
+                "report",
+                ["output"]);
+
+            Assert.NotEmpty(result.Errors);
+            Assert.Contains(result.Errors, error => error.Contains("linked.txt", StringComparison.Ordinal));
+            Assert.False(Directory.Exists(Path.Combine(store.ArtifactsPath, "run-link")));
+        }
+        finally
+        {
+            File.Delete(outside);
+        }
     }
 
     [Fact]

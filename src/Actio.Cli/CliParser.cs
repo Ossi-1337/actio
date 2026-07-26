@@ -332,6 +332,16 @@ public sealed class CliParser
             }
         }
 
+        if (url is not null &&
+            !Actio.Web.LoopbackWebUrlPolicy.TryValidate(
+                url,
+                allowDynamicPort: background,
+                out _,
+                out var urlError))
+        {
+            return CliCommand.UsageError(urlError!);
+        }
+
         return CliCommand.RunWeb(projectRoot, actioHome, url, background);
     }
 

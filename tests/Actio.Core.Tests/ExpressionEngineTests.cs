@@ -116,6 +116,41 @@ public sealed class ExpressionEngineTests
     }
 
     [Fact]
+    public void Evaluate_HashFilesRejectsWorkspaceLinks()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"actio-hash-link-{Guid.NewGuid():N}");
+        var outside = Path.Combine(Path.GetTempPath(), $"actio-hash-outside-{Guid.NewGuid():N}.txt");
+        Directory.CreateDirectory(root);
+        File.WriteAllText(outside, "host-secret");
+
+        try
+        {
+            try
+            {
+                File.CreateSymbolicLink(Path.Combine(root, "linked.txt"), outside);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+            {
+                return;
+            }
+
+            var parseResult = ExpressionParser.ParseTemplateExpression("${{ hashFiles('**') }}");
+            var evaluation = ExpressionEvaluator.Evaluate(
+                parseResult.Expression!,
+                new ExpressionEvaluationContext(workspaceRoot: root));
+
+            Assert.False(evaluation.Success);
+            Assert.Contains(evaluation.Errors, error => error.Contains("linked.txt", StringComparison.Ordinal));
+            Assert.DoesNotContain(evaluation.Errors, error => error.Contains(outside, StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+            File.Delete(outside);
+        }
+    }
+
+    [Fact]
     public async Task Interpolate_SupportsFunctionsAcrossMultipleTemplateExpressions()
     {
         var root = Path.Combine(Path.GetTempPath(), $"actio-expression-tests-{Guid.NewGuid():N}");

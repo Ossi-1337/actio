@@ -133,6 +133,14 @@ internal sealed class SecretMasker
 
         return masked;
     }
+
+    public bool ContainsSensitiveValue(string value)
+    {
+        lock (_lock)
+        {
+            return _masks.Any(mask => value.Contains(mask, StringComparison.Ordinal));
+        }
+    }
 }
 
 internal sealed record WorkflowCommandProcessResult(

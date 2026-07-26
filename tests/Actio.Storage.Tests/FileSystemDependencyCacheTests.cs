@@ -81,6 +81,39 @@ public sealed class FileSystemDependencyCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task SaveAsync_RejectsLinksBeforeCreatingCacheEntry()
+    {
+        var source = Path.Combine(_projectRoot, "packages");
+        var outside = Path.Combine(_root, "outside.txt");
+        Directory.CreateDirectory(source);
+        await File.WriteAllTextAsync(outside, "host-secret");
+
+        try
+        {
+            try
+            {
+                File.CreateSymbolicLink(Path.Combine(source, "linked.txt"), outside);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+            {
+                return;
+            }
+
+            var cache = new FileSystemDependencyCache(Path.Combine(_root, "home"));
+            var result = await cache.SaveAsync(
+                new DependencyCacheSaveRequest(_projectRoot, "unsafe", ["packages"]));
+
+            Assert.False(result.Success);
+            Assert.Contains(result.Errors, error => error.Contains("linked.txt", StringComparison.Ordinal));
+            Assert.Empty(await cache.ListAsync());
+        }
+        finally
+        {
+            File.Delete(outside);
+        }
+    }
+
+    [Fact]
     public async Task CleanAsync_RemovesDependencyCacheEntries()
     {
         var cache = new FileSystemDependencyCache(_root);
@@ -93,6 +126,77 @@ public sealed class FileSystemDependencyCacheTests : IDisposable
 
         Assert.Equal(1, removed);
         Assert.Empty(await cache.ListAsync());
+    }
+
+    [Fact]
+    public async Task CleanAsync_IgnoresIncompleteTemporaryEntries()
+    {
+        var cache = new FileSystemDependencyCache(_root);
+        var temporaryPath = Path.Combine(cache.DependencyCachePath, ".tmp-active");
+        Directory.CreateDirectory(temporaryPath);
+        await File.WriteAllTextAsync(Path.Combine(temporaryPath, "cache.json"), "{}");
+
+        var removed = await cache.CleanAsync();
+
+        Assert.Equal(0, removed);
+        Assert.True(File.Exists(Path.Combine(temporaryPath, "cache.json")));
+    }
+
+    [Fact]
+    public async Task SaveAsync_ConcurrentWritersReuseTheFirstEntry()
+    {
+        var packagePath = Path.Combine(_projectRoot, ".nuget", "packages");
+        Directory.CreateDirectory(packagePath);
+        await File.WriteAllTextAsync(Path.Combine(packagePath, "package.txt"), "cached");
+        var request = new DependencyCacheSaveRequest(
+            _projectRoot,
+            "shared-key",
+            [".nuget/packages"]);
+        var caches = Enumerable.Range(0, 8)
+            .Select(_ => new FileSystemDependencyCache(_root))
+            .ToArray();
+
+        var results = await Task.WhenAll(caches.Select(cache => cache.SaveAsync(request)));
+
+        Assert.All(results, result => Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors)));
+        Assert.Equal(1, results.Count(result => result.Saved));
+        Assert.Equal(7, results.Count(result => !result.Saved));
+        Assert.Single(await caches[0].ListAsync());
+    }
+
+    [Fact]
+    public async Task ListAsync_CanPollWhileEntryUsageMetadataIsUpdated()
+    {
+        var packagePath = Path.Combine(_projectRoot, "packages-poll");
+        Directory.CreateDirectory(packagePath);
+        await File.WriteAllTextAsync(Path.Combine(packagePath, "package.txt"), "cached");
+        var cache = new FileSystemDependencyCache(_root);
+        await cache.SaveAsync(new DependencyCacheSaveRequest(
+            _projectRoot,
+            "poll-key",
+            ["packages-poll"]));
+        var writer = Task.Run(async () =>
+        {
+            for (var index = 0; index < 100; index++)
+            {
+                await cache.RestoreAsync(new DependencyCacheRestoreRequest(
+                    _projectRoot,
+                    "poll-key",
+                    [],
+                    ["packages-poll"]));
+            }
+        });
+        var readers = Enumerable.Range(0, 4).Select(_ => Task.Run(async () =>
+        {
+            while (!writer.IsCompleted)
+            {
+                await cache.ListAsync();
+            }
+        }));
+
+        await Task.WhenAll(readers.Append(writer));
+
+        Assert.Single(await cache.ListAsync());
     }
 
     public void Dispose()

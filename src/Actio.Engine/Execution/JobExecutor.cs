@@ -279,6 +279,7 @@ internal sealed class JobExecutor
                 await SaveDependencyCachesAsync(
                     pendingDependencyCacheSaves,
                     job.DisplayName,
+                    secretMasker,
                     output,
                     errors,
                     jobCancellationToken);
@@ -567,6 +568,7 @@ internal sealed class JobExecutor
                 environmentUpdates,
                 workflowVariables,
                 workflowSecrets,
+                secretMasker,
                 projectRoot,
                 runId,
                 runTrigger,
@@ -574,7 +576,10 @@ internal sealed class JobExecutor
                 stepCancellationToken);
             if (!plan.Success)
             {
-                return StepExecutionOutcome.FailedWithoutExitCode(step.Uses ?? string.Empty, plan.Errors, collector.LogPath);
+                return StepExecutionOutcome.FailedWithoutExitCode(
+                    step.Uses ?? string.Empty,
+                    plan.Errors.Select(collector.Mask).ToArray(),
+                    collector.LogPath);
             }
 
             if (plan.Kind == StepExecutionKind.DependencyCacheAction)
@@ -914,7 +919,7 @@ internal sealed class JobExecutor
         catch (Exception ex) when (StorageError.IsRecoverable(ex))
         {
             return StepExecutionOutcome.StorageFailed(
-                StorageError.Format($"restoring dependency cache '{action.Key}'", ex),
+                collector.Mask(StorageError.Format($"restoring dependency cache '{action.Key}'", ex)),
                 collector.LogPath);
         }
 
@@ -922,9 +927,9 @@ internal sealed class JobExecutor
         {
             return StepExecutionOutcome.FailedWithoutExitCode(
                 "actions/cache",
-                restore.Errors,
+                restore.Errors.Select(collector.Mask).ToArray(),
                 collector.LogPath,
-                CreateDependencyCacheOutputs(action.Key, restore));
+                CreateDependencyCacheOutputs(action.Key, restore, collector.Mask));
         }
 
         if (restore.MatchedKey is null)
@@ -948,7 +953,7 @@ internal sealed class JobExecutor
             "actions/cache",
             0,
             collector.LogPath,
-            CreateDependencyCacheOutputs(action.Key, restore),
+            CreateDependencyCacheOutputs(action.Key, restore, collector.Mask),
             null,
             null,
             annotations: collector.Annotations,
@@ -1003,7 +1008,7 @@ internal sealed class JobExecutor
         {
             return StepExecutionOutcome.FailedWithoutExitCode(
                 "actions/upload-artifact",
-                duplicateErrors,
+                duplicateErrors.Select(collector.Mask).ToArray(),
                 collector.LogPath,
                 annotations: collector.Annotations);
         }
@@ -1023,7 +1028,7 @@ internal sealed class JobExecutor
         catch (Exception ex) when (StorageError.IsRecoverable(ex))
         {
             return StepExecutionOutcome.StorageFailed(
-                StorageError.Format($"saving artifact '{artifactName}'", ex),
+                collector.Mask(StorageError.Format($"saving artifact '{artifactName}'", ex)),
                 collector.LogPath);
         }
 
@@ -1031,7 +1036,7 @@ internal sealed class JobExecutor
         {
             return StepExecutionOutcome.FailedWithoutExitCode(
                 "actions/upload-artifact",
-                save.Errors,
+                save.Errors.Select(collector.Mask).ToArray(),
                 collector.LogPath,
                 annotations: collector.Annotations);
         }
@@ -1069,7 +1074,7 @@ internal sealed class JobExecutor
                 : $"actions/download-artifact artifact '{action.Name}' was not found in this run.";
             return StepExecutionOutcome.FailedWithoutExitCode(
                 "actions/download-artifact",
-                [message],
+                [collector.Mask(message)],
                 collector.LogPath,
                 annotations: collector.Annotations);
         }
@@ -1087,7 +1092,7 @@ internal sealed class JobExecutor
         catch (Exception ex) when (StorageError.IsRecoverable(ex))
         {
             return StepExecutionOutcome.StorageFailed(
-                StorageError.Format("restoring artifacts", ex),
+                collector.Mask(StorageError.Format("restoring artifacts", ex)),
                 collector.LogPath);
         }
 
@@ -1095,7 +1100,7 @@ internal sealed class JobExecutor
         {
             return StepExecutionOutcome.FailedWithoutExitCode(
                 "actions/download-artifact",
-                download.Errors,
+                download.Errors.Select(collector.Mask).ToArray(),
                 collector.LogPath,
                 annotations: collector.Annotations);
         }
@@ -1118,6 +1123,7 @@ internal sealed class JobExecutor
     private async Task SaveDependencyCachesAsync(
         IReadOnlyList<DependencyCacheSaveRequest> pendingSaves,
         string jobDisplayName,
+        SecretMasker secretMasker,
         TextWriter output,
         List<string> errors,
         CancellationToken cancellationToken)
@@ -1134,18 +1140,18 @@ internal sealed class JobExecutor
             }
             catch (Exception ex) when (StorageError.IsRecoverable(ex))
             {
-                errors.Add(StorageError.Format($"saving dependency cache '{pendingSave.Key}'", ex));
+                errors.Add(secretMasker.Mask(StorageError.Format($"saving dependency cache '{pendingSave.Key}'", ex)));
                 continue;
             }
 
             foreach (var message in save.Messages)
             {
-                output.WriteLine(message);
+                output.WriteLine(secretMasker.Mask(message));
             }
 
             if (!save.Success)
             {
-                errors.AddRange(save.Errors);
+                errors.AddRange(save.Errors.Select(secretMasker.Mask));
                 continue;
             }
 
@@ -1585,6 +1591,7 @@ internal sealed class JobExecutor
         IReadOnlyDictionary<string, string> environmentUpdates,
         IReadOnlyDictionary<string, string> workflowVariables,
         IReadOnlyDictionary<string, string> workflowSecrets,
+        SecretMasker secretMasker,
         string projectRoot,
         string runId,
         WorkflowRunTrigger runTrigger,
@@ -1615,6 +1622,15 @@ internal sealed class JobExecutor
         if (!resolvedWith.Success)
         {
             return StepExecutionPlan.Failed(resolvedWith.Errors);
+        }
+
+        var sensitiveInputErrors = SensitiveValueGuard.ValidateBuiltInPersistenceInputs(
+            step.Uses,
+            resolvedWith.Values,
+            secretMasker);
+        if (sensitiveInputErrors.Count > 0)
+        {
+            return StepExecutionPlan.Failed(sensitiveInputErrors);
         }
 
         var dependencyCacheAction = ResolveDependencyCacheAction(step.Uses, resolvedWith.Values);
@@ -1864,13 +1880,14 @@ internal sealed class JobExecutor
 
     private static IReadOnlyDictionary<string, string> CreateDependencyCacheOutputs(
         string primaryKey,
-        DependencyCacheRestoreResult restore)
+        DependencyCacheRestoreResult restore,
+        Func<string, string> mask)
     {
         return new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["cache-hit"] = restore.CacheHit ? "true" : "false",
-            ["cache-primary-key"] = primaryKey,
-            ["cache-matched-key"] = restore.MatchedKey ?? string.Empty
+            ["cache-primary-key"] = mask(primaryKey),
+            ["cache-matched-key"] = mask(restore.MatchedKey ?? string.Empty)
         };
     }
 

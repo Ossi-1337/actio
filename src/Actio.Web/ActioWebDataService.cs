@@ -1,6 +1,7 @@
 using Actio.Core.Workflows;
 using Actio.Core.IO;
 using Actio.Engine.Execution;
+using Actio.Engine.Configuration;
 using Actio.Engine.Runs;
 using Actio.Runner.Docker;
 using Actio.Storage;
@@ -19,6 +20,7 @@ public sealed class ActioWebDataService
     private readonly TimeProvider _timeProvider;
     private readonly Func<IWorkflowExecutor> _createExecutor;
     private readonly Func<Func<Task>, Task> _scheduleBackgroundWork;
+    private readonly IActioConfigurationProvider _configurationProvider;
     private readonly string _projectRoot;
     private readonly string _actioHome;
 
@@ -41,7 +43,8 @@ public sealed class ActioWebDataService
         WorkflowParser workflowParser,
         TimeProvider? timeProvider = null,
         Func<IWorkflowExecutor>? createExecutor = null,
-        Func<Func<Task>, Task>? scheduleBackgroundWork = null)
+        Func<Func<Task>, Task>? scheduleBackgroundWork = null,
+        IActioConfigurationProvider? configurationProvider = null)
     {
         _options = options;
         _projectRoot = CanonicalPath.ResolveExistingDirectory(options.ProjectRoot);
@@ -53,6 +56,8 @@ public sealed class ActioWebDataService
         _timeProvider = timeProvider ?? TimeProvider.System;
         _createExecutor = createExecutor ?? CreateDefaultExecutor;
         _scheduleBackgroundWork = scheduleBackgroundWork ?? ScheduleBackgroundWork;
+        _configurationProvider = configurationProvider ??
+            new FileSystemActioConfigurationProvider(options.ActioHome);
     }
 
     public string ProjectRoot => _projectRoot;
@@ -289,14 +294,21 @@ public sealed class ActioWebDataService
             return RunActionResult.Failed(localValues.Errors);
         }
 
+        var configuration = _configurationProvider.Load();
+        if (!configuration.Success)
+        {
+            return RunActionResult.Failed(configuration.Errors);
+        }
+
         var newRunId = _runStore.CreateRunId();
-        var options = new WorkflowExecutionOptions(
-            sourceRun.ProjectRoot,
-            sourceRun.WorkflowPath,
+        var options = WorkflowRerunOptionsFactory.Create(
+            sourceRun,
             newRunId,
-            new WorkflowRunTrigger("workflow_dispatch", $"rerun:{sourceRun.RunId}", inputResolution.Inputs),
-            Secrets: localValues.Values.Secrets,
-            Variables: localValues.Values.Variables);
+            inputResolution.Inputs,
+            localValues.Values.Secrets,
+            localValues.Values.Variables,
+            configuration.Configuration,
+            configuration.InstanceIdentity);
 
         await _scheduleBackgroundWork(() => _createExecutor().ExecuteAsync(
             workflow,

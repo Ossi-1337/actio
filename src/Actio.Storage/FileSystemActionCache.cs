@@ -120,6 +120,11 @@ public sealed class FileSystemActionCache : IActionCache, IGitHubActionSourcePro
             var now = DateTimeOffset.UtcNow;
             var createdAt = now;
 
+            await using var entryLock = await CacheEntryLock.AcquireAsync(
+                ActioHomePath,
+                $"actions-{GitHubKind}",
+                key,
+                cancellationToken);
             Directory.CreateDirectory(cachePath);
 
             var cachedEntry = await TryReadEntryAsync(entryPath, cancellationToken);
@@ -208,7 +213,7 @@ public sealed class FileSystemActionCache : IActionCache, IGitHubActionSourcePro
         string[] entryPaths;
         try
         {
-            entryPaths = Directory.EnumerateFiles(ActionCachePath, EntryFileName, SearchOption.AllDirectories).ToArray();
+            entryPaths = EnumerateEntryPaths();
         }
         catch (IOException)
         {
@@ -225,7 +230,7 @@ public sealed class FileSystemActionCache : IActionCache, IGitHubActionSourcePro
 
             try
             {
-                await using var stream = File.OpenRead(entryPath);
+                await using var stream = AtomicJsonFile.OpenRead(entryPath);
                 var entry = await JsonSerializer.DeserializeAsync<ActionCacheEntry>(stream, JsonOptions, cancellationToken);
                 if (entry is not null)
                 {
@@ -249,19 +254,43 @@ public sealed class FileSystemActionCache : IActionCache, IGitHubActionSourcePro
             .ToArray();
     }
 
-    public Task<int> CleanAsync(CancellationToken cancellationToken = default)
+    public async Task<int> CleanAsync(CancellationToken cancellationToken = default)
     {
         if (!Directory.Exists(ActionCachePath))
         {
-            return Task.FromResult(0);
+            return 0;
         }
 
-        var count = Directory
-            .EnumerateFiles(ActionCachePath, EntryFileName, SearchOption.AllDirectories)
-            .Count();
+        var entryPaths = EnumerateEntryPaths();
+        var removed = 0;
+        foreach (var entryPath in entryPaths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var cachePath = Path.GetDirectoryName(entryPath)!;
+            var key = Path.GetFileName(cachePath);
+            var kind = Path.GetFileName(Path.GetDirectoryName(cachePath)!);
+            await using var entryLock = await CacheEntryLock.AcquireAsync(
+                ActioHomePath,
+                $"actions-{kind}",
+                key,
+                cancellationToken);
+            if (Directory.Exists(cachePath))
+            {
+                Directory.Delete(cachePath, recursive: true);
+                removed++;
+            }
+        }
 
-        Directory.Delete(ActionCachePath, recursive: true);
-        return Task.FromResult(count);
+        return removed;
+    }
+
+    private string[] EnumerateEntryPaths()
+    {
+        return new[] { LocalKind, DockerKind, DockerfileKind, GitHubKind }
+            .SelectMany(kind => CacheEntryPathEnumerator.Enumerate(
+                Path.Combine(ActionCachePath, kind),
+                EntryFileName))
+            .ToArray();
     }
 
     private static string CreateLocalKey(string sourcePath, string contentHash)
@@ -475,6 +504,11 @@ public sealed class FileSystemActionCache : IActionCache, IGitHubActionSourcePro
         var now = DateTimeOffset.UtcNow;
         var createdAt = now;
 
+        await using var entryLock = await CacheEntryLock.AcquireAsync(
+            ActioHomePath,
+            $"actions-{kind}",
+            key,
+            cancellationToken);
         Directory.CreateDirectory(cachePath);
 
         if (File.Exists(entryPath))
@@ -483,8 +517,7 @@ public sealed class FileSystemActionCache : IActionCache, IGitHubActionSourcePro
         }
 
         var entry = createEntry(cachePath, createdAt, now);
-        await using var writeStream = File.Create(entryPath);
-        await JsonSerializer.SerializeAsync(writeStream, entry, JsonOptions, cancellationToken);
+        await AtomicJsonFile.WriteAsync(entryPath, entry, JsonOptions, cancellationToken);
         return entry;
     }
 
@@ -493,8 +526,7 @@ public sealed class FileSystemActionCache : IActionCache, IGitHubActionSourcePro
         ActionCacheEntry entry,
         CancellationToken cancellationToken)
     {
-        await using var writeStream = File.Create(entryPath);
-        await JsonSerializer.SerializeAsync(writeStream, entry, JsonOptions, cancellationToken);
+        await AtomicJsonFile.WriteAsync(entryPath, entry, JsonOptions, cancellationToken);
     }
 
     private static async Task<ActionCacheEntry?> TryReadEntryAsync(
@@ -508,7 +540,7 @@ public sealed class FileSystemActionCache : IActionCache, IGitHubActionSourcePro
 
         try
         {
-            await using var readStream = File.OpenRead(entryPath);
+            await using var readStream = AtomicJsonFile.OpenRead(entryPath);
             return await JsonSerializer.DeserializeAsync<ActionCacheEntry>(
                 readStream,
                 JsonOptions,
@@ -534,7 +566,7 @@ public sealed class FileSystemActionCache : IActionCache, IGitHubActionSourcePro
     {
         try
         {
-            await using var readStream = File.OpenRead(entryPath);
+            await using var readStream = AtomicJsonFile.OpenRead(entryPath);
             var existing = await JsonSerializer.DeserializeAsync<ActionCacheEntry>(
                 readStream,
                 JsonOptions,

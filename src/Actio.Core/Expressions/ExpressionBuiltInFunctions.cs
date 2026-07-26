@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Actio.Core.IO;
 using Actio.Core.Patterns;
 
 namespace Actio.Core.Expressions;
@@ -208,10 +209,14 @@ public static class ExpressionBuiltInFunctions
             ? StringComparer.OrdinalIgnoreCase
             : StringComparer.Ordinal;
         var files = new SortedSet<string>(comparison);
+        var workspaceFiles = SafeFileTree
+            .Enumerate(root, "hashFiles()")
+            .Where(entry => !entry.IsDirectory)
+            .ToArray();
 
         foreach (var pattern in patterns)
         {
-            UpdateMatchedFiles(root, pattern, files);
+            UpdateMatchedFiles(pattern, workspaceFiles, files);
         }
 
         if (files.Count == 0)
@@ -233,8 +238,8 @@ public static class ExpressionBuiltInFunctions
     }
 
     private static void UpdateMatchedFiles(
-        string root,
         string pattern,
+        IReadOnlyList<SafeFileTreeEntry> workspaceFiles,
         SortedSet<string> files)
     {
         var include = true;
@@ -251,9 +256,9 @@ public static class ExpressionBuiltInFunctions
         }
 
         var matcher = WorkflowPatternMatcher.Compile(normalizedPattern);
-        foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+        foreach (var file in workspaceFiles)
         {
-            var relativePath = Path.GetRelativePath(root, file).Replace('\\', '/');
+            var relativePath = file.RelativePath.Replace('\\', '/');
             if (!matcher.IsMatch(relativePath))
             {
                 continue;

@@ -27,6 +27,46 @@ public sealed class FileSystemActionCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task GetOrAddLocalActionAsync_CoordinatesConcurrentCacheInstances()
+    {
+        var request = new LocalActionCacheRequest("./action", "C:\\repo\\action.yml", "same-hash");
+        var caches = Enumerable.Range(0, 8)
+            .Select(_ => new FileSystemActionCache(_root))
+            .ToArray();
+
+        var entries = await Task.WhenAll(
+            caches.Select(cache => cache.GetOrAddLocalActionAsync(request)));
+
+        Assert.Single(entries.Select(entry => entry.Key).Distinct(StringComparer.Ordinal));
+        Assert.Single(await caches[0].ListAsync());
+    }
+
+    [Fact]
+    public async Task ListAsync_CanPollWhileMetadataIsAtomicallyReplaced()
+    {
+        var cache = new FileSystemActionCache(_root);
+        var request = new LocalActionCacheRequest("./action", "C:\\repo\\action.yml", "poll-hash");
+        var writer = Task.Run(async () =>
+        {
+            for (var index = 0; index < 100; index++)
+            {
+                await cache.GetOrAddLocalActionAsync(request);
+            }
+        });
+        var readers = Enumerable.Range(0, 4).Select(_ => Task.Run(async () =>
+        {
+            while (!writer.IsCompleted)
+            {
+                await cache.ListAsync();
+            }
+        }));
+
+        await Task.WhenAll(readers.Append(writer));
+
+        Assert.Single(await cache.ListAsync());
+    }
+
+    [Fact]
     public async Task ListAsync_ReturnsEntries()
     {
         var cache = new FileSystemActionCache(_root);
@@ -127,6 +167,32 @@ public sealed class FileSystemActionCacheTests : IDisposable
         Assert.Equal(sha, first.CacheEntry.PinnedIdentity);
         Assert.Equal("v1", first.CacheEntry.MutablePart);
         Assert.Contains(Path.Combine("cache", "actions", "github"), first.CacheEntry.CachePath);
+    }
+
+    [Fact]
+    public async Task GetGitHubActionSourceAsync_CoordinatesConcurrentExtraction()
+    {
+        var sha = new string('a', 40);
+        var client = new FakeGitHubActionClient([], WriteGitHubActionArchive);
+        var request = new GitHubActionSourceRequest(
+            $"owner/repo/action@{sha}",
+            "owner",
+            "repo",
+            "action",
+            sha,
+            IsPinned: true,
+            MutablePart: null);
+        var caches = Enumerable.Range(0, 8)
+            .Select(_ => new FileSystemActionCache(_root, client))
+            .ToArray();
+
+        var results = await Task.WhenAll(
+            caches.Select(cache => cache.GetGitHubActionSourceAsync(request)));
+
+        Assert.All(results, result =>
+            Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors)));
+        Assert.Equal(1, client.DownloadCalls);
+        Assert.Single(results.Select(result => result.ActionFilePath).Distinct(StringComparer.Ordinal));
     }
 
     [Fact]
@@ -260,6 +326,25 @@ public sealed class FileSystemActionCacheTests : IDisposable
 
         Assert.Equal(1, removed);
         Assert.Empty(entries);
+    }
+
+    [Fact]
+    public async Task CleanAsync_IgnoresActionFilesOutsideTheEntryLayout()
+    {
+        var cache = new FileSystemActionCache(_root);
+        var sourceDirectory = Path.Combine(
+            cache.ActionCachePath,
+            "github",
+            new string('a', 64),
+            "source",
+            "nested");
+        Directory.CreateDirectory(sourceDirectory);
+        await File.WriteAllTextAsync(Path.Combine(sourceDirectory, "action.json"), "{}");
+
+        var removed = await cache.CleanAsync();
+
+        Assert.Equal(0, removed);
+        Assert.True(File.Exists(Path.Combine(sourceDirectory, "action.json")));
     }
 
     public void Dispose()

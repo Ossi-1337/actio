@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Actio.Core.IO;
 using Actio.Engine.Caching;
 
 namespace Actio.Storage;
@@ -49,8 +50,21 @@ public sealed class FileSystemDependencyCache : IDependencyCache
 
         try
         {
-            RestoreEntry(request.ProjectRoot, match.Entry);
-            var refreshedEntry = match.Entry with { LastUsedAt = DateTimeOffset.UtcNow };
+            await using var entryLock = await CacheEntryLock.AcquireAsync(
+                ActioHomePath,
+                "dependencies",
+                CreateCacheId(match.Entry.Key, match.Entry.Version),
+                cancellationToken);
+            var currentEntry = await TryReadEntryAsync(
+                GetEntryPath(match.Entry.CachePath),
+                cancellationToken);
+            if (currentEntry is null)
+            {
+                return DependencyCacheRestoreResult.Miss();
+            }
+
+            RestoreEntry(request.ProjectRoot, currentEntry);
+            var refreshedEntry = currentEntry with { LastUsedAt = DateTimeOffset.UtcNow };
             await WriteEntryAsync(GetEntryPath(refreshedEntry.CachePath), refreshedEntry, cancellationToken);
             return DependencyCacheRestoreResult.Restored(refreshedEntry, match.ExactMatch, match.RestoreKey);
         }
@@ -84,6 +98,11 @@ public sealed class FileSystemDependencyCache : IDependencyCache
 
         try
         {
+            await using var entryLock = await CacheEntryLock.AcquireAsync(
+                ActioHomePath,
+                "dependencies",
+                CreateCacheId(request.Key, version),
+                cancellationToken);
             var existingEntry = await TryReadEntryAsync(entryPath, cancellationToken);
             if (existingEntry is not null)
             {
@@ -103,7 +122,10 @@ public sealed class FileSystemDependencyCache : IDependencyCache
 
             try
             {
-                var savedPaths = SaveExistingPaths(pathResolution.Paths, tempContentPath);
+                var savedPaths = SaveExistingPaths(
+                    request.ProjectRoot,
+                    pathResolution.Paths,
+                    tempContentPath);
                 if (savedPaths.Count == 0)
                 {
                     return DependencyCacheSaveResult.Skipped(["No dependency cache paths exist; skipping save."]);
@@ -146,7 +168,9 @@ public sealed class FileSystemDependencyCache : IDependencyCache
         string[] entryPaths;
         try
         {
-            entryPaths = Directory.EnumerateFiles(DependencyCachePath, EntryFileName, SearchOption.AllDirectories).ToArray();
+            entryPaths = CacheEntryPathEnumerator
+                .Enumerate(DependencyCachePath, EntryFileName)
+                .ToArray();
         }
         catch (IOException)
         {
@@ -173,19 +197,35 @@ public sealed class FileSystemDependencyCache : IDependencyCache
             .ToArray();
     }
 
-    public Task<int> CleanAsync(CancellationToken cancellationToken = default)
+    public async Task<int> CleanAsync(CancellationToken cancellationToken = default)
     {
         if (!Directory.Exists(DependencyCachePath))
         {
-            return Task.FromResult(0);
+            return 0;
         }
 
-        var count = Directory
-            .EnumerateFiles(DependencyCachePath, EntryFileName, SearchOption.AllDirectories)
-            .Count();
+        var entryPaths = CacheEntryPathEnumerator
+            .Enumerate(DependencyCachePath, EntryFileName)
+            .ToArray();
+        var removed = 0;
+        foreach (var entryPath in entryPaths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var cachePath = Path.GetDirectoryName(entryPath)!;
+            var key = Path.GetFileName(cachePath);
+            await using var entryLock = await CacheEntryLock.AcquireAsync(
+                ActioHomePath,
+                "dependencies",
+                key,
+                cancellationToken);
+            if (Directory.Exists(cachePath))
+            {
+                Directory.Delete(cachePath, recursive: true);
+                removed++;
+            }
+        }
 
-        Directory.Delete(DependencyCachePath, recursive: true);
-        return Task.FromResult(count);
+        return removed;
     }
 
     private async Task<CacheMatch> FindMatchAsync(
@@ -221,10 +261,20 @@ public sealed class FileSystemDependencyCache : IDependencyCache
     }
 
     private static IReadOnlyList<string> SaveExistingPaths(
+        string projectRoot,
         IReadOnlyList<ResolvedCachePath> paths,
         string contentPath)
     {
         var savedPaths = new List<string>();
+
+        foreach (var path in paths.Where(path => File.Exists(path.FullPath) || Directory.Exists(path.FullPath)))
+        {
+            SafeFileTree.ValidateExistingPath(projectRoot, path.FullPath, "dependency cache save");
+            if (Directory.Exists(path.FullPath))
+            {
+                SafeFileTree.Enumerate(path.FullPath, "dependency cache save");
+            }
+        }
 
         for (var index = 0; index < paths.Count; index++)
         {
@@ -251,6 +301,15 @@ public sealed class FileSystemDependencyCache : IDependencyCache
     private static void RestoreEntry(string projectRoot, DependencyCacheEntry entry)
     {
         var contentPath = Path.Combine(entry.CachePath, ContentDirectoryName);
+        for (var index = 0; index < entry.Paths.Count; index++)
+        {
+            var sourcePath = Path.Combine(contentPath, index.ToString());
+            if (Directory.Exists(sourcePath))
+            {
+                SafeFileTree.Enumerate(sourcePath, "dependency cache restore");
+            }
+        }
+
         for (var index = 0; index < entry.Paths.Count; index++)
         {
             var sourcePath = Path.Combine(contentPath, index.ToString());
@@ -360,18 +419,19 @@ public sealed class FileSystemDependencyCache : IDependencyCache
 
     private static void CopyDirectory(string sourceDirectory, string targetDirectory)
     {
+        var entries = SafeFileTree.Enumerate(sourceDirectory, "dependency cache copy");
         Directory.CreateDirectory(targetDirectory);
 
-        foreach (var directory in Directory.EnumerateDirectories(sourceDirectory, "*", SearchOption.AllDirectories))
+        foreach (var directory in entries.Where(entry => entry.IsDirectory))
         {
-            Directory.CreateDirectory(Path.Combine(targetDirectory, Path.GetRelativePath(sourceDirectory, directory)));
+            Directory.CreateDirectory(Path.Combine(targetDirectory, directory.RelativePath));
         }
 
-        foreach (var file in Directory.EnumerateFiles(sourceDirectory, "*", SearchOption.AllDirectories))
+        foreach (var file in entries.Where(entry => !entry.IsDirectory))
         {
-            var targetPath = Path.Combine(targetDirectory, Path.GetRelativePath(sourceDirectory, file));
+            var targetPath = Path.Combine(targetDirectory, file.RelativePath);
             Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
-            File.Copy(file, targetPath, overwrite: true);
+            File.Copy(file.FullPath, targetPath, overwrite: true);
         }
     }
 
@@ -400,9 +460,7 @@ public sealed class FileSystemDependencyCache : IDependencyCache
         DependencyCacheEntry entry,
         CancellationToken cancellationToken)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(entryPath)!);
-        await using var stream = File.Create(entryPath);
-        await JsonSerializer.SerializeAsync(stream, entry, JsonOptions, cancellationToken);
+        await AtomicJsonFile.WriteAsync(entryPath, entry, JsonOptions, cancellationToken);
     }
 
     private static async Task<DependencyCacheEntry?> TryReadEntryAsync(
@@ -416,7 +474,7 @@ public sealed class FileSystemDependencyCache : IDependencyCache
                 return null;
             }
 
-            await using var stream = File.OpenRead(entryPath);
+            await using var stream = AtomicJsonFile.OpenRead(entryPath);
             return await JsonSerializer.DeserializeAsync<DependencyCacheEntry>(stream, JsonOptions, cancellationToken);
         }
         catch (JsonException)

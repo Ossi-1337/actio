@@ -166,7 +166,7 @@ public static class CliHelpText
           -h, --help           Show help for the web command.
           --project-root PATH  Project root to show workflows and runs for.
           --actio-home PATH    Actio storage root. Defaults to ACTIO_HOME or user-local storage.
-          --url URL            URL to bind. Defaults to http://127.0.0.1:17345.
+          --url URL            Literal loopback HTTP URL. Defaults to http://127.0.0.1:17345.
 
         Description:
           Serves workflow history, run details, logs, artifacts, and workflow files from local storage.

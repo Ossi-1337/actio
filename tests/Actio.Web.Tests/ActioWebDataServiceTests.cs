@@ -638,6 +638,34 @@ public sealed class ActioWebDataServiceTests : IDisposable
         Assert.Equal("CI", executor.Workflow!.Name);
         Assert.Equal("rerun:run-source", executor.Options!.RunTrigger.Source);
         Assert.Equal("staging", executor.Options.RunTrigger.Inputs["environment"]);
+        Assert.Equal(
+            RunnerSecurityProfiles.SecureBaseline,
+            executor.Options.RunnerPolicy.RequestedProfile);
+    }
+
+    [Fact]
+    public async Task RerunAsync_PreservesStrictSecurityProfile()
+    {
+        var workflowPath = WriteWorkflow("ci.yml", "CI");
+        await SaveRunAsync(CreateRun(
+            "run-strict",
+            "CI",
+            workflowPath,
+            runnerSecurity: new RunnerSecurityMetadata(
+                "docker",
+                RunnerSecurityProfiles.Strict,
+                RunnerSecurityProfiles.Strict)));
+        var executor = new FakeWorkflowExecutor(
+            new WorkflowExecutionResult(WorkflowExecutionStatus.Success, 1, 1, []));
+
+        var result = await CreateService(
+            createExecutor: () => executor,
+            scheduleBackgroundWork: work => work()).RerunAsync("run-strict");
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Equal(
+            RunnerSecurityProfiles.Strict,
+            executor.Options!.RunnerPolicy.RequestedProfile);
     }
 
     private ActioWebDataService CreateService(

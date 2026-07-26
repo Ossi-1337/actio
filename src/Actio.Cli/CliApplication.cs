@@ -186,6 +186,7 @@ public sealed class CliApplication
             command.Inputs,
             "CLI",
             command.SecurityProfile,
+            null,
             output,
             error,
             cancellationToken);
@@ -290,6 +291,7 @@ public sealed class CliApplication
             sourceRun.RunTrigger.Inputs,
             $"rerun:{sourceRun.RunId}",
             sourceRun.RunnerSecurity?.RequestedProfile ?? RunnerSecurityProfiles.SecureBaseline,
+            sourceRun,
             output,
             error,
             cancellationToken);
@@ -357,6 +359,7 @@ public sealed class CliApplication
         IReadOnlyDictionary<string, string> inputs,
         string triggerSource,
         string securityProfile,
+        WorkflowRunRecord? rerunSource,
         TextWriter output,
         TextWriter error,
         CancellationToken cancellationToken)
@@ -403,9 +406,8 @@ public sealed class CliApplication
             output.WriteLine();
         }
 
-        var executionResult = await _executor.ExecuteAsync(
-            workflow,
-            new WorkflowExecutionOptions(
+        var executionOptions = rerunSource is null
+            ? new WorkflowExecutionOptions(
                 projectRoot,
                 workflowPath,
                 runId,
@@ -415,7 +417,18 @@ public sealed class CliApplication
                 RunnerPolicy: new RunnerExecutionPolicy(
                     securityProfile,
                     configuration.Configuration,
-                    configuration.InstanceIdentity)),
+                    configuration.InstanceIdentity))
+            : WorkflowRerunOptionsFactory.Create(
+                rerunSource,
+                runId,
+                inputResolution.Inputs,
+                localValues.Values.Secrets,
+                localValues.Values.Variables,
+                configuration.Configuration,
+                configuration.InstanceIdentity);
+        var executionResult = await _executor.ExecuteAsync(
+            workflow,
+            executionOptions,
             output,
             error,
             cancellationToken);

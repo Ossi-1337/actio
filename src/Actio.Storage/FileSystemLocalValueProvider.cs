@@ -34,8 +34,8 @@ public sealed class FileSystemLocalValueProvider
             "secret",
             secrets,
             errors);
-        LoadEnvironmentValues(VariableEnvironmentPrefix, "variable", variables, errors);
-        LoadEnvironmentValues(SecretEnvironmentPrefix, "secret", secrets, errors);
+        LoadEnvironmentValues(VariableEnvironmentPrefix, "variable", variables, errors, rejectMultiline: false);
+        LoadEnvironmentValues(SecretEnvironmentPrefix, "secret", secrets, errors, rejectMultiline: true);
 
         return errors.Count == 0
             ? LocalValueProviderResult.Loaded(new LocalWorkflowValues(variables, secrets))
@@ -121,7 +121,8 @@ public sealed class FileSystemLocalValueProvider
         string prefix,
         string valueKind,
         Dictionary<string, string> target,
-        List<string> errors)
+        List<string> errors,
+        bool rejectMultiline)
     {
         foreach (var item in _getEnvironmentVariables()
             .Where(item => item.Key.StartsWith(prefix, StringComparison.Ordinal))
@@ -131,6 +132,12 @@ public sealed class FileSystemLocalValueProvider
             if (!IsValidName(name))
             {
                 errors.Add($"Environment variable '{item.Key}' has invalid {valueKind} name '{name}'.");
+                continue;
+            }
+
+            if (rejectMultiline && item.Value.IndexOfAny(['\r', '\n']) >= 0)
+            {
+                errors.Add($"Secret '{name}' must be a single-line value.");
                 continue;
             }
 

@@ -3348,6 +3348,35 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_RunsCheckoutShimForPinnedCommitWithoutDownloadingSource()
+    {
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+        var cache = new RecordingActionCache();
+        var sha = new string('a', 40);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Checkout", null, $"actions/checkout@{sha}")]));
+
+        var result = await new WorkflowExecutor(runner, actionCache: cache).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions(Environment.CurrentDirectory),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+        Assert.Empty(cache.GitHubSourceRequests);
+        Assert.Contains(
+            "Actio checkout shim",
+            Assert.Single(runner.Requests).Command,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_FailsCheckoutShimWhenWithInputsAreProvided()
     {
         var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
@@ -3405,7 +3434,7 @@ public sealed class WorkflowExecutorTests
         Assert.False(result.Success);
         Assert.Empty(cache.GitHubSourceRequests);
         Assert.Empty(runner.Requests);
-        Assert.Contains(result.Errors, error => error.Contains("actions/checkout@v4", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Errors, error => error.Contains("full commit SHA", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(result.Errors, error => error.Contains("compatibility matrix", StringComparison.OrdinalIgnoreCase));
     }
 
@@ -4071,6 +4100,235 @@ public sealed class WorkflowExecutorTests
         {
             Directory.Delete(projectRoot, recursive: true);
         }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_RejectsSecretDerivedCacheInputsBeforePersistence()
+    {
+        const string secret = "sentinel-cache-secret";
+        var cache = new RecordingDependencyCache(_ => DependencyCacheRestoreResult.Miss());
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Cache packages",
+                        null,
+                        "actions/cache@v4",
+                        With: new Dictionary<string, string>
+                        {
+                            ["path"] = ".nuget/packages",
+                            ["key"] = "${{ env.CACHE_KEY }}"
+                        },
+                        Env: new Dictionary<string, string>
+                        {
+                            ["CACHE_KEY"] = "${{ secrets.CACHE_TOKEN }}"
+                        })
+                ]));
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var result = await new WorkflowExecutor(
+            new FakeRunnerProvider(Array.Empty<int>()),
+            dependencyCache: cache).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(
+                    Environment.CurrentDirectory,
+                    Secrets: new Dictionary<string, string> { ["CACHE_TOKEN"] = secret }),
+                output,
+                error);
+
+        Assert.False(result.Success);
+        Assert.Empty(cache.RestoreRequests);
+        Assert.Empty(cache.SaveRequests);
+        Assert.Contains(result.Errors, item => item.Contains("registered secret", StringComparison.Ordinal));
+        Assert.DoesNotContain(secret, string.Join('\n', result.Errors));
+        Assert.DoesNotContain(secret, output.ToString());
+        Assert.DoesNotContain(secret, error.ToString());
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_MasksSensitiveValuesReturnedByDependencyCache()
+    {
+        const string secret = "sentinel-cached-secret";
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-cache-mask-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectRoot);
+        var cache = new RecordingDependencyCache(_ =>
+            DependencyCacheRestoreResult.Restored(
+                CreateDependencyCacheEntry($"nuget-{secret}"),
+                cacheHit: false,
+                matchedRestoreKey: "nuget-"));
+        var store = new RecordingRunStore();
+        var runner = new FakeRunnerProvider([new FakeRunnerStep(
+            0,
+            onExecute: (environment, _) =>
+                Assert.Equal("nuget-***", environment["ACTIO_STEP_CACHE_OUTPUT_CACHE_MATCHED_KEY"]))]);
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Cache packages",
+                        null,
+                        "actions/cache@v4",
+                        Id: "cache",
+                        With: new Dictionary<string, string>
+                        {
+                            ["path"] = ".nuget/packages",
+                            ["key"] = "nuget-feature",
+                            ["restore-keys"] = "nuget-"
+                        }),
+                    new WorkflowStep("Use packages", "dotnet test", null)
+                ]));
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        try
+        {
+            var result = await new WorkflowExecutor(runner, store, dependencyCache: cache).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(
+                    projectRoot,
+                    Secrets: new Dictionary<string, string> { ["CACHE_TOKEN"] = secret }),
+                output,
+                error);
+
+            Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+            Assert.DoesNotContain(secret, output.ToString());
+            Assert.DoesNotContain(secret, error.ToString());
+            Assert.DoesNotContain(store.LogLines, line => line.Contains(secret, StringComparison.Ordinal));
+            Assert.DoesNotContain(
+                Assert.Single(store.SavedRecords.Last().Jobs).Outputs.Values,
+                value => value.Contains(secret, StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_MasksSensitiveDependencyCacheSaveFailures()
+    {
+        const string secret = "sentinel-cache-save-secret";
+        var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-cache-save-mask-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectRoot);
+        var cache = new RecordingDependencyCache(_ => DependencyCacheRestoreResult.Miss())
+        {
+            SaveResultFactory = _ => DependencyCacheSaveResult.Failed([$"cache save failed: {secret}"])
+        };
+        var store = new RecordingRunStore();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Cache packages",
+                        null,
+                        "actions/cache@v4",
+                        With: new Dictionary<string, string>
+                        {
+                            ["path"] = ".nuget/packages",
+                            ["key"] = "nuget-feature"
+                        })
+                ]));
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        try
+        {
+            var result = await new WorkflowExecutor(
+                new FakeRunnerProvider(Array.Empty<int>()),
+                store,
+                dependencyCache: cache).ExecuteAsync(
+                    workflow,
+                    new WorkflowExecutionOptions(
+                        projectRoot,
+                        Secrets: new Dictionary<string, string> { ["CACHE_TOKEN"] = secret }),
+                    output,
+                    error);
+
+            Assert.False(result.Success);
+            Assert.DoesNotContain(secret, output.ToString());
+            Assert.DoesNotContain(secret, error.ToString());
+            Assert.DoesNotContain(secret, string.Join('\n', result.Errors));
+            Assert.DoesNotContain(secret, string.Join('\n', store.SavedRecords.Last().Errors));
+        }
+        finally
+        {
+            Directory.Delete(projectRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void SensitiveValueGuard_RejectsRuntimeRegisteredMasks()
+    {
+        const string secret = "runtime-masked-secret";
+        var masker = new SecretMasker();
+        masker.Add(secret);
+
+        var errors = SensitiveValueGuard.ValidateBuiltInPersistenceInputs(
+            "actions/cache@v4",
+            new Dictionary<string, string>
+            {
+                ["key"] = $"prefix-{secret}",
+                ["path"] = ".nuget/packages"
+            },
+            masker);
+
+        Assert.Single(errors);
+        Assert.DoesNotContain(secret, Assert.Single(errors));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_RejectsSecretDerivedArtifactInputsBeforePersistence()
+    {
+        const string secret = "sentinel-artifact-secret";
+        var store = new RecordingRunStore();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [
+                    new WorkflowStep(
+                        "Upload",
+                        null,
+                        "actions/upload-artifact@v4",
+                        With: new Dictionary<string, string>
+                        {
+                            ["name"] = "${{ secrets.ARTIFACT_TOKEN }}",
+                            ["path"] = "report.txt"
+                        })
+                ]));
+
+        var result = await new WorkflowExecutor(
+            new FakeRunnerProvider(Array.Empty<int>()),
+            store).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(
+                    Environment.CurrentDirectory,
+                    Secrets: new Dictionary<string, string> { ["ARTIFACT_TOKEN"] = secret }),
+                TextWriter.Null,
+                TextWriter.Null);
+
+        Assert.False(result.Success);
+        Assert.Empty(result.Artifacts);
+        Assert.DoesNotContain(secret, string.Join('\n', result.Errors));
     }
 
     [Fact]
@@ -5329,6 +5587,8 @@ public sealed class WorkflowExecutorTests
 
         public List<DependencyCacheSaveRequest> SaveRequests { get; } = [];
 
+        public Func<DependencyCacheSaveRequest, DependencyCacheSaveResult>? SaveResultFactory { get; init; }
+
         public Task<DependencyCacheRestoreResult> RestoreAsync(
             DependencyCacheRestoreRequest request,
             CancellationToken cancellationToken = default)
@@ -5345,7 +5605,9 @@ public sealed class WorkflowExecutorTests
             CancellationToken cancellationToken = default)
         {
             SaveRequests.Add(request);
-            return Task.FromResult(DependencyCacheSaveResult.SavedEntry(CreateDependencyCacheEntry(request.Key)));
+            var result = SaveResultFactory?.Invoke(request) ??
+                DependencyCacheSaveResult.SavedEntry(CreateDependencyCacheEntry(request.Key));
+            return Task.FromResult(result);
         }
 
         public Task<IReadOnlyList<DependencyCacheEntry>> ListAsync(CancellationToken cancellationToken = default)
