@@ -8,22 +8,53 @@ namespace Actio.Cli;
 
 internal sealed class WebProcessMetadataStore
 {
-    private const int SchemaVersion = 1;
+    private const int CurrentSchemaVersion = 2;
     private const long MaximumLogBytes = 1024 * 1024;
     private readonly string _actioHome;
-    private readonly string _urlKey;
+    private readonly string _key;
+    private readonly string _launchLockName;
 
     public WebProcessMetadataStore(string actioHome, string url)
+        : this(
+            actioHome,
+            CreateUrlKey(url),
+            $"launch-{CreateUrlKey(url)}.lock")
     {
-        _actioHome = Path.GetFullPath(actioHome);
-        _urlKey = CreateUrlKey(url);
     }
 
-    public string MetadataPath => Path.Combine(_actioHome, "web", "processes", $"{_urlKey}.json");
+    private WebProcessMetadataStore(
+        string actioHome,
+        string key,
+        string launchLockName)
+    {
+        _actioHome = Path.GetFullPath(actioHome);
+        _key = key;
+        _launchLockName = launchLockName;
+    }
 
-    public string LaunchLockPath => Path.Combine(_actioHome, "web", "locks", $"launch-{_urlKey}.lock");
+    public string MetadataPath => Path.Combine(_actioHome, "web", "processes", $"{_key}.json");
 
-    public string LogPath => Path.Combine(_actioHome, "logs", "web", $"{_urlKey}.log");
+    public string LaunchLockPath => Path.Combine(_actioHome, "web", "locks", _launchLockName);
+
+    public string LogPath => Path.Combine(_actioHome, "logs", "web", $"{_key}.log");
+
+    public static WebProcessMetadataStore ForProject(
+        string actioHome,
+        string sessionId)
+    {
+        ValidateSessionId(sessionId);
+        return new WebProcessMetadataStore(
+            actioHome,
+            sessionId,
+            $"session-{sessionId}.lock");
+    }
+
+    public static WebProcessMetadataStore ForMetadata(WebProcessMetadata metadata)
+    {
+        return metadata.SessionId is { Length: > 0 }
+            ? ForProject(metadata.ActioHome, metadata.SessionId)
+            : new WebProcessMetadataStore(metadata.ActioHome, metadata.Url);
+    }
 
     public static string GetRuntimeLockPath(string actioHome, string runtimeIdentity)
     {
@@ -32,6 +63,19 @@ internal sealed class WebProcessMetadataStore
             "web",
             "locks",
             $"runtime-{runtimeIdentity}.lock");
+    }
+
+    public static FileStream OpenRuntimeUsageLock(
+        string actioHome,
+        string runtimeIdentity)
+    {
+        var path = GetRuntimeLockPath(actioHome, runtimeIdentity);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        return File.Open(
+            path,
+            FileMode.OpenOrCreate,
+            FileAccess.ReadWrite,
+            FileShare.ReadWrite);
     }
 
     public WebProcessMetadataReadResult Read()
@@ -44,16 +88,16 @@ internal sealed class WebProcessMetadataStore
         try
         {
             var metadata = JsonSerializer.Deserialize<WebProcessMetadata>(File.ReadAllText(MetadataPath));
-            return !IsValid(metadata)
-                ? WebProcessMetadataReadResult.Corrupt("metadata schema is invalid")
-                : WebProcessMetadataReadResult.Found(metadata!);
+            return !IsValid(metadata) || !IsStoredAtExpectedPath(metadata!, MetadataPath)
+                ? WebProcessMetadataReadResult.Corrupt("metadata schema is invalid", MetadataPath)
+                : WebProcessMetadataReadResult.Found(metadata!, MetadataPath);
         }
         catch (Exception ex) when (ex is IOException
             or UnauthorizedAccessException
             or JsonException
             or NotSupportedException)
         {
-            return WebProcessMetadataReadResult.Corrupt(ex.Message);
+            return WebProcessMetadataReadResult.Corrupt(ex.Message, MetadataPath);
         }
     }
 
@@ -71,16 +115,18 @@ internal sealed class WebProcessMetadataStore
             try
             {
                 var metadata = JsonSerializer.Deserialize<WebProcessMetadata>(File.ReadAllText(path));
-                results.Add(!IsValid(metadata)
-                    ? WebProcessMetadataReadResult.Corrupt($"metadata '{path}' has an invalid schema")
-                    : WebProcessMetadataReadResult.Found(metadata!));
+                results.Add(!IsValid(metadata) || !IsStoredAtExpectedPath(metadata!, path)
+                    ? WebProcessMetadataReadResult.Corrupt($"metadata '{path}' has an invalid schema", path)
+                    : WebProcessMetadataReadResult.Found(metadata!, path));
             }
             catch (Exception ex) when (ex is IOException
                 or UnauthorizedAccessException
                 or JsonException
                 or NotSupportedException)
             {
-                results.Add(WebProcessMetadataReadResult.Corrupt($"metadata '{path}' could not be read: {ex.Message}"));
+                results.Add(WebProcessMetadataReadResult.Corrupt(
+                    $"metadata '{path}' could not be read: {ex.Message}",
+                    path));
             }
         }
 
@@ -119,6 +165,21 @@ internal sealed class WebProcessMetadataStore
         }
     }
 
+    public WebProcessMetadata? UpdateUrlIfOwned(string instanceId, string url)
+    {
+        var result = Read();
+        var metadata = result.Metadata;
+        if (metadata is null ||
+            !string.Equals(metadata.InstanceId, instanceId, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var updated = metadata with { Url = NormalizeLoopbackUrl(url) };
+        Save(updated);
+        return updated;
+    }
+
     public string? QuarantineCorrupt()
     {
         if (!File.Exists(MetadataPath))
@@ -130,7 +191,7 @@ internal sealed class WebProcessMetadataStore
         Directory.CreateDirectory(quarantineDirectory);
         var target = Path.Combine(
             quarantineDirectory,
-            $"{_urlKey}-{DateTimeOffset.UtcNow:yyyyMMddHHmmssfff}-{Guid.NewGuid():N}.json");
+            $"{_key}-{DateTimeOffset.UtcNow:yyyyMMddHHmmssfff}-{Guid.NewGuid():N}.json");
         File.Move(MetadataPath, target);
         return target;
     }
@@ -251,7 +312,9 @@ internal sealed class WebProcessMetadataStore
     private static bool IsValid(WebProcessMetadata? metadata)
     {
         return metadata is not null &&
-            metadata.SchemaVersion == SchemaVersion &&
+            metadata.SchemaVersion is 1 or CurrentSchemaVersion &&
+            (metadata.SchemaVersion == 1 ||
+                IsValidSessionId(metadata.SessionId)) &&
             metadata.ProcessId > 0 &&
             metadata.ProcessStartTimeUtcTicks > 0 &&
             !string.IsNullOrWhiteSpace(metadata.InstanceId) &&
@@ -269,6 +332,47 @@ internal sealed class WebProcessMetadataStore
             !string.IsNullOrWhiteSpace(metadata.ActioHome) &&
             Path.IsPathFullyQualified(metadata.ActioHome);
     }
+
+    private static bool IsStoredAtExpectedPath(
+        WebProcessMetadata metadata,
+        string path)
+    {
+        var expectedKey = metadata.SessionId is { Length: > 0 }
+            ? metadata.SessionId
+            : CreateUrlKey(metadata.Url);
+        return string.Equals(
+            Path.GetFileNameWithoutExtension(path),
+            expectedKey,
+            StringComparison.Ordinal);
+    }
+
+    private static string NormalizeLoopbackUrl(string url)
+    {
+        var normalized = url.Trim().TrimEnd('/');
+        if (!Uri.TryCreate(normalized, UriKind.Absolute, out var uri) ||
+            !uri.IsLoopback ||
+            uri.Port <= 0)
+        {
+            throw new ArgumentException($"Web worker URL '{url}' is not a bound loopback URL.", nameof(url));
+        }
+
+        return normalized;
+    }
+
+    private static void ValidateSessionId(string sessionId)
+    {
+        if (!IsValidSessionId(sessionId))
+        {
+            throw new ArgumentException("Web project session id is invalid.", nameof(sessionId));
+        }
+    }
+
+    private static bool IsValidSessionId(string? sessionId)
+    {
+        return sessionId is { Length: 24 } &&
+            sessionId.All(character =>
+                character is >= '0' and <= '9' or >= 'a' and <= 'f');
+    }
 }
 
 internal sealed record WebProcessMetadata(
@@ -284,7 +388,8 @@ internal sealed record WebProcessMetadata(
     string Url,
     string ProjectRoot,
     string ActioHome,
-    DateTimeOffset StartedAt)
+    DateTimeOffset StartedAt,
+    string? SessionId = null)
 {
     public static WebProcessMetadata Create(
         Process process,
@@ -293,10 +398,11 @@ internal sealed record WebProcessMetadata(
         WebRuntimeSnapshot snapshot,
         string url,
         string projectRoot,
-        string actioHome)
+        string actioHome,
+        string? sessionId = null)
     {
         return new WebProcessMetadata(
-            1,
+            sessionId is null ? 1 : 2,
             process.Id,
             process.StartTime.ToUniversalTime().Ticks,
             instanceId,
@@ -308,20 +414,24 @@ internal sealed record WebProcessMetadata(
             url,
             Path.GetFullPath(projectRoot),
             Path.GetFullPath(actioHome),
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow,
+            sessionId);
     }
 }
 
 internal sealed record WebProcessMetadataReadResult(
     WebProcessMetadata? Metadata,
     bool IsCorrupt,
-    string? Error)
+    string? Error,
+    string? SourcePath)
 {
-    public static WebProcessMetadataReadResult Missing() => new(null, false, null);
+    public static WebProcessMetadataReadResult Missing() => new(null, false, null, null);
 
-    public static WebProcessMetadataReadResult Found(WebProcessMetadata metadata) => new(metadata, false, null);
+    public static WebProcessMetadataReadResult Found(WebProcessMetadata metadata, string sourcePath) =>
+        new(metadata, false, null, sourcePath);
 
-    public static WebProcessMetadataReadResult Corrupt(string error) => new(null, true, error);
+    public static WebProcessMetadataReadResult Corrupt(string error, string sourcePath) =>
+        new(null, true, error, sourcePath);
 }
 
 internal enum WebOwnerState

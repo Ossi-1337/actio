@@ -1,4 +1,5 @@
 using Actio.Core.Workflows;
+using Actio.Core.IO;
 using Actio.Engine.Execution;
 using Actio.Engine.Runs;
 using Actio.Runner.Docker;
@@ -18,6 +19,8 @@ public sealed class ActioWebDataService
     private readonly TimeProvider _timeProvider;
     private readonly Func<IWorkflowExecutor> _createExecutor;
     private readonly Func<Func<Task>, Task> _scheduleBackgroundWork;
+    private readonly string _projectRoot;
+    private readonly string _actioHome;
 
     public ActioWebDataService(ActioWebOptions options)
         : this(
@@ -41,6 +44,8 @@ public sealed class ActioWebDataService
         Func<Func<Task>, Task>? scheduleBackgroundWork = null)
     {
         _options = options;
+        _projectRoot = CanonicalPath.ResolveExistingDirectory(options.ProjectRoot);
+        _actioHome = Path.GetFullPath(options.ActioHome);
         _runStore = runStore;
         _actionCache = actionCache;
         _dependencyCache = dependencyCache;
@@ -50,9 +55,9 @@ public sealed class ActioWebDataService
         _scheduleBackgroundWork = scheduleBackgroundWork ?? ScheduleBackgroundWork;
     }
 
-    public string ProjectRoot => Path.GetFullPath(_options.ProjectRoot);
+    public string ProjectRoot => _projectRoot;
 
-    public string ActioHome => Path.GetFullPath(_options.ActioHome);
+    public string ActioHome => _actioHome;
 
     public string ServerUrl => _options.Url;
 
@@ -380,7 +385,7 @@ public sealed class ActioWebDataService
 
     private bool IsProjectRun(WorkflowRunRecord run)
     {
-        return IsSamePath(run.ProjectRoot, ProjectRoot);
+        return CanonicalPath.AreEquivalent(run.ProjectRoot, ProjectRoot);
     }
 
     private async Task<string?> ResolveWorkflowPathAsync(

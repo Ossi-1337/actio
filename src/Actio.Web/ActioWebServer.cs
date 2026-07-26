@@ -28,6 +28,7 @@ public sealed class ActioWebServer
         }
 
         builder.Services.AddSingleton(options);
+        builder.Services.AddSingleton(new ActioWebRuntimeState(options.Url));
         builder.Services.AddSingleton<ActioWebDataService>();
 
         var app = builder.Build();
@@ -37,7 +38,25 @@ public sealed class ActioWebServer
 
     public async Task RunAsync(ActioWebOptions options, CancellationToken cancellationToken = default)
     {
-        await Build(options).RunAsync(cancellationToken);
+        await RunAsync(options, onStarted: null, cancellationToken);
+    }
+
+    public async Task RunAsync(
+        ActioWebOptions options,
+        Func<ActioWebServerBinding, CancellationToken, Task>? onStarted,
+        CancellationToken cancellationToken = default)
+    {
+        await using var app = Build(options);
+        await app.StartAsync(cancellationToken);
+
+        var serverUrl = ResolveServerUrl(app);
+        app.Services.GetRequiredService<ActioWebRuntimeState>().ServerUrl = serverUrl;
+        if (onStarted is not null)
+        {
+            await onStarted(new ActioWebServerBinding(serverUrl), cancellationToken);
+        }
+
+        await app.WaitForShutdownAsync(cancellationToken);
     }
 
     private static void MapRoutes(WebApplication app, ActioWebOptions options)
@@ -48,18 +67,21 @@ public sealed class ActioWebServer
         app.MapGet("/assets/styles.css", () => Results.Content(EmbeddedWebAssetLoader.ReadText("styles.css"), "text/css"));
         app.MapGet("/assets/app.js", () => Results.Content(EmbeddedWebAssetLoader.ReadText("app.js"), "application/javascript"));
 
-        app.MapGet("/api/health", (ActioWebDataService data) => Results.Ok(new
-        {
-            status = "ok",
-            projectRoot = data.ProjectRoot,
-            actioHome = data.ActioHome,
-            serverUrl = data.ServerUrl,
-            cacheRoot = data.CacheRoot,
-            runtimeIdentity = options.RuntimeIdentity,
-            webInstanceId = options.WebInstanceId,
-            processId = options.ProcessId,
-            processStartTimeUtcTicks = options.ProcessStartTimeUtcTicks
-        }));
+        app.MapGet("/api/health", (
+            ActioWebDataService data,
+            ActioWebRuntimeState runtime) => Results.Ok(new
+            {
+                status = "ok",
+                projectRoot = data.ProjectRoot,
+                actioHome = data.ActioHome,
+                serverUrl = runtime.ServerUrl,
+                cacheRoot = data.CacheRoot,
+                runtimeIdentity = options.RuntimeIdentity,
+                webInstanceId = options.WebInstanceId,
+                processId = options.ProcessId,
+                processStartTimeUtcTicks = options.ProcessStartTimeUtcTicks,
+                sessionId = options.SessionId
+            }));
 
         if (options.Background && options.ControlToken is not null)
         {
@@ -197,4 +219,26 @@ public sealed class ActioWebServer
             CryptographicOperations.FixedTimeEquals(expectedBytes, providedBytes);
     }
 
+    private static string ResolveServerUrl(WebApplication app)
+    {
+        var urls = app.Urls
+            .Select(url => url.TrimEnd('/'))
+            .Where(url => Uri.TryCreate(url, UriKind.Absolute, out var uri) &&
+                uri.IsLoopback &&
+                uri.Port > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return urls.Length == 1
+            ? urls[0]
+            : throw new InvalidOperationException(
+                $"Actio web expected one bound loopback URL, but found {urls.Length}.");
+    }
+
+    private sealed class ActioWebRuntimeState(string serverUrl)
+    {
+        public string ServerUrl { get; set; } = serverUrl;
+    }
 }
+
+public sealed record ActioWebServerBinding(string ServerUrl);

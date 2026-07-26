@@ -9,4 +9,5 @@ public sealed record ActioWebOptions(
     string? WebInstanceId = null,
     int? ProcessId = null,
     long? ProcessStartTimeUtcTicks = null,
-    string? ControlToken = null);
+    string? ControlToken = null,
+    string? SessionId = null);

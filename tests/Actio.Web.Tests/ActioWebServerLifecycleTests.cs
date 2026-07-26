@@ -1,4 +1,6 @@
 using System.Net;
+using System.Net.Http.Json;
+using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 
@@ -63,6 +65,52 @@ public sealed class ActioWebServerLifecycleTests : IDisposable
         Assert.False(ActioWebServer.IsAuthorizedShutdown(context, "expected"));
     }
 
+    [Fact]
+    public async Task DynamicBindingPublishesActualUrlAndSessionIdentity()
+    {
+        var options = CreateOptions(
+            background: true,
+            runtimeIdentity: "runtime",
+            instanceId: "instance",
+            processId: Environment.ProcessId,
+            processStartTicks: 456,
+            controlToken: "token",
+            sessionId: "session");
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var started = new TaskCompletionSource<ActioWebServerBinding>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var runTask = new ActioWebServer().RunAsync(
+            options,
+            (binding, _) =>
+            {
+                started.TrySetResult(binding);
+                return Task.CompletedTask;
+            },
+            cancellation.Token);
+
+        var binding = await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.NotEqual(0, new Uri(binding.ServerUrl).Port);
+        using var http = new HttpClient();
+        using var health = await http.GetFromJsonAsync<JsonDocument>(
+            $"{binding.ServerUrl}/api/health",
+            cancellation.Token);
+        Assert.Equal(
+            binding.ServerUrl,
+            health!.RootElement.GetProperty("serverUrl").GetString());
+        Assert.Equal(
+            "session",
+            health.RootElement.GetProperty("sessionId").GetString());
+
+        cancellation.Cancel();
+        try
+        {
+            await runTask;
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_root))
@@ -77,11 +125,13 @@ public sealed class ActioWebServerLifecycleTests : IDisposable
         string? instanceId = null,
         int? processId = null,
         long? processStartTicks = null,
-        string? controlToken = null)
+        string? controlToken = null,
+        string? sessionId = null)
     {
         var projectRoot = Path.Combine(_root, "project");
         var actioHome = Path.Combine(_root, "home");
         Directory.CreateDirectory(projectRoot);
+        Directory.CreateDirectory(actioHome);
         return new ActioWebOptions(
             projectRoot,
             actioHome,
@@ -91,6 +141,7 @@ public sealed class ActioWebServerLifecycleTests : IDisposable
             instanceId,
             processId,
             processStartTicks,
-            controlToken);
+            controlToken,
+            sessionId);
     }
 }

@@ -541,6 +541,60 @@ public sealed class ActioWebDataServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ProjectScopedOperationsRejectRunFromDifferentProject()
+    {
+        var foreignProject = Path.Combine(_root, "foreign-project");
+        var foreignWorkflowDirectory = Path.Combine(foreignProject, ".workflows");
+        Directory.CreateDirectory(foreignWorkflowDirectory);
+        var workflowPath = Path.Combine(foreignWorkflowDirectory, "ci.yml");
+        await File.WriteAllTextAsync(
+            workflowPath,
+            """
+            name: Foreign
+            jobs:
+              test:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+        var logPath = Path.Combine(_actioHome, "logs", "foreign-run", "test", "001-Test.log");
+        Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
+        await File.WriteAllTextAsync(logPath, "foreign log");
+        var artifactPath = Path.Combine(
+            _actioHome,
+            "artifacts",
+            "foreign-run",
+            "test",
+            "report",
+            "report.txt");
+        Directory.CreateDirectory(Path.GetDirectoryName(artifactPath)!);
+        await File.WriteAllTextAsync(artifactPath, "foreign artifact");
+        await SaveRunAsync(CreateRun(
+            "foreign-run",
+            "Foreign",
+            workflowPath,
+            projectRoot: foreignProject,
+            logPath: logPath,
+            artifactPath: artifactPath,
+            status: "Running"));
+        var service = CreateService();
+
+        Assert.Null(await service.GetRunAsync("foreign-run"));
+        Assert.Null(await service.GetStepLogAsync("foreign-run", "test", "Test"));
+        Assert.Null(await service.GetArtifactAsync("foreign-run", "test", "report"));
+        Assert.Null(await service.GetWorkflowFileResultAsync("foreign-run"));
+        Assert.False((await service.CancelRunAsync("foreign-run")).Success);
+        Assert.False((await service.RerunAsync("foreign-run")).Success);
+        Assert.False((await service.UpdateWorkflowFileAsync(
+            "foreign-run",
+            "name: Changed")).Success);
+        Assert.Contains(
+            "name: Foreign",
+            await File.ReadAllTextAsync(workflowPath));
+    }
+
+    [Fact]
     public async Task CancelRunAsync_RequestsCancellationForRunningRun()
     {
         var workflowPath = WriteWorkflow("ci.yml", "CI");

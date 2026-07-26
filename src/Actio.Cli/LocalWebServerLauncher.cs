@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
+using Actio.Core.IO;
 using Actio.Storage;
 using Actio.Web;
 
@@ -13,6 +14,8 @@ public sealed class LocalWebServerLauncher : ILocalWebServerLauncher
     internal const string InstanceIdEnvironmentVariable = "ACTIO_WEB_INSTANCE_ID";
     internal const string ControlTokenEnvironmentVariable = "ACTIO_WEB_CONTROL_TOKEN";
     internal const string SnapshotPathEnvironmentVariable = "ACTIO_WEB_SNAPSHOT_PATH";
+    internal const string SessionIdEnvironmentVariable = "ACTIO_WEB_SESSION_ID";
+    private const string DynamicLoopbackUrl = "http://127.0.0.1:0";
 
     private static readonly string[] PreservedEnvironmentVariables =
     [
@@ -40,9 +43,16 @@ public sealed class LocalWebServerLauncher : ILocalWebServerLauncher
     private readonly TimeSpan _startupTimeout;
     private readonly WebRuntimeSnapshotManager _snapshotManager;
     private readonly Func<HttpClient> _httpClientFactory;
+    private readonly bool _useProjectSessions;
 
     public LocalWebServerLauncher()
-        : this(ActioWebDefaults.DefaultUrl, ActioHome.Resolve(), TimeSpan.FromSeconds(3))
+        : this(
+            ActioWebDefaults.DefaultUrl,
+            ActioHome.Resolve(),
+            TimeSpan.FromSeconds(3),
+            WebRuntimeSnapshotManager.CreateCurrent(),
+            static () => new HttpClient(),
+            useProjectSessions: true)
     {
     }
 
@@ -52,7 +62,8 @@ public sealed class LocalWebServerLauncher : ILocalWebServerLauncher
             actioHome,
             startupTimeout,
             WebRuntimeSnapshotManager.CreateCurrent(),
-            static () => new HttpClient())
+            static () => new HttpClient(),
+            useProjectSessions: true)
     {
     }
 
@@ -61,13 +72,15 @@ public sealed class LocalWebServerLauncher : ILocalWebServerLauncher
         string actioHome,
         TimeSpan startupTimeout,
         WebRuntimeSnapshotManager snapshotManager,
-        Func<HttpClient> httpClientFactory)
+        Func<HttpClient> httpClientFactory,
+        bool useProjectSessions = false)
     {
         _url = url.TrimEnd('/');
         _actioHome = Path.GetFullPath(actioHome);
         _startupTimeout = startupTimeout;
         _snapshotManager = snapshotManager;
         _httpClientFactory = httpClientFactory;
+        _useProjectSessions = useProjectSessions;
     }
 
     public async Task<string?> EnsureStartedAsync(
@@ -75,6 +88,25 @@ public sealed class LocalWebServerLauncher : ILocalWebServerLauncher
         string? runId,
         TextWriter error,
         CancellationToken cancellationToken = default)
+    {
+        return _useProjectSessions
+            ? await EnsureProjectWorkerStartedAsync(
+                projectRoot,
+                runId,
+                error,
+                cancellationToken)
+            : await EnsureFixedWorkerStartedAsync(
+                projectRoot,
+                runId,
+                error,
+                cancellationToken);
+    }
+
+    private async Task<string?> EnsureFixedWorkerStartedAsync(
+        string projectRoot,
+        string? runId,
+        TextWriter error,
+        CancellationToken cancellationToken)
     {
         var fullProjectRoot = Path.GetFullPath(projectRoot);
         var runUrl = runId is null
@@ -257,13 +289,296 @@ public sealed class LocalWebServerLauncher : ILocalWebServerLauncher
         }
     }
 
+    private async Task<string?> EnsureProjectWorkerStartedAsync(
+        string projectRoot,
+        string? runId,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        WebProjectSession session;
+        WebRuntimeSnapshot snapshot;
+        try
+        {
+            session = WebProjectSession.Create(projectRoot, _actioHome);
+            snapshot = _snapshotManager.Prepare(session.ActioHome, cancellationToken);
+        }
+        catch (Exception ex) when (IsRecoverableLifecycleError(ex))
+        {
+            error.WriteLine($"Actio web UI project session could not be prepared: {ex.Message}");
+            return null;
+        }
+
+        var store = WebProcessMetadataStore.ForProject(session.ActioHome, session.Id);
+        FileStream? launchLock;
+        try
+        {
+            launchLock = await WebFileLock.TryAcquireAsync(
+                store.LaunchLockPath,
+                _startupTimeout,
+                cancellationToken);
+        }
+        catch (Exception ex) when (IsRecoverableLifecycleError(ex))
+        {
+            error.WriteLine($"Actio web UI project session lock could not be acquired: {ex.Message}");
+            return null;
+        }
+
+        if (launchLock is null)
+        {
+            error.WriteLine(
+                $"Actio web UI project session lock was not available for '{session.ProjectRoot}' before the startup timeout.");
+            return null;
+        }
+
+        await using var acquiredLaunchLock = launchLock;
+        IReadOnlyList<WebProcessMetadataReadResult> metadataResults;
+        try
+        {
+            metadataResults = store.ReadAll();
+        }
+        catch (Exception ex) when (IsRecoverableLifecycleError(ex))
+        {
+            error.WriteLine($"Actio web UI process metadata could not be read: {ex.Message}");
+            return null;
+        }
+
+        var sessionRecord = metadataResults.FirstOrDefault(result =>
+            string.Equals(result.SourcePath, store.MetadataPath, PathComparison));
+        var skipSnapshotCleanup = false;
+        if (sessionRecord?.IsCorrupt == true)
+        {
+            try
+            {
+                var quarantinePath = store.QuarantineCorrupt();
+                error.WriteLine(
+                    $"Actio web UI project session metadata was corrupt and moved to '{quarantinePath}': {sessionRecord.Error}");
+                skipSnapshotCleanup = true;
+            }
+            catch (Exception ex) when (IsRecoverableLifecycleError(ex))
+            {
+                error.WriteLine($"Actio web UI corrupt project session metadata could not be quarantined: {ex.Message}");
+                return null;
+            }
+        }
+
+        var matchingRecords = metadataResults
+            .Where(result => result.Metadata is not null)
+            .Select(result => result.Metadata!)
+            .Where(metadata =>
+                CanonicalPath.AreEquivalent(metadata.ProjectRoot, session.ProjectRoot) &&
+                CanonicalPath.AreEquivalent(metadata.ActioHome, session.ActioHome))
+            .ToArray();
+
+        foreach (var stale in matchingRecords.Where(metadata =>
+            WebProcessMetadataStore.GetOwnerState(
+                metadata.ProcessId,
+                metadata.ProcessStartTimeUtcTicks) == WebOwnerState.Stale))
+        {
+            try
+            {
+                WebProcessMetadataStore.ForMetadata(stale).DeleteIfOwned(stale.InstanceId);
+            }
+            catch (Exception ex) when (IsRecoverableLifecycleError(ex))
+            {
+                error.WriteLine($"Actio web UI stale process metadata could not be removed: {ex.Message}");
+                return null;
+            }
+        }
+
+        var liveRecords = matchingRecords
+            .Where(metadata =>
+                WebProcessMetadataStore.GetOwnerState(
+                    metadata.ProcessId,
+                    metadata.ProcessStartTimeUtcTicks) is WebOwnerState.Active or WebOwnerState.Unknown)
+            .ToArray();
+        if (liveRecords.Length > 1)
+        {
+            error.WriteLine(
+                $"Actio web UI found multiple active process records for project '{session.ProjectRoot}'. No process was selected or stopped.");
+            return null;
+        }
+
+        if (liveRecords is [var existing])
+        {
+            var ownerState = WebProcessMetadataStore.GetOwnerState(
+                existing.ProcessId,
+                existing.ProcessStartTimeUtcTicks);
+            if (ownerState == WebOwnerState.Unknown)
+            {
+                WriteUnverifiableOwner(error);
+                return null;
+            }
+
+            var existingHealth = await GetHealthAsync(
+                existing.Url,
+                session.ProjectRoot,
+                snapshot.Identity,
+                existing.SessionId,
+                cancellationToken);
+            if (existingHealth.Status == WebServerHealth.Ready &&
+                IsExpectedWorker(existingHealth.Response, existing))
+            {
+                return BuildRunUrl(existing.Url, runId);
+            }
+
+            if (existingHealth.Status == WebServerHealth.IncompatibleRuntime &&
+                IsExpectedWorker(existingHealth.Response, existing))
+            {
+                if (!await StopVerifiedProcessAsync(
+                    WebProcessMetadataStore.ForMetadata(existing),
+                    existingHealth.Response,
+                    error,
+                    cancellationToken))
+                {
+                    return null;
+                }
+            }
+            else
+            {
+                WriteOfflineActiveOwner(error);
+                return null;
+            }
+        }
+
+        var foregroundHealth = await GetHealthAsync(
+            _url,
+            session.ProjectRoot,
+            snapshot.Identity,
+            expectedSessionId: null,
+            cancellationToken);
+        if (foregroundHealth.Status == WebServerHealth.Ready &&
+            foregroundHealth.Response?.WebInstanceId is null)
+        {
+            return BuildRunUrl(_url, runId);
+        }
+
+        if (skipSnapshotCleanup)
+        {
+            error.WriteLine(
+                "Actio web UI snapshot cleanup was skipped because quarantined metadata may reference an active runtime.");
+        }
+        else if (TryGetProtectedRuntimeIdentities(store, out var protectedRuntimeIdentities))
+        {
+            CleanupSnapshots(error, snapshot.Identity, protectedRuntimeIdentities);
+        }
+        else
+        {
+            error.WriteLine(
+                "Actio web UI snapshot cleanup was skipped because process metadata could not be verified.");
+        }
+
+        var instanceId = Guid.NewGuid().ToString("N");
+        var ownershipToken = WebProcessMetadataStore.CreateOwnershipToken();
+        var startInfo = CreateStartInfo(
+            snapshot,
+            session.ProjectRoot,
+            session.ActioHome,
+            DynamicLoopbackUrl,
+            instanceId,
+            ownershipToken,
+            session.Id);
+
+        DetachedProcessHandle detachedProcess;
+        try
+        {
+            detachedProcess = DetachedProcessStarter.Start(startInfo);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
+        {
+            error.WriteLine($"Actio web UI worker could not be started: {ex.Message}");
+            return null;
+        }
+
+        using var process = detachedProcess.Process;
+        var provisionalMetadata = WebProcessMetadata.Create(
+            process,
+            instanceId,
+            ownershipToken,
+            snapshot,
+            DynamicLoopbackUrl,
+            session.ProjectRoot,
+            session.ActioHome,
+            session.Id);
+        try
+        {
+            store.Save(provisionalMetadata);
+            store.AppendLog(
+                $"starting pid={provisionalMetadata.ProcessId} instance={instanceId} runtime={snapshot.Identity}");
+
+            var deadline = DateTimeOffset.UtcNow + _startupTimeout;
+            while (DateTimeOffset.UtcNow < deadline)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (process.HasExited)
+                {
+                    await WriteWorkerExitAsync(
+                        error,
+                        store,
+                        process,
+                        detachedProcess.CapturesOutput);
+                    TryDeleteOwned(store, instanceId);
+                    return null;
+                }
+
+                var currentMetadata = store.Read().Metadata;
+                if (currentMetadata is not null &&
+                    string.Equals(currentMetadata.InstanceId, instanceId, StringComparison.Ordinal) &&
+                    TryGetBoundPort(currentMetadata.Url, out _))
+                {
+                    var health = await GetHealthAsync(
+                        currentMetadata.Url,
+                        session.ProjectRoot,
+                        snapshot.Identity,
+                        session.Id,
+                        cancellationToken);
+                    if (health.Status == WebServerHealth.Ready &&
+                        IsExpectedWorker(health.Response, currentMetadata))
+                    {
+                        return BuildRunUrl(currentMetadata.Url, runId);
+                    }
+                }
+
+                await Task.Delay(150, cancellationToken);
+            }
+
+            error.WriteLine(
+                $"Actio web UI did not publish a ready project session before the startup timeout.");
+            var lastLogLine = store.ReadLastLogLine();
+            if (lastLogLine is not null)
+            {
+                error.WriteLine($"Last web worker diagnostic: {lastLogLine}");
+            }
+
+            await StopStartedProcessAsync(
+                process,
+                provisionalMetadata,
+                store,
+                cancellationToken);
+            return null;
+        }
+        catch (OperationCanceledException)
+        {
+            TryKill(process);
+            TryDeleteOwned(store, instanceId);
+            throw;
+        }
+        catch (Exception ex) when (IsRecoverableLifecycleError(ex))
+        {
+            TryKill(process);
+            TryDeleteOwned(store, instanceId);
+            error.WriteLine($"Actio web UI worker failed: {ex.Message}");
+            return null;
+        }
+    }
+
     internal static ProcessStartInfo CreateStartInfo(
         WebRuntimeSnapshot snapshot,
         string projectRoot,
         string actioHome,
         string url,
         string instanceId,
-        string ownershipToken)
+        string ownershipToken,
+        string? sessionId = null)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -308,6 +623,11 @@ public sealed class LocalWebServerLauncher : ILocalWebServerLauncher
         startInfo.Environment[InstanceIdEnvironmentVariable] = instanceId;
         startInfo.Environment[ControlTokenEnvironmentVariable] = ownershipToken;
         startInfo.Environment[SnapshotPathEnvironmentVariable] = snapshot.RootPath;
+        if (sessionId is not null)
+        {
+            startInfo.Environment[SessionIdEnvironmentVariable] = sessionId;
+        }
+
         return startInfo;
     }
 
@@ -316,11 +636,28 @@ public sealed class LocalWebServerLauncher : ILocalWebServerLauncher
         string runtimeIdentity,
         CancellationToken cancellationToken)
     {
+        return await GetHealthAsync(
+            _url,
+            projectRoot,
+            runtimeIdentity,
+            expectedSessionId: null,
+            cancellationToken);
+    }
+
+    private async Task<WebServerHealthResult> GetHealthAsync(
+        string url,
+        string projectRoot,
+        string runtimeIdentity,
+        string? expectedSessionId,
+        CancellationToken cancellationToken)
+    {
         try
         {
             using var http = _httpClientFactory();
             http.Timeout = TimeSpan.FromMilliseconds(500);
-            using var response = await http.GetAsync($"{_url}/api/health", cancellationToken);
+            using var response = await http.GetAsync(
+                $"{url.TrimEnd('/')}/api/health",
+                cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
                 return WebServerHealthResult.Offline();
@@ -333,8 +670,10 @@ public sealed class LocalWebServerLauncher : ILocalWebServerLauncher
                 return WebServerHealthResult.DifferentContext(health);
             }
 
-            if (!IsSamePath(health.ProjectRoot, projectRoot) ||
-                !IsSamePath(health.ActioHome, _actioHome))
+            if (!CanonicalPath.AreEquivalent(health.ProjectRoot, projectRoot) ||
+                !CanonicalPath.AreEquivalent(health.ActioHome, _actioHome) ||
+                (expectedSessionId is not null &&
+                    !string.Equals(health.SessionId, expectedSessionId, StringComparison.Ordinal)))
             {
                 return WebServerHealthResult.DifferentContext(health);
             }
@@ -385,7 +724,9 @@ public sealed class LocalWebServerLauncher : ILocalWebServerLauncher
         {
             using var http = _httpClientFactory();
             http.Timeout = _startupTimeout;
-            using var request = new HttpRequestMessage(HttpMethod.Post, $"{_url}/api/internal/shutdown");
+            using var request = new HttpRequestMessage(
+                HttpMethod.Post,
+                $"{metadata.Url.TrimEnd('/')}/api/internal/shutdown");
             request.Headers.Add("X-Actio-Control-Token", metadata.OwnershipToken);
             using var response = await http.SendAsync(request, cancellationToken);
             if (response.StatusCode is not HttpStatusCode.Accepted)
@@ -603,6 +944,7 @@ public sealed class LocalWebServerLauncher : ILocalWebServerLauncher
             health.ProcessStartTimeUtcTicks == metadata.ProcessStartTimeUtcTicks &&
             string.Equals(health.WebInstanceId, metadata.InstanceId, StringComparison.Ordinal) &&
             string.Equals(health.RuntimeIdentity, metadata.RuntimeIdentity, StringComparison.Ordinal) &&
+            string.Equals(health.SessionId, metadata.SessionId, StringComparison.Ordinal) &&
             string.Equals(
                 health.ServerUrl?.TrimEnd('/'),
                 metadata.Url.TrimEnd('/'),
@@ -711,6 +1053,33 @@ public sealed class LocalWebServerLauncher : ILocalWebServerLauncher
             comparison);
     }
 
+    private static string BuildRunUrl(string url, string? runId)
+    {
+        var normalized = url.TrimEnd('/');
+        return runId is null
+            ? normalized
+            : $"{normalized}/runs/{Uri.EscapeDataString(runId)}";
+    }
+
+    private static bool TryGetBoundPort(string url, out int port)
+    {
+        if (Uri.TryCreate(url, UriKind.Absolute, out var uri) &&
+            uri.IsLoopback &&
+            uri.Port > 0)
+        {
+            port = uri.Port;
+            return true;
+        }
+
+        port = 0;
+        return false;
+    }
+
+    private static StringComparison PathComparison =>
+        OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+
     private static bool IsRecoverableLifecycleError(Exception exception)
     {
         return exception is IOException
@@ -760,5 +1129,6 @@ public sealed class LocalWebServerLauncher : ILocalWebServerLauncher
         string? RuntimeIdentity,
         string? WebInstanceId,
         int? ProcessId,
-        long? ProcessStartTimeUtcTicks);
+        long? ProcessStartTimeUtcTicks,
+        string? SessionId);
 }

@@ -24,6 +24,104 @@ public sealed class WebProcessMetadataStoreTests : IDisposable
     }
 
     [Fact]
+    public void ProjectStoreUsesSessionKeyedPathsAndSchemaTwo()
+    {
+        var projectRoot = Path.Combine(_root, "project");
+        var actioHome = Path.Combine(_root, "home");
+        Directory.CreateDirectory(projectRoot);
+        var session = WebProjectSession.Create(projectRoot, actioHome);
+        var store = WebProcessMetadataStore.ForProject(actioHome, session.Id);
+        var metadata = CreateMetadata("instance-a") with
+        {
+            SchemaVersion = 2,
+            ProjectRoot = session.ProjectRoot,
+            ActioHome = session.ActioHome,
+            SessionId = session.Id
+        };
+
+        store.Save(metadata);
+
+        Assert.Equal(metadata, store.Read().Metadata);
+        Assert.EndsWith(
+            Path.Combine("web", "processes", $"{session.Id}.json"),
+            store.MetadataPath);
+        Assert.EndsWith(
+            Path.Combine("web", "locks", $"session-{session.Id}.lock"),
+            store.LaunchLockPath);
+        Assert.EndsWith(
+            Path.Combine("logs", "web", $"{session.Id}.log"),
+            store.LogPath);
+    }
+
+    [Fact]
+    public void ProjectStoreRejectsMetadataForDifferentSessionKey()
+    {
+        var projectRoot = Path.Combine(_root, "wrong-session-project");
+        var actioHome = Path.Combine(_root, "wrong-session-home");
+        Directory.CreateDirectory(projectRoot);
+        var session = WebProjectSession.Create(projectRoot, actioHome);
+        var store = WebProcessMetadataStore.ForProject(actioHome, session.Id);
+        var metadata = CreateMetadata("instance-a") with
+        {
+            SchemaVersion = 2,
+            ProjectRoot = session.ProjectRoot,
+            ActioHome = session.ActioHome,
+            SessionId = new string('a', 24)
+        };
+
+        store.Save(metadata);
+
+        Assert.True(store.Read().IsCorrupt);
+    }
+
+    [Fact]
+    public void ProjectSessionIdentityIsDeterministic()
+    {
+        var projectRoot = Path.Combine(_root, "identity-project");
+        var actioHome = Path.Combine(_root, "identity-home");
+        Directory.CreateDirectory(projectRoot);
+
+        var first = WebProjectSession.Create(projectRoot, actioHome);
+        var second = WebProjectSession.Create(
+            Path.Combine(projectRoot, "."),
+            Path.Combine(actioHome, "."));
+
+        Assert.Equal(first, second);
+        if (OperatingSystem.IsWindows())
+        {
+            var differentCase = WebProjectSession.Create(
+                projectRoot.ToUpperInvariant(),
+                actioHome.ToUpperInvariant());
+            Assert.Equal(first.Id, differentCase.Id);
+        }
+    }
+
+    [Fact]
+    public void ProjectSessionIdentityResolvesDirectoryLinks()
+    {
+        var projectRoot = Path.Combine(_root, "link-project");
+        var projectLink = Path.Combine(_root, "link-alias");
+        var actioHome = Path.Combine(_root, "link-home");
+        Directory.CreateDirectory(projectRoot);
+        try
+        {
+            Directory.CreateSymbolicLink(projectLink, projectRoot);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException
+            or IOException
+            or PlatformNotSupportedException)
+        {
+            return;
+        }
+
+        var direct = WebProjectSession.Create(projectRoot, actioHome);
+        var alias = WebProjectSession.Create(projectLink, actioHome);
+
+        Assert.Equal(direct.Id, alias.Id);
+        Assert.Equal(direct.ProjectRoot, alias.ProjectRoot);
+    }
+
+    [Fact]
     public void CorruptMetadataCanBeQuarantined()
     {
         var store = new WebProcessMetadataStore(_root, "http://127.0.0.1:17345");
@@ -114,6 +212,36 @@ public sealed class WebProcessMetadataStoreTests : IDisposable
 
         Assert.InRange(new FileInfo(store.LogPath).Length, 1, 1024 * 1024);
         Assert.NotEmpty(File.ReadAllText(store.LogPath));
+    }
+
+    [Fact]
+    public void RuntimeUsageLockAllowsConcurrentWorkersButBlocksCleanup()
+    {
+        using var first = WebProcessMetadataStore.OpenRuntimeUsageLock(_root, "runtime");
+        using var second = WebProcessMetadataStore.OpenRuntimeUsageLock(_root, "runtime");
+        var path = WebProcessMetadataStore.GetRuntimeLockPath(_root, "runtime");
+
+        Assert.Throws<IOException>(() =>
+            File.Open(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None));
+    }
+
+    [Fact]
+    public async Task WorkerBindingWaitsForProvisionalMetadata()
+    {
+        var store = new WebProcessMetadataStore(_root, "http://127.0.0.1:17345");
+        var publish = CliApplication.PublishWebWorkerBindingAsync(
+            store,
+            "instance-a",
+            "http://127.0.0.1:54321",
+            TimeSpan.FromSeconds(1),
+            CancellationToken.None);
+
+        await Task.Delay(100);
+        store.Save(CreateMetadata("instance-a"));
+
+        var metadata = await publish;
+
+        Assert.Equal("http://127.0.0.1:54321", metadata.Url);
     }
 
     public void Dispose()

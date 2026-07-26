@@ -415,25 +415,33 @@ public sealed class CliApplication
             }
         }
 
-        var worker = ReadWebWorkerContext(actioHome, runtime.Identity, error);
+        var worker = ReadWebWorkerContext(
+            projectRoot,
+            actioHome,
+            runtime.Identity,
+            error);
         if (worker is null)
         {
             return ExitCodes.ValidationError;
         }
 
-        var processStore = new WebProcessMetadataStore(actioHome, url);
-        await using var runtimeLock = await WebFileLock.TryAcquireAsync(
-            WebProcessMetadataStore.GetRuntimeLockPath(actioHome, runtime.Identity),
-            TimeSpan.FromSeconds(3),
-            cancellationToken);
-        if (runtimeLock is null)
+        var processStore = worker.SessionId is null
+            ? new WebProcessMetadataStore(actioHome, url)
+            : WebProcessMetadataStore.ForProject(actioHome, worker.SessionId);
+        FileStream runtimeLock;
+        try
         {
-            error.WriteLine("Actio web UI worker could not acquire its runtime snapshot lock.");
+            runtimeLock = WebProcessMetadataStore.OpenRuntimeUsageLock(
+                actioHome,
+                runtime.Identity);
+        }
+        catch (Exception ex) when (IsRecoverableWebError(ex))
+        {
+            error.WriteLine($"Actio web UI worker could not acquire its runtime snapshot lock: {ex.Message}");
             return ExitCodes.ValidationError;
         }
 
-        processStore.AppendLog(
-            $"worker ready pid={Environment.ProcessId} instance={worker.InstanceId} runtime={runtime.Identity}");
+        await using var acquiredRuntimeLock = runtimeLock;
         try
         {
             using var process = Process.GetCurrentProcess();
@@ -447,7 +455,20 @@ public sealed class CliApplication
                     WebInstanceId: worker.InstanceId,
                     ProcessId: Environment.ProcessId,
                     ProcessStartTimeUtcTicks: process.StartTime.ToUniversalTime().Ticks,
-                    ControlToken: worker.ControlToken),
+                    ControlToken: worker.ControlToken,
+                    SessionId: worker.SessionId),
+                async (binding, bindingCancellationToken) =>
+                {
+                    var metadata = await PublishWebWorkerBindingAsync(
+                        processStore,
+                        worker.InstanceId,
+                        binding.ServerUrl,
+                        TimeSpan.FromSeconds(3),
+                        bindingCancellationToken);
+
+                    processStore.AppendLog(
+                        $"worker ready pid={Environment.ProcessId} instance={worker.InstanceId} runtime={runtime.Identity} url={binding.ServerUrl}");
+                },
                 cancellationToken);
             return ExitCodes.Success;
         }
@@ -466,6 +487,7 @@ public sealed class CliApplication
     }
 
     internal static WebWorkerContext? ReadWebWorkerContext(
+        string projectRoot,
         string actioHome,
         string runtimeIdentity,
         TextWriter error)
@@ -478,6 +500,8 @@ public sealed class CliApplication
             LocalWebServerLauncher.ControlTokenEnvironmentVariable);
         var snapshotPath = Environment.GetEnvironmentVariable(
             LocalWebServerLauncher.SnapshotPathEnvironmentVariable);
+        var sessionId = Environment.GetEnvironmentVariable(
+            LocalWebServerLauncher.SessionIdEnvironmentVariable);
 
         if (string.IsNullOrWhiteSpace(suppliedRuntimeIdentity) ||
             string.IsNullOrWhiteSpace(instanceId) ||
@@ -502,7 +526,51 @@ public sealed class CliApplication
             return null;
         }
 
-        return new WebWorkerContext(instanceId, controlToken);
+        if (sessionId is not null)
+        {
+            WebProjectSession expectedSession;
+            try
+            {
+                expectedSession = WebProjectSession.Create(projectRoot, actioHome);
+            }
+            catch (Exception ex) when (IsRecoverableWebError(ex))
+            {
+                error.WriteLine($"Actio web worker project session could not be verified: {ex.Message}");
+                return null;
+            }
+
+            if (!string.Equals(sessionId, expectedSession.Id, StringComparison.Ordinal))
+            {
+                error.WriteLine("Actio web worker project session identity is invalid.");
+                return null;
+            }
+        }
+
+        return new WebWorkerContext(instanceId, controlToken, sessionId);
+    }
+
+    internal static async Task<WebProcessMetadata> PublishWebWorkerBindingAsync(
+        WebProcessMetadataStore processStore,
+        string instanceId,
+        string serverUrl,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        do
+        {
+            var metadata = processStore.UpdateUrlIfOwned(instanceId, serverUrl);
+            if (metadata is not null)
+            {
+                return metadata;
+            }
+
+            await Task.Delay(50, cancellationToken);
+        }
+        while (DateTimeOffset.UtcNow < deadline);
+
+        throw new InvalidOperationException(
+            "Actio web worker could not publish its bound URL because its process metadata was not available or changed ownership.");
     }
 
     private static bool IsSamePath(string left, string right)
@@ -529,7 +597,8 @@ public sealed class CliApplication
 
     internal sealed record WebWorkerContext(
         string InstanceId,
-        string ControlToken);
+        string ControlToken,
+        string? SessionId);
 
     private async Task<int> ListCacheAsync(
         TextWriter output,
