@@ -1,4 +1,4 @@
-# Actio
+![Actio workflow runner](docs/assets/actio-banner.png)
 
 [![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
