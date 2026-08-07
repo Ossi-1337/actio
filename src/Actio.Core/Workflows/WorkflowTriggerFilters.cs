@@ -44,10 +44,15 @@ public static class WorkflowTriggerFilterEvaluator
         }
 
         var filters = trigger.Filters;
-        var referenceDecision = EvaluateReferenceFilters(filters, context);
+        var referenceDecision = EvaluateReference(trigger, context);
         if (!referenceDecision.Matches)
         {
             return referenceDecision;
+        }
+
+        if (!string.IsNullOrWhiteSpace(context.Tag))
+        {
+            return Yes("tag trigger matched; path filters do not apply to tag pushes.");
         }
 
         var pathDecision = EvaluatePathFilters(filters, context.ChangedPaths);
@@ -59,10 +64,16 @@ public static class WorkflowTriggerFilterEvaluator
         return Yes("trigger filters matched.");
     }
 
-    private static WorkflowTriggerFilterDecision EvaluateReferenceFilters(
-        WorkflowTriggerFilters filters,
+    public static WorkflowTriggerFilterDecision EvaluateReference(
+        WorkflowTrigger trigger,
         WorkflowTriggerFilterContext context)
     {
+        if (!string.Equals(trigger.EventName, context.EventName, StringComparison.Ordinal))
+        {
+            return No($"event '{context.EventName}' does not match workflow trigger '{trigger.EventName}'.");
+        }
+
+        var filters = trigger.Filters;
         if (!filters.HasBranchFilters && !filters.HasTagFilters)
         {
             return Yes("no branch or tag filters configured.");

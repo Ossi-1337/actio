@@ -9,6 +9,7 @@ The architecture is designed around one main rule: workflow intent must stay sep
 ```mermaid
 flowchart LR
     User["User or terminal"] --> CLI["Actio CLI"]
+    Git["Optional Git pre-push hook"] --> CLI
     Project["Project and .workflows"] --> Core["Workflow understanding"]
     CLI --> Core
     Core --> Engine["Execution engine"]
@@ -92,6 +93,14 @@ The web server reads durable run state instead of depending on live in-memory en
 
 Managed web workers bind only to loopback and run from snapshots under `ACTIO_HOME`, avoiding locks on repository build output.
 
+### Local Git Automation
+
+Actio can install a repository-owned `pre-push` hook. The hook passes Git's proposed destination refs and object ids to the CLI, which discovers workflows, validates all workflow files, evaluates `on.push` filters, and asks the engine to execute matches.
+
+Git protocol handling and hook lifecycle live behind the `Actio.Git` infrastructure boundary. Trigger matching remains Core domain behavior, while the Engine builds deterministic workflow/reference execution plans. Hook runs use ordinary run history, logs, artifacts, cache, cleanup, and Secure Baseline controls, but do not start a web worker.
+
+This is a synchronous local gate, not a daemon or hosted event service. It runs before the remote changes, applies only to clean current `HEAD`, and can be bypassed with Git's `--no-verify`.
+
 ## Data And Ownership
 
 Two roots define ownership:
@@ -138,7 +147,7 @@ Actio currently stays local-first:
 
 - no accounts or shared control plane;
 - no hosted runner fleet;
-- no automatic GitHub event listener;
+- no daemon or hosted Git event listener; optional repository-local pre-push hooks are supported;
 - no automatic `GITHUB_TOKEN`;
 - no guarantee of full GitHub Actions parity;
 - no claim that Docker provides VM-level isolation.

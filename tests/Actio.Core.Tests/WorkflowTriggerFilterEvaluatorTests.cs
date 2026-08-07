@@ -146,6 +146,24 @@ public sealed class WorkflowTriggerFilterEvaluatorTests
         Assert.True(accepted.Matches, accepted.Reason);
     }
 
+    [Fact]
+    public void Evaluate_IgnoresPathFiltersForTagPushes()
+    {
+        var trigger = CreateTrigger(new WorkflowTriggerFilters(
+            [],
+            [],
+            ["v*"],
+            [],
+            ["src/**"],
+            []));
+
+        var decision = WorkflowTriggerFilterEvaluator.Evaluate(
+            trigger,
+            new WorkflowTriggerFilterContext("push", Tag: "v1.0.0"));
+
+        Assert.True(decision.Matches, decision.Reason);
+    }
+
     private static WorkflowTrigger CreateTrigger(WorkflowTriggerFilters filters)
         => new("push", null, filters);
 }

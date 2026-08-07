@@ -12,6 +12,8 @@ public sealed record CliCommand(
     bool Background = false,
     IReadOnlyDictionary<string, string>? Inputs = null,
     string SecurityProfile = RunnerSecurityProfiles.SecureBaseline,
+    string? RemoteName = null,
+    string? RemoteUrl = null,
     string? ErrorMessage = null)
 {
     public IReadOnlyDictionary<string, string> Inputs { get; init; } = Inputs ?? new Dictionary<string, string>();
@@ -57,6 +59,18 @@ public sealed record CliCommand(
 
     public static CliCommand ShowCompatibility()
         => new(CliCommandKind.ShowCompatibility);
+
+    public static CliCommand InstallHooks()
+        => new(CliCommandKind.InstallHooks);
+
+    public static CliCommand ShowHooksStatus()
+        => new(CliCommandKind.ShowHooksStatus);
+
+    public static CliCommand UninstallHooks()
+        => new(CliCommandKind.UninstallHooks);
+
+    public static CliCommand RunPrePushHook(string remoteName, string remoteUrl)
+        => new(CliCommandKind.RunPrePushHook, RemoteName: remoteName, RemoteUrl: remoteUrl);
 
     public static CliCommand UsageError(string message)
         => new(CliCommandKind.UsageError, ErrorMessage: message);

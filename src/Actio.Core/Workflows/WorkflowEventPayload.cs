@@ -10,7 +10,7 @@ public sealed record WorkflowEventPayload(
     public IReadOnlyDictionary<string, string> Inputs { get; init; } = Inputs ?? new Dictionary<string, string>();
 
     public IReadOnlyDictionary<string, string> Properties { get; init; } =
-        Properties ?? CreateDefaultProperties(EventName, Source, Action);
+        CreateProperties(EventName, Source, Action, Properties);
 
     public static WorkflowEventPayload Create(
         string eventName,
@@ -58,7 +58,9 @@ public sealed record WorkflowEventPayload(
         var properties = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["event_name"] = eventName,
-            ["source"] = source
+            ["source"] = source,
+            ["diff_base"] = "HEAD",
+            ["new_ref"] = "false"
         };
 
         if (!string.IsNullOrWhiteSpace(action))
@@ -67,5 +69,25 @@ public sealed record WorkflowEventPayload(
         }
 
         return properties;
+    }
+
+    private static IReadOnlyDictionary<string, string> CreateProperties(
+        string eventName,
+        string source,
+        string? action,
+        IReadOnlyDictionary<string, string>? properties)
+    {
+        var merged = new Dictionary<string, string>(
+            CreateDefaultProperties(eventName, source, action),
+            StringComparer.Ordinal);
+        if (properties is not null)
+        {
+            foreach (var property in properties)
+            {
+                merged[property.Key] = property.Value;
+            }
+        }
+
+        return merged;
     }
 }

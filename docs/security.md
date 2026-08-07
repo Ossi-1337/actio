@@ -8,4 +8,6 @@ The local web server binds only to literal loopback HTTP addresses and applies s
 
 Residual risks remain: Docker is not a VM boundary, the workspace is writable, the Docker daemon and host kernel are trusted, other same-user local processes can reach loopback services, and reviewed external code still executes locally. Actio never creates an automatic `GITHUB_TOKEN`.
 
+The optional managed Git pre-push hook is a convenience gate, not a security boundary. It runs before the remote changes and blocks ordinary pushes on workflow failure, but users can bypass Git hooks with `git push --no-verify`.
+
 Use immutable action commit SHAs and image digests where possible. See [SECURITY.md](../SECURITY.md) for private reporting.

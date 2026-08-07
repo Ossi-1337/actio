@@ -11,6 +11,10 @@ public enum CliCommandKind
     ListCache,
     CleanCache,
     ShowCompatibility,
+    InstallHooks,
+    ShowHooksStatus,
+    UninstallHooks,
+    RunPrePushHook,
     ShowRootHelp,
     ShowRunHelp,
     ShowValidateHelp,
@@ -20,6 +24,7 @@ public enum CliCommandKind
     ShowWebHelp,
     ShowCacheHelp,
     ShowCompatibilityHelp,
+    ShowHooksHelp,
     ShowVersion,
     UsageError
 }

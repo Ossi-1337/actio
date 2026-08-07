@@ -32,6 +32,8 @@ jobs:
       core_tests: ${{ steps.filter.outputs.core_tests }}
       engine_src: ${{ steps.filter.outputs.engine_src }}
       engine_tests: ${{ steps.filter.outputs.engine_tests }}
+      git_src: ${{ steps.filter.outputs.git_src }}
+      git_tests: ${{ steps.filter.outputs.git_tests }}
       runner_docker_src: ${{ steps.filter.outputs.runner_docker_src }}
       runner_docker_tests: ${{ steps.filter.outputs.runner_docker_tests }}
       storage_src: ${{ steps.filter.outputs.storage_src }}
@@ -48,7 +50,7 @@ jobs:
         uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706
         with:
           token: ''
-          base: HEAD
+          base: ${{ github.event.diff_base }}
           filters: |
             cli_src:
               - 'src/Actio.Cli/**'
@@ -62,6 +64,10 @@ jobs:
               - 'src/Actio.Engine/**'
             engine_tests:
               - 'tests/Actio.Engine.Tests/**'
+            git_src:
+              - 'src/Actio.Git/**'
+            git_tests:
+              - 'tests/Actio.Git.Tests/**'
             runner_docker_src:
               - 'src/Actio.Runner.Docker/**'
             runner_docker_tests:
@@ -96,6 +102,7 @@ jobs:
     if: >-
       ${{
         inputs.force_all == 'true' ||
+        github.event.new_ref == 'true' ||
         needs.changes.outputs.shared == 'true' ||
         needs.changes.outputs.cli_src == 'true' ||
         needs.changes.outputs.cli_tests == 'true' ||
@@ -103,6 +110,8 @@ jobs:
         needs.changes.outputs.core_tests == 'true' ||
         needs.changes.outputs.engine_src == 'true' ||
         needs.changes.outputs.engine_tests == 'true' ||
+        needs.changes.outputs.git_src == 'true' ||
+        needs.changes.outputs.git_tests == 'true' ||
         needs.changes.outputs.runner_docker_src == 'true' ||
         needs.changes.outputs.runner_docker_tests == 'true' ||
         needs.changes.outputs.storage_src == 'true' ||
@@ -132,6 +141,7 @@ jobs:
     if: >-
       ${{
         inputs.force_all == 'true' ||
+        github.event.new_ref == 'true' ||
         needs.changes.outputs.shared == 'true' ||
         needs.changes.outputs.core_src == 'true' ||
         needs.changes.outputs.core_tests == 'true'
@@ -152,6 +162,7 @@ jobs:
     if: >-
       ${{
         inputs.force_all == 'true' ||
+        github.event.new_ref == 'true' ||
         needs.changes.outputs.shared == 'true' ||
         needs.changes.outputs.core_src == 'true' ||
         needs.changes.outputs.engine_src == 'true' ||
@@ -173,6 +184,7 @@ jobs:
     if: >-
       ${{
         inputs.force_all == 'true' ||
+        github.event.new_ref == 'true' ||
         needs.changes.outputs.shared == 'true' ||
         needs.changes.outputs.core_src == 'true' ||
         needs.changes.outputs.engine_src == 'true' ||
@@ -189,12 +201,34 @@ jobs:
       - name: Run Docker Runner tests
         run: dotnet test tests/Actio.Runner.Docker.Tests/Actio.Runner.Docker.Tests.csproj --configuration Release --artifacts-path /tmp/actio-artifacts
 
+  test_git:
+    name: Test Git
+    needs: changes
+    if: >-
+      ${{
+        inputs.force_all == 'true' ||
+        github.event.new_ref == 'true' ||
+        needs.changes.outputs.shared == 'true' ||
+        needs.changes.outputs.git_src == 'true' ||
+        needs.changes.outputs.git_tests == 'true'
+      }}
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/dotnet/sdk:10.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Run Git tests
+        run: dotnet test tests/Actio.Git.Tests/Actio.Git.Tests.csproj --configuration Release --artifacts-path /tmp/actio-artifacts
+
   test_storage:
     name: Test Storage
     needs: changes
     if: >-
       ${{
         inputs.force_all == 'true' ||
+        github.event.new_ref == 'true' ||
         needs.changes.outputs.shared == 'true' ||
         needs.changes.outputs.core_src == 'true' ||
         needs.changes.outputs.engine_src == 'true' ||
@@ -217,6 +251,7 @@ jobs:
     if: >-
       ${{
         inputs.force_all == 'true' ||
+        github.event.new_ref == 'true' ||
         needs.changes.outputs.shared == 'true' ||
         needs.changes.outputs.core_src == 'true' ||
         needs.changes.outputs.engine_src == 'true' ||
@@ -240,11 +275,14 @@ jobs:
     if: >-
       ${{
         inputs.force_all == 'true' ||
+        github.event.new_ref == 'true' ||
         needs.changes.outputs.shared == 'true' ||
         needs.changes.outputs.cli_src == 'true' ||
         needs.changes.outputs.cli_tests == 'true' ||
         needs.changes.outputs.core_src == 'true' ||
         needs.changes.outputs.engine_src == 'true' ||
+        needs.changes.outputs.git_src == 'true' ||
+        needs.changes.outputs.git_tests == 'true' ||
         needs.changes.outputs.runner_docker_src == 'true' ||
         needs.changes.outputs.storage_src == 'true' ||
         needs.changes.outputs.web_src == 'true'

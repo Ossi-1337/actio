@@ -15,6 +15,7 @@ public static class CliHelpText
           actio cancel <run-id>
           actio compatibility
           actio cache <command>
+          actio hooks <command>
           actio [options]
 
         Commands:
@@ -27,6 +28,7 @@ public static class CliHelpText
           cancel <run-id>      Request cancellation for a running workflow run.
           compatibility        Show the known GitHub Actions compatibility matrix.
           cache                Inspect or clean Actio cache entries.
+          hooks                Manage the local Git pre-push hook.
 
         Arguments:
           <workflow>.yml       Bare workflow filename, for example ci.yml.
@@ -47,6 +49,7 @@ public static class CliHelpText
           actio cancel 20260703090029234-555a1799
           actio compatibility
           actio cache list
+          actio hooks install
           actio run --help
         """;
 
@@ -214,5 +217,36 @@ public static class CliHelpText
 
         Examples:
           actio compatibility
+        """;
+
+    public const string Hooks = """
+        Actio hooks - manage local Git pre-push automation.
+
+        Usage:
+          actio hooks install
+          actio hooks status
+          actio hooks uninstall
+
+        Commands:
+          install              Install Actio's managed .git/hooks/pre-push hook.
+          status               Show whether the pre-push hook is installed.
+          uninstall            Remove only an Actio-managed pre-push hook.
+
+        Options:
+          -h, --help           Show help for the hooks command.
+
+        Description:
+          The hook discovers workflows with an on.push trigger, evaluates destination
+          branch, tag, and changed-path filters, then runs matching workflows before
+          Git updates the remote. A failed workflow blocks the push.
+
+          Installation must run from the repository root and requires actio on PATH.
+          Existing non-Actio hooks, custom core.hooksPath, and linked worktrees are not
+          modified. Git push --no-verify can bypass the hook.
+
+        Examples:
+          actio hooks install
+          actio hooks status
+          actio hooks uninstall
         """;
 }

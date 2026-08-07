@@ -1489,7 +1489,7 @@ public sealed partial class WorkflowParser
             errors,
             originalErrorCount,
             warnings,
-            "workflow.on is parsed as trigger metadata, but Actio still runs workflows only when invoked locally.");
+            "workflow.on is parsed as trigger metadata. Push triggers require an installed Actio pre-push hook; other events do not start background automation.");
     }
 
     private static WorkflowPermissions ReadPermissions(

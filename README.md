@@ -17,6 +17,17 @@ dotnet run --project src/Actio.Cli -- ci.yml
 
 Use `actio --help` after installing the CLI. `actio compatibility` shows the current action support matrix.
 
+## Git Pre-Push
+
+Install optional repository-local automation from the Git repository root:
+
+```bash
+actio hooks install
+actio hooks status
+```
+
+The managed hook runs workflows whose `on.push` branch, tag, and path filters match the refs being pushed. It requires a clean current `HEAD`, blocks the push when validation or execution fails, and never starts the web UI. `git push --no-verify` bypasses local hooks.
+
 ## Platform Status
 
 Linux and Windows are verification targets. macOS is best effort and currently unverified. Actio is under active development and does not yet promise a stable workflow compatibility surface.

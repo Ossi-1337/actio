@@ -6,7 +6,9 @@ using Actio.Engine.Caching;
 using Actio.Engine.Configuration;
 using Actio.Engine.Execution;
 using Actio.Engine.Runs;
+using Actio.Engine.Triggers;
 using Actio.Engine.Validation;
+using Actio.Git;
 using Actio.Runner.Docker;
 using Actio.Storage;
 using Actio.Web;
@@ -29,6 +31,8 @@ public sealed class CliApplication
     private readonly Func<string> _createRunId;
     private readonly IActioConfigurationProvider _configurationProvider;
     private readonly WorkflowStaticValidator _staticValidator;
+    private readonly IGitHookManager _gitHookManager;
+    private readonly IGitRepositoryClient _gitRepository;
 
     public CliApplication()
         : this(
@@ -42,7 +46,9 @@ public sealed class CliApplication
             new CliOutputFormatter(),
             new FileSystemLocalValueProvider(),
             configurationProvider: new FileSystemActioConfigurationProvider(),
-            staticValidator: new WorkflowStaticValidator())
+            staticValidator: new WorkflowStaticValidator(),
+            gitHookManager: new GitHookManager(),
+            gitRepository: new GitRepositoryClient())
     {
     }
 
@@ -59,7 +65,9 @@ public sealed class CliApplication
         FileSystemRunStore? runStore = null,
         Func<string>? createRunId = null,
         IActioConfigurationProvider? configurationProvider = null,
-        WorkflowStaticValidator? staticValidator = null)
+        WorkflowStaticValidator? staticValidator = null,
+        IGitHookManager? gitHookManager = null,
+        IGitRepositoryClient? gitRepository = null)
     {
         _resolver = resolver;
         _parser = parser;
@@ -74,6 +82,8 @@ public sealed class CliApplication
         _createRunId = createRunId ?? _runStore.CreateRunId;
         _configurationProvider = configurationProvider ?? new FileSystemActioConfigurationProvider();
         _staticValidator = staticValidator ?? new WorkflowStaticValidator();
+        _gitRepository = gitRepository ?? new GitRepositoryClient();
+        _gitHookManager = gitHookManager ?? new GitHookManager(_gitRepository);
     }
 
     public int Run(string[] args, string workingDirectory, TextWriter output, TextWriter error)
@@ -81,9 +91,36 @@ public sealed class CliApplication
         return RunAsync(args, workingDirectory, output, error).GetAwaiter().GetResult();
     }
 
+    public int Run(
+        string[] args,
+        string workingDirectory,
+        TextReader input,
+        TextWriter output,
+        TextWriter error)
+    {
+        return RunAsync(args, workingDirectory, input, output, error).GetAwaiter().GetResult();
+    }
+
     public async Task<int> RunAsync(
         string[] args,
         string workingDirectory,
+        TextWriter output,
+        TextWriter error,
+        CancellationToken cancellationToken = default)
+    {
+        return await RunAsync(
+            args,
+            workingDirectory,
+            TextReader.Null,
+            output,
+            error,
+            cancellationToken);
+    }
+
+    public async Task<int> RunAsync(
+        string[] args,
+        string workingDirectory,
+        TextReader input,
         TextWriter output,
         TextWriter error,
         CancellationToken cancellationToken = default)
@@ -119,6 +156,9 @@ public sealed class CliApplication
             case CliCommandKind.ShowCompatibilityHelp:
                 output.WriteLine(CliHelpText.Compatibility);
                 return ExitCodes.Success;
+            case CliCommandKind.ShowHooksHelp:
+                output.WriteLine(CliHelpText.Hooks);
+                return ExitCodes.Success;
             case CliCommandKind.ShowVersion:
                 output.WriteLine($"actio {CliVersion.GetVersion()}");
                 return ExitCodes.Success;
@@ -144,6 +184,29 @@ public sealed class CliApplication
             case CliCommandKind.ShowCompatibility:
                 output.WriteLine(ActionCompatibilityFormatter.Format(KnownActionCompatibilityCatalog.Entries));
                 return ExitCodes.Success;
+            case CliCommandKind.InstallHooks:
+                return await RunHookLifecycleAsync(
+                    () => _gitHookManager.InstallAsync(workingDirectory, cancellationToken),
+                    output,
+                    error);
+            case CliCommandKind.ShowHooksStatus:
+                return await RunHookLifecycleAsync(
+                    () => _gitHookManager.GetStatusAsync(workingDirectory, cancellationToken),
+                    output,
+                    error);
+            case CliCommandKind.UninstallHooks:
+                return await RunHookLifecycleAsync(
+                    () => _gitHookManager.UninstallAsync(workingDirectory, cancellationToken),
+                    output,
+                    error);
+            case CliCommandKind.RunPrePushHook:
+                return await RunPrePushHookAsync(
+                    command,
+                    workingDirectory,
+                    input,
+                    output,
+                    error,
+                    cancellationToken);
             default:
                 throw new InvalidOperationException($"Unsupported CLI command kind '{command.Kind}'.");
         }
@@ -189,7 +252,9 @@ public sealed class CliApplication
             null,
             output,
             error,
-            cancellationToken);
+            cancellationToken,
+            runTrigger: null,
+            startWebServer: true);
     }
 
     private int ValidateWorkflow(
@@ -294,7 +359,9 @@ public sealed class CliApplication
             sourceRun,
             output,
             error,
-            cancellationToken);
+            cancellationToken,
+            runTrigger: null,
+            startWebServer: true);
     }
 
     private async Task<int> CancelRunAsync(
@@ -352,6 +419,264 @@ public sealed class CliApplication
         return ExitCodes.Success;
     }
 
+    private static async Task<int> RunHookLifecycleAsync(
+        Func<Task<GitHookResult>> operation,
+        TextWriter output,
+        TextWriter error)
+    {
+        GitHookResult result;
+        try
+        {
+            result = await operation();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            error.WriteLine($"Git hook operation failed: {ex.Message}");
+            return ExitCodes.ValidationError;
+        }
+
+        (result.Success ? output : error).WriteLine(result.Message);
+        if (result.HookPath is not null)
+        {
+            (result.Success ? output : error).WriteLine($"Hook: {result.HookPath}");
+        }
+
+        return result.Success ? ExitCodes.Success : ExitCodes.ValidationError;
+    }
+
+    private async Task<int> RunPrePushHookAsync(
+        CliCommand command,
+        string workingDirectory,
+        TextReader input,
+        TextWriter output,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(command.RemoteName))
+        {
+            error.WriteLine("Git pre-push remote name is invalid.");
+            return ExitCodes.ValidationError;
+        }
+
+        var repositoryResult = await _gitRepository.InspectAsync(workingDirectory, cancellationToken);
+        if (!repositoryResult.Success)
+        {
+            WriteErrors(error, repositoryResult.Errors);
+            return ExitCodes.ValidationError;
+        }
+
+        var parsedInput = GitPrePushInputParser.Parse(await input.ReadToEndAsync(cancellationToken));
+        if (!parsedInput.Success)
+        {
+            WriteErrors(error, parsedInput.Errors);
+            return ExitCodes.ValidationError;
+        }
+
+        var projectRoot = repositoryResult.Value!.ProjectRoot;
+        IReadOnlyList<PushWorkflowSource>? workflowSources;
+        try
+        {
+            workflowSources = ParsePushWorkflowSources(projectRoot, error);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            error.WriteLine($"Git pre-push workflows could not be read: {ex.Message}");
+            return ExitCodes.ValidationError;
+        }
+
+        if (workflowSources is null)
+        {
+            return ExitCodes.ValidationError;
+        }
+
+        var updates = parsedInput.Updates
+            .Where(update => !update.IsDeletion && update.ReferenceKind != GitReferenceKind.Unsupported)
+            .ToArray();
+        var candidateUpdates = updates
+            .Where(update => HasReferenceMatch(workflowSources, update))
+            .ToArray();
+        if (candidateUpdates.Length == 0)
+        {
+            output.WriteLine("No push-triggered workflows matched.");
+            return ExitCodes.Success;
+        }
+
+        var cleanResult = await _gitRepository.IsCleanAsync(projectRoot, cancellationToken);
+        if (!cleanResult.Success)
+        {
+            WriteErrors(error, cleanResult.Errors);
+            return ExitCodes.ValidationError;
+        }
+
+        if (!cleanResult.Value)
+        {
+            error.WriteLine("Git pre-push validation requires a clean worktree, including no untracked files.");
+            error.WriteLine("Commit, remove, or ignore local changes before pushing.");
+            return ExitCodes.ValidationError;
+        }
+
+        var headResult = await _gitRepository.GetHeadAsync(projectRoot, cancellationToken);
+        if (!headResult.Success)
+        {
+            WriteErrors(error, headResult.Errors);
+            return ExitCodes.ValidationError;
+        }
+
+        var nonHeadUpdate = candidateUpdates.FirstOrDefault(update =>
+            !string.Equals(update.LocalObjectId, headResult.Value, StringComparison.OrdinalIgnoreCase));
+        if (nonHeadUpdate is not null)
+        {
+            error.WriteLine(
+                $"Git pre-push validation supports only current HEAD. '{nonHeadUpdate.RemoteRef}' points to a different local object.");
+            error.WriteLine("Check out the commit you intend to push, then retry.");
+            return ExitCodes.ValidationError;
+        }
+
+        var references = new List<PushReferenceEvent>();
+        foreach (var update in candidateUpdates)
+        {
+            var pathsResult = await _gitRepository.GetChangedPathsAsync(projectRoot, update, cancellationToken);
+            if (!pathsResult.Success)
+            {
+                WriteErrors(error, pathsResult.Errors);
+                return ExitCodes.ValidationError;
+            }
+
+            references.Add(new PushReferenceEvent(
+                update.RemoteRef,
+                update.ReferenceName,
+                update.ReferenceKind == GitReferenceKind.Branch ? "branch" : "tag",
+                update.RemoteObjectId,
+                update.LocalObjectId,
+                pathsResult.Value!));
+        }
+
+        var plan = PushWorkflowPlanner.Create(workflowSources, references);
+        if (plan.Count == 0)
+        {
+            output.WriteLine("No push-triggered workflows matched.");
+            return ExitCodes.Success;
+        }
+
+        var exitCode = ExitCodes.Success;
+        var remoteName = IsSafeRemoteName(command.RemoteName, command.RemoteUrl)
+            ? command.RemoteName
+            : "direct";
+        foreach (var entry in plan)
+        {
+            output.WriteLine(
+                $"[pre-push] {entry.Source.Workflow.Name} ({entry.Reference.ReferenceType} {entry.Reference.ReferenceName})");
+
+            var properties = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["remote"] = remoteName,
+                ["ref"] = entry.Reference.FullReference,
+                ["ref_name"] = entry.Reference.ReferenceName,
+                ["ref_type"] = entry.Reference.ReferenceType,
+                ["before"] = entry.Reference.BeforeSha,
+                ["after"] = entry.Reference.AfterSha,
+                ["new_ref"] = IsZeroObjectId(entry.Reference.BeforeSha) ? "true" : "false",
+                ["diff_base"] = IsZeroObjectId(entry.Reference.BeforeSha) ? "HEAD" : entry.Reference.BeforeSha
+            };
+            var payload = WorkflowEventPayload.Create(
+                "push",
+                "Git pre-push",
+                properties: properties);
+            var trigger = new WorkflowRunTrigger(
+                "push",
+                "Git pre-push",
+                EventPayload: payload);
+
+            var workflowExitCode = await ExecuteWorkflowAsync(
+                entry.Source.Workflow,
+                projectRoot,
+                entry.Source.WorkflowPath,
+                new Dictionary<string, string>(),
+                "Git pre-push",
+                RunnerSecurityProfiles.SecureBaseline,
+                null,
+                output,
+                error,
+                cancellationToken,
+                trigger,
+                startWebServer: false);
+            if (workflowExitCode != ExitCodes.Success)
+            {
+                exitCode = ExitCodes.ValidationError;
+            }
+        }
+
+        return exitCode;
+    }
+
+    private IReadOnlyList<PushWorkflowSource>? ParsePushWorkflowSources(
+        string projectRoot,
+        TextWriter error)
+    {
+        var sources = new List<PushWorkflowSource>();
+        var errors = new List<string>();
+
+        foreach (var path in WorkflowFileCatalog.Discover(projectRoot))
+        {
+            var parseResult = _parser.ParseFile(path);
+            var relativePath = Path.GetRelativePath(projectRoot, path);
+            foreach (var warning in parseResult.Warnings)
+            {
+                error.WriteLine($"Workflow warning: {relativePath}: {warning}");
+            }
+
+            if (!parseResult.Success)
+            {
+                errors.AddRange(parseResult.Errors.Select(parseError => $"{relativePath}: {parseError}"));
+                continue;
+            }
+
+            sources.Add(new PushWorkflowSource(path, parseResult.Workflow!));
+        }
+
+        if (errors.Count == 0)
+        {
+            return sources;
+        }
+
+        error.WriteLine("Git pre-push workflow validation failed:");
+        foreach (var parseError in errors)
+        {
+            error.WriteLine($" - {parseError}");
+        }
+
+        return null;
+    }
+
+    private static bool HasReferenceMatch(
+        IReadOnlyList<PushWorkflowSource> workflows,
+        GitPushRefUpdate update)
+    {
+        var context = update.ReferenceKind == GitReferenceKind.Branch
+            ? new WorkflowTriggerFilterContext("push", Branch: update.ReferenceName)
+            : new WorkflowTriggerFilterContext("push", Tag: update.ReferenceName);
+
+        return workflows
+            .SelectMany(source => source.Workflow.Triggers)
+            .Where(trigger => string.Equals(trigger.EventName, "push", StringComparison.Ordinal))
+            .Any(trigger => WorkflowTriggerFilterEvaluator.EvaluateReference(trigger, context).Matches);
+    }
+
+    private static bool IsSafeRemoteName(string remoteName, string? remoteUrl)
+    {
+        if (string.Equals(remoteName, remoteUrl, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return remoteName.All(character =>
+            char.IsAsciiLetterOrDigit(character) ||
+            character is '.' or '_' or '-');
+    }
+
+    private static bool IsZeroObjectId(string value)
+        => value.Length > 0 && value.All(character => character == '0');
+
     private async Task<int> ExecuteWorkflowAsync(
         WorkflowDocument workflow,
         string projectRoot,
@@ -362,7 +687,9 @@ public sealed class CliApplication
         WorkflowRunRecord? rerunSource,
         TextWriter output,
         TextWriter error,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        WorkflowRunTrigger? runTrigger,
+        bool startWebServer)
     {
         if (workflow.IsReusableOnly)
         {
@@ -371,7 +698,9 @@ public sealed class CliApplication
             return ExitCodes.ValidationError;
         }
 
-        var inputResolution = WorkflowDispatchInputResolver.Resolve(workflow, inputs);
+        var inputResolution = runTrigger is null
+            ? WorkflowDispatchInputResolver.Resolve(workflow, inputs)
+            : WorkflowDispatchInputResolutionResult.Resolved(runTrigger.Inputs);
         if (!inputResolution.Success)
         {
             WriteErrors(error, inputResolution.Errors);
@@ -393,16 +722,21 @@ public sealed class CliApplication
         }
 
         var runId = _createRunId();
-        var wrotePipelineLink = await WriteViewPipelineLinkAsync(
-            projectRoot,
-            runId,
-            output,
-            error,
-            addLeadingSeparator: false,
-            cancellationToken);
+        var wrotePipelineLink = startWebServer && await WriteViewPipelineLinkAsync(
+                projectRoot,
+                runId,
+                output,
+                error,
+                addLeadingSeparator: false,
+                cancellationToken);
 
         if (wrotePipelineLink)
         {
+            output.WriteLine();
+        }
+        else if (!startWebServer)
+        {
+            output.WriteLine($"Run: {runId}");
             output.WriteLine();
         }
 
@@ -411,7 +745,7 @@ public sealed class CliApplication
                 projectRoot,
                 workflowPath,
                 runId,
-                new WorkflowRunTrigger("workflow_dispatch", triggerSource, inputResolution.Inputs),
+                runTrigger ?? new WorkflowRunTrigger("workflow_dispatch", triggerSource, inputResolution.Inputs),
                 Secrets: localValues.Values.Secrets,
                 Variables: localValues.Values.Variables,
                 RunnerPolicy: new RunnerExecutionPolicy(

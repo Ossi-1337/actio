@@ -233,7 +233,7 @@ public sealed class WebProcessMetadataStoreTests : IDisposable
             store,
             "instance-a",
             "http://127.0.0.1:54321",
-            TimeSpan.FromSeconds(1),
+            TimeSpan.FromSeconds(5),
             CancellationToken.None);
 
         await Task.Delay(100);

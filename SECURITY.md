@@ -16,5 +16,6 @@ Private reporting must be enabled in repository settings before the first public
 - Actio does not create GitHub's automatic `GITHUB_TOKEN` or an OIDC token.
 - External action code executes locally. Commit SHAs and image digests are safer than mutable tags.
 - Secrets must be explicitly bound and remain the workflow author's responsibility.
+- The optional pre-push hook is a local convenience gate and can be bypassed with `git push --no-verify`.
 
 See [the security overview](docs/security.md) for the implemented controls and residual risks.

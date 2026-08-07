@@ -61,6 +61,11 @@ public sealed class CliParser
             return ParseCompatibilityCommand(args);
         }
 
+        if (string.Equals(args[0], "hooks", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseHooksCommand(args);
+        }
+
         if (IsWorkflowFilename(args[0]))
         {
             return ParseShorthandRunCommand(args);
@@ -414,6 +419,43 @@ public sealed class CliParser
         return args[1].StartsWith("-", StringComparison.Ordinal)
             ? CliCommand.UsageError($"Unknown option '{args[1]}' for 'compatibility'.")
             : CliCommand.UsageError($"Unexpected argument '{args[1]}' for 'compatibility'.");
+    }
+
+    private static CliCommand ParseHooksCommand(IReadOnlyList<string> args)
+    {
+        if (args.Count == 1 || args.Count == 2 && IsHelp(args[1]))
+        {
+            return new CliCommand(CliCommandKind.ShowHooksHelp);
+        }
+
+        if (string.Equals(args[1], "run", StringComparison.OrdinalIgnoreCase))
+        {
+            if (args.Count != 5 ||
+                !string.Equals(args[2], "pre-push", StringComparison.OrdinalIgnoreCase))
+            {
+                return CliCommand.UsageError("Internal hook invocation is invalid.");
+            }
+
+            return CliCommand.RunPrePushHook(args[3], args[4]);
+        }
+
+        if (args.Count > 2)
+        {
+            return CliCommand.UsageError($"Unexpected argument '{args[2]}' for 'hooks'.");
+        }
+
+        if (args[1].StartsWith("-", StringComparison.Ordinal))
+        {
+            return CliCommand.UsageError($"Unknown option '{args[1]}' for 'hooks'.");
+        }
+
+        return args[1].ToLowerInvariant() switch
+        {
+            "install" => CliCommand.InstallHooks(),
+            "status" => CliCommand.ShowHooksStatus(),
+            "uninstall" => CliCommand.UninstallHooks(),
+            _ => CliCommand.UsageError($"Unknown hooks command '{args[1]}'.")
+        };
     }
 
     private static bool IsHelp(string arg)
