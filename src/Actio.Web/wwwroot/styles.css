@@ -347,8 +347,13 @@ input[type="search"] {
 
 .detail {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   align-content: start;
   gap: 16px;
+  min-width: 0;
+}
+
+.detail > * {
   min-width: 0;
 }
 
@@ -631,6 +636,23 @@ pre {
   align-items: start;
 }
 
+.security-row > :last-child {
+  min-width: 0;
+}
+
+.security-row .job-name,
+.security-row .run-sub,
+.security-message,
+.security-recommendation {
+  overflow-wrap: anywhere;
+}
+
+.security-row .job-name,
+.security-row .run-sub {
+  display: block;
+  white-space: normal;
+}
+
 .security-level {
   border-radius: 999px;
   padding: 3px 8px;
@@ -795,6 +817,12 @@ pre {
   justify-content: flex-end;
   padding: 12px 14px;
   border-top: 1px solid var(--line-soft);
+}
+
+@media (max-width: 1280px) {
+  .content-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 980px) {
