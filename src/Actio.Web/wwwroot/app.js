@@ -4,12 +4,14 @@ const pollHiddenMilliseconds = 15000;
 const previewLineCount = 10;
 const runsPerPage = 10;
 const themeStorageKey = "actio-theme";
+const initialRunRoute = parseRunRoute(location.pathname);
 
 const state = {
   workflows: [],
   runs: [],
   selectedRun: null,
-  selectedRunId: location.pathname.startsWith("/runs/") ? decodeURIComponent(location.pathname.split("/").pop()) : null,
+  selectedRunId: initialRunRoute.runId,
+  selectedJobId: initialRunRoute.jobId,
   currentView: location.pathname.startsWith("/settings") ? "settings" : "runs",
   runView: "details",
   filter: "",
@@ -18,7 +20,7 @@ const state = {
   health: null,
   cache: { cacheRoot: "", entries: [] },
   cacheMessage: "",
-  openLogs: new Set(),
+  expandedSteps: new Set(),
   logContents: new Map(),
   workflowFiles: new Map(),
   workflowMessages: new Map(),
@@ -63,12 +65,30 @@ el.navLinks.forEach(link => {
     event.preventDefault();
     const view = link.dataset.viewLink === "settings" ? "settings" : "runs";
     state.currentView = view;
+    if (view === "runs") {
+      state.selectedJobId = null;
+      state.runView = "details";
+    }
     history.pushState(null, "", view === "settings" ? "/settings" : selectedRunPath());
     await render();
   });
 });
 
 document.addEventListener("click", async event => {
+  const jobLink = event.target.closest("[data-job-link]");
+  if (jobLink) {
+    event.preventDefault();
+    await selectJob(jobLink.dataset.jobLink);
+    return;
+  }
+
+  const runBackLink = event.target.closest("[data-run-back]");
+  if (runBackLink) {
+    event.preventDefault();
+    await selectRun(state.selectedRunId);
+    return;
+  }
+
   const runViewButton = event.target.closest("[data-run-view]");
   if (runViewButton) {
     await selectRunView(runViewButton.dataset.runView);
@@ -137,8 +157,10 @@ document.addEventListener("keydown", async event => {
 });
 
 window.addEventListener("popstate", () => {
+  const runRoute = parseRunRoute(location.pathname);
   state.currentView = location.pathname.startsWith("/settings") ? "settings" : "runs";
-  state.selectedRunId = location.pathname.startsWith("/runs/") ? decodeURIComponent(location.pathname.split("/").pop()) : null;
+  state.selectedRunId = runRoute.runId;
+  state.selectedJobId = runRoute.jobId;
   state.runView = "details";
   render();
 });
@@ -228,6 +250,7 @@ function renderWorkflows() {
       event.preventDefault();
       state.currentView = "runs";
       state.runView = "history";
+      state.selectedJobId = null;
       state.filter = item.dataset.workflow.toLowerCase();
       state.runPage = 1;
       el.filter.value = item.dataset.workflow;
@@ -346,7 +369,14 @@ async function renderDetail() {
 
     state.selectedRun = null;
     el.title.textContent = "Workflow runs";
-    el.detail.innerHTML = `<section class="summary"><div class="empty">Run is not available yet.</div></section>`;
+    el.detail.innerHTML = `
+      <section class="job-section job-detail">
+        <div class="job-head">
+          <a class="job-back" href="/">${chevronLeftIcon()}<span>Back to runs</span></a>
+        </div>
+        <div class="empty">Run is not available yet.</div>
+      </section>
+    `;
     return;
   }
 
@@ -355,6 +385,18 @@ async function renderDetail() {
   }
 
   state.selectedRun = run;
+
+  if (state.selectedJobId) {
+    const job = run.jobs.find(item => item.id === state.selectedJobId);
+    el.title.textContent = job?.name ?? run.workflowName;
+    el.detail.innerHTML = job ? renderJobDetail(run, job) : renderMissingJob(run);
+    if (job) {
+      wireStepAccordions(run);
+      await refreshOpenLogs(run);
+    }
+    return;
+  }
+
   el.title.textContent = run.workflowName;
   el.detail.innerHTML = [
     renderSummary(run),
@@ -362,13 +404,10 @@ async function renderDetail() {
     renderSecurity(run),
     renderArtifacts(run),
     renderOutputs(run),
-    renderJobs(run),
     renderWorkflowFileShell(run)
   ].join("");
 
-  wireLogButtons(run);
   await loadWorkflowFile(run.runId);
-  await refreshOpenLogs(run);
 }
 
 function renderSummary(run) {
@@ -639,7 +678,7 @@ function renderGraph(run) {
       <div class="graph">
         ${run.jobs.map((job, index) => `
           ${index === 0 ? "" : `<span class="connector"></span>`}
-          <div class="job-node">
+          <a class="job-node" href="${jobPath(run.runId, job.id)}" data-job-link="${escapeHtml(job.id)}">
             <div class="job-node-head">
               <div class="job-name">${escapeHtml(job.name)}</div>
               <span class="job-duration">${formatDuration(job.durationMilliseconds)}</span>
@@ -647,7 +686,7 @@ function renderGraph(run) {
             <div class="muted">${escapeHtml(job.status)} · ${job.steps.length} steps</div>
             <div class="muted">${job.needs.length ? `needs ${escapeHtml(job.needs.join(", "))}` : "no dependencies"}</div>
             ${renderJobControlSummary(job)}
-          </div>
+          </a>
         `).join("")}
       </div>
     </section>
@@ -705,41 +744,70 @@ function renderOutputs(run) {
   `;
 }
 
-function renderJobs(run) {
-  return run.jobs.map(job => `
-    <section class="job-section">
-      <div class="job-head">
-        <h2>${escapeHtml(job.name)}</h2>
+function renderJobDetail(run, job) {
+  const backPath = runPath(run.runId);
+  return `
+    <section class="job-section job-detail">
+      <div class="job-head job-detail-head">
+        <div class="job-detail-title">
+          <a class="job-back" href="${backPath}" data-run-back>${chevronLeftIcon()}<span>Back to run</span></a>
+          <h2>${escapeHtml(job.name)}</h2>
+        </div>
         <span class="pill ${statusClass(job.status)}">${escapeHtml(job.status)}</span>
       </div>
-      <div class="job-body">
-        ${renderJobControls(job)}
-        ${job.errors.length ? `<div class="empty">${job.errors.map(escapeHtml).join("<br>")}</div>` : ""}
-        ${job.steps.map(step => renderStep(run, job, step)).join("")}
+      <div class="summary-grid job-summary-grid">
+        ${summaryCell("Started", job.startedAt ? formatDate(job.startedAt) : "Not started")}
+        ${summaryCell("Duration", formatDuration(job.durationMilliseconds))}
+        ${summaryCell("Runner", job.runsOn)}
+        ${summaryCell("Dependencies", job.needs.length ? job.needs.join(", ") : "None")}
+      </div>
+      ${renderJobControls(job)}
+      ${job.errors.length ? `<div class="job-errors">${job.errors.map(error => `<div>${escapeHtml(error)}</div>`).join("")}</div>` : ""}
+      <div class="step-list" aria-label="Job steps">
+        ${job.steps.length ? job.steps.map((step, index) => renderStep(run, job, step, index)).join("") : `<div class="empty">No steps recorded yet.</div>`}
       </div>
     </section>
-  `).join("");
+  `;
 }
 
-function renderStep(run, job, step) {
+function renderMissingJob(run) {
+  return `
+    <section class="job-section job-detail">
+      <div class="job-head">
+        <a class="job-back" href="${runPath(run.runId)}" data-run-back>${chevronLeftIcon()}<span>Back to run</span></a>
+      </div>
+      <div class="empty">Job is not available for this run.</div>
+    </section>
+  `;
+}
+
+function renderStep(run, job, step, index) {
   const jobId = job.id ?? job.name;
   const stepId = step.id ?? step.name;
-  const key = logKey(run.runId, jobId, stepId);
-  const isOpen = state.openLogs.has(key);
+  const key = stepKey(run.runId, jobId, stepId);
+  const isOpen = state.expandedSteps.has(key);
   const content = state.logContents.get(key) ?? "Loading...";
+  const panelId = `step-detail-${index}`;
 
   return `
-    <div class="step-row">
-      <span class="status-dot ${statusClass(step.status)}"></span>
-      <span>
-        <span class="job-name">${escapeHtml(step.name)}</span>
-        <span class="run-sub muted">${escapeHtml(stepMetadata(step))}</span>
-      </span>
-      ${step.logPath ? `<button class="log-button" data-log-key="${escapeHtml(key)}" data-job="${escapeHtml(jobId)}" data-step="${escapeHtml(stepId)}">Log</button>` : `<span class="muted">No log</span>`}
+    <div class="step-accordion">
+      <button class="step-toggle" type="button" aria-expanded="${isOpen}" aria-controls="${panelId}" data-step-key="${escapeHtml(key)}" data-job="${escapeHtml(jobId)}" data-step="${escapeHtml(stepId)}" data-has-log="${Boolean(step.logPath)}">
+        <span class="step-chevron ${isOpen ? "expanded" : ""}">${chevronRightIcon()}</span>
+        <span class="status-dot ${statusClass(step.status)}"></span>
+        <span class="step-heading">
+          <span class="job-name">${escapeHtml(step.name)}</span>
+          <span class="run-sub muted">${escapeHtml(stepMetadata(step))}</span>
+        </span>
+        <span class="job-duration">${formatDuration(step.durationMilliseconds)}</span>
+      </button>
+      <div id="${panelId}" class="step-detail" ${isOpen ? "" : "hidden"}>
+        ${renderStepAnnotations(step.annotations ?? [])}
+        ${step.summary ? `<pre class="step-summary">${escapeHtml(step.summary)}</pre>` : ""}
+        ${step.logPath
+          ? `<pre class="log-view" data-log-key="${escapeHtml(key)}" data-job="${escapeHtml(jobId)}" data-step="${escapeHtml(stepId)}">${escapeHtml(content)}</pre>`
+          : `<div class="step-no-log muted">No log captured for this step.</div>`}
+      </div>
     </div>
-    ${renderStepAnnotations(step.annotations ?? [])}
-    ${step.summary ? `<pre class="step-summary">${escapeHtml(step.summary)}</pre>` : ""}
-    <pre class="log-view" ${isOpen ? "" : "hidden"} data-log-key="${escapeHtml(key)}" data-job="${escapeHtml(jobId)}" data-step="${escapeHtml(stepId)}">${escapeHtml(content)}</pre>
   `;
 }
 
@@ -782,7 +850,7 @@ function renderAnnotationLocation(annotation) {
 }
 
 function stepMetadata(step) {
-  const items = [step.status, formatDuration(step.durationMilliseconds)];
+  const items = [step.status];
 
   if (step.id) {
     items.push(`#${step.id}`);
@@ -977,32 +1045,40 @@ async function clearCache() {
   renderSettings();
 }
 
-function wireLogButtons(run) {
-  document.querySelectorAll(".log-button[data-log-key][data-job][data-step]").forEach(button => {
+function wireStepAccordions(run) {
+  document.querySelectorAll(".step-toggle[data-step-key][data-job][data-step]").forEach(button => {
     button.addEventListener("click", async () => {
-      const key = button.dataset.logKey;
-      const target = Array.from(document.querySelectorAll(".log-view"))
-        .find(item => item.dataset.logKey === key);
+      const key = button.dataset.stepKey;
+      const panel = document.getElementById(button.getAttribute("aria-controls"));
 
-      if (!target) {
+      if (!panel) {
         return;
       }
 
-      if (state.openLogs.has(key)) {
-        state.openLogs.delete(key);
-        target.hidden = true;
+      const chevron = button.querySelector(".step-chevron");
+      if (state.expandedSteps.has(key)) {
+        state.expandedSteps.delete(key);
+        button.setAttribute("aria-expanded", "false");
+        chevron?.classList.remove("expanded");
+        panel.hidden = true;
         return;
       }
 
-      state.openLogs.add(key);
-      target.hidden = false;
-      await refreshLog(run.runId, button.dataset.job, button.dataset.step, target, key);
+      state.expandedSteps.add(key);
+      button.setAttribute("aria-expanded", "true");
+      chevron?.classList.add("expanded");
+      panel.hidden = false;
+
+      const target = panel.querySelector(".log-view");
+      if (target && button.dataset.hasLog === "true") {
+        await refreshLog(run.runId, button.dataset.job, button.dataset.step, target, key);
+      }
     });
   });
 }
 
 async function refreshOpenLogs(run) {
-  const targets = Array.from(document.querySelectorAll(".log-view:not([hidden])"));
+  const targets = Array.from(document.querySelectorAll(".step-detail:not([hidden]) .log-view"));
 
   await Promise.all(targets.map(target =>
     refreshLog(run.runId, target.dataset.job, target.dataset.step, target, target.dataset.logKey)));
@@ -1223,6 +1299,7 @@ function setWorkflowMessage(runId, message) {
 }
 
 async function selectRunView(view) {
+  state.selectedJobId = null;
   state.runView = view === "history" ? "history" : "details";
   await render();
 }
@@ -1231,6 +1308,7 @@ async function selectRun(runId, options = {}) {
   state.currentView = "runs";
   state.runView = "details";
   state.selectedRunId = runId;
+  state.selectedJobId = null;
 
   if (options.replaceHistory) {
     history.replaceState(null, "", `/runs/${encodeURIComponent(runId)}`);
@@ -1241,6 +1319,18 @@ async function selectRun(runId, options = {}) {
   if (options.renderNow !== false) {
     await render();
   }
+}
+
+async function selectJob(jobId) {
+  if (!state.selectedRunId || !jobId) {
+    return;
+  }
+
+  state.currentView = "runs";
+  state.runView = "details";
+  state.selectedJobId = jobId;
+  history.pushState(null, "", jobPath(state.selectedRunId, jobId));
+  await render();
 }
 
 function scheduleRefresh(delay = nextPollDelay()) {
@@ -1474,12 +1564,40 @@ function securityLevelClass(severity) {
   return severity === "warning" || severity === "info" ? severity : "";
 }
 
-function logKey(runId, job, step) {
+function stepKey(runId, job, step) {
   return `${runId}|${job}|${step}`;
 }
 
 function selectedRunPath() {
-  return state.selectedRunId ? `/runs/${encodeURIComponent(state.selectedRunId)}` : "/";
+  return state.selectedRunId ? runPath(state.selectedRunId) : "/";
+}
+
+function runPath(runId) {
+  return `/runs/${encodeURIComponent(runId)}`;
+}
+
+function jobPath(runId, jobId) {
+  return `${runPath(runId)}/jobs/${encodeURIComponent(jobId)}`;
+}
+
+function parseRunRoute(pathname) {
+  const segments = pathname.split("/").filter(Boolean);
+  if (segments[0] !== "runs" || !segments[1]) {
+    return { runId: null, jobId: null };
+  }
+
+  return {
+    runId: decodePathSegment(segments[1]),
+    jobId: segments[2] === "jobs" && segments[3] ? decodePathSegment(segments[3]) : null
+  };
+}
+
+function decodePathSegment(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
 }
 
 function setTheme(theme) {

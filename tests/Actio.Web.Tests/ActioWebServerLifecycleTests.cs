@@ -66,7 +66,7 @@ public sealed class ActioWebServerLifecycleTests : IDisposable
     }
 
     [Fact]
-    public async Task DynamicBindingPublishesActualUrlAndSessionIdentity()
+    public async Task DynamicBindingPublishesIdentityAndServesJobDetailRoute()
     {
         var options = CreateOptions(
             background: true,
@@ -100,6 +100,14 @@ public sealed class ActioWebServerLifecycleTests : IDisposable
         Assert.Equal(
             "session",
             health.RootElement.GetProperty("sessionId").GetString());
+        using var jobPage = await http.GetAsync(
+            $"{binding.ServerUrl}/runs/run-id/jobs/job-id",
+            cancellation.Token);
+        Assert.Equal(HttpStatusCode.OK, jobPage.StatusCode);
+        Assert.Contains(
+            "<main",
+            await jobPage.Content.ReadAsStringAsync(cancellation.Token),
+            StringComparison.Ordinal);
 
         cancellation.Cancel();
         try

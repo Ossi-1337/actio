@@ -65,6 +65,7 @@ public sealed class ActioWebServer
     {
         app.MapGet("/", () => Results.Content(EmbeddedWebAssetLoader.ReadText("index.html"), "text/html"));
         app.MapGet("/runs/{runId}", () => Results.Content(EmbeddedWebAssetLoader.ReadText("index.html"), "text/html"));
+        app.MapGet("/runs/{runId}/jobs/{jobId}", () => Results.Content(EmbeddedWebAssetLoader.ReadText("index.html"), "text/html"));
         app.MapGet("/settings", () => Results.Content(EmbeddedWebAssetLoader.ReadText("index.html"), "text/html"));
         app.MapGet("/assets/styles.css", () => Results.Content(EmbeddedWebAssetLoader.ReadText("styles.css"), "text/css"));
         app.MapGet("/assets/app.js", () => Results.Content(EmbeddedWebAssetLoader.ReadText("app.js"), "application/javascript"));

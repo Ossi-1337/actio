@@ -452,11 +452,21 @@ input[type="search"] {
 }
 
 .job-node {
+  display: block;
+  flex: 0 0 190px;
   min-width: 170px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--panel-2);
+  color: var(--text);
   padding: 10px;
+}
+
+.job-node:hover,
+.job-node:focus-visible {
+  border-color: var(--accent);
+  background: var(--row-hover);
+  text-decoration: none;
 }
 
 .job-node-head {
@@ -482,8 +492,52 @@ input[type="search"] {
   overflow: hidden;
 }
 
-.job-body {
+.job-detail-title {
   display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.job-detail-head {
+  align-items: flex-start;
+}
+
+.job-detail-title h2 {
+  overflow-wrap: anywhere;
+}
+
+.job-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.job-back:hover,
+.job-back:focus-visible {
+  color: var(--text);
+}
+
+.job-back svg,
+.step-chevron svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.job-errors {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--line-soft);
+  color: var(--danger-text);
+  background: var(--danger-bg);
 }
 
 .job-metadata {
@@ -494,26 +548,62 @@ input[type="search"] {
   border-top: 1px solid var(--line-soft);
 }
 
-.step-row {
+.step-list {
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: center;
-  padding: 10px 14px;
+}
+
+.step-accordion {
   border-top: 1px solid var(--line-soft);
 }
 
-.log-button {
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--panel-2);
+.step-toggle {
+  display: grid;
+  grid-template-columns: 18px 12px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 10px 14px;
+  border: 0;
+  background: var(--panel);
   color: var(--text);
-  padding: 5px 9px;
+  text-align: left;
   cursor: pointer;
 }
 
-.log-button:hover {
-  border-color: var(--accent);
+.step-toggle:hover,
+.step-toggle:focus-visible,
+.step-toggle[aria-expanded="true"] {
+  background: var(--row-hover);
+}
+
+.step-chevron {
+  display: inline-grid;
+  place-items: center;
+  color: var(--muted);
+  transition: transform 120ms ease;
+}
+
+.step-chevron.expanded {
+  transform: rotate(90deg);
+}
+
+.step-heading {
+  display: grid;
+  min-width: 0;
+}
+
+.step-heading .run-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.step-detail {
+  background: var(--pre-bg);
+}
+
+.step-no-log {
+  padding: 12px 14px;
 }
 
 .toolbar,
