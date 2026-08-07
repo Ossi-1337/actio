@@ -563,8 +563,7 @@ pre {
 }
 
 .log-view,
-.step-summary,
-.workflow-file pre {
+.step-summary {
   max-height: 360px;
   padding: 12px 14px;
   border-top: 1px solid var(--line-soft);
@@ -573,6 +572,42 @@ pre {
 
 .step-summary {
   border-left: 3px solid var(--accent);
+}
+
+.workflow-code-view {
+  max-height: 360px;
+  overflow: auto;
+  border-top: 1px solid var(--line-soft);
+  background: var(--pre-bg);
+  font: 12px/1.5 Consolas, "Cascadia Mono", monospace;
+}
+
+.workflow-code-lines {
+  min-width: max-content;
+  padding: 12px 0;
+}
+
+.workflow-code-line {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  min-height: 18px;
+}
+
+.workflow-code-line code {
+  padding: 0 14px 0 12px;
+  color: var(--text);
+  white-space: pre;
+}
+
+.workflow-line-number {
+  position: sticky;
+  left: 0;
+  padding: 0 10px 0 8px;
+  border-right: 1px solid var(--line-soft);
+  background: var(--pre-bg);
+  color: var(--muted);
+  text-align: right;
+  user-select: none;
 }
 
 .annotation-list {
@@ -861,11 +896,47 @@ pre {
   border-bottom: 1px solid var(--line);
 }
 
+.modal-title {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  min-width: 0;
+}
+
+.workflow-editor-shell {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  min-height: 360px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--line);
+  background: var(--pre-bg);
+}
+
+.workflow-editor-gutter {
+  overflow: hidden;
+  padding: 12px 10px 12px 8px;
+  border-right: 1px solid var(--line-soft);
+  color: var(--muted);
+  font: 12px/1.5 Consolas, "Cascadia Mono", monospace;
+  text-align: right;
+  user-select: none;
+}
+
+.workflow-editor-line-number {
+  height: 18px;
+}
+
+.workflow-editor-line-number.active {
+  color: var(--accent);
+  font-weight: 700;
+}
+
 .workflow-editor {
   min-height: 360px;
-  resize: vertical;
+  min-width: 0;
+  resize: none;
   border: 0;
-  border-bottom: 1px solid var(--line);
   background: var(--pre-bg);
   color: var(--text);
   font: 12px/1.5 Consolas, "Cascadia Mono", monospace;

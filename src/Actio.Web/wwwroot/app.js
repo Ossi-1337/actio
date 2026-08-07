@@ -761,14 +761,29 @@ function renderWorkflowFileBody(runId) {
   const expanded = state.expandedWorkflowFiles.has(runId);
   const lines = splitLines(content);
   const hasMore = lines.length > previewLineCount;
-  const shown = expanded || !hasMore ? content : lines.slice(0, previewLineCount).join("\n");
+  const shownLines = expanded || !hasMore ? lines : lines.slice(0, previewLineCount);
   const action = expanded ? "collapse" : "expand";
   const label = expanded ? "Show less" : `Show full file (${lines.length} lines)`;
 
   return `
-    <pre>${escapeHtml(shown)}</pre>
+    ${renderWorkflowCodeLines(shownLines)}
     ${hasMore ? `<div class="workflow-file-actions"><button class="text-button" type="button" data-workflow-action="${action}" data-run-id="${escapeHtml(runId)}">${label}</button></div>` : ""}
     ${message ? `<div class="inline-message">${escapeHtml(message)}</div>` : ""}
+  `;
+}
+
+function renderWorkflowCodeLines(lines) {
+  return `
+    <div class="workflow-code-view" role="region" aria-label="Workflow file content">
+      <div class="workflow-code-lines">
+        ${lines.map((line, index) => `
+          <div class="workflow-code-line">
+            <span class="workflow-line-number" aria-hidden="true">${index + 1}</span>
+            <code>${escapeHtml(line)}</code>
+          </div>
+        `).join("")}
+      </div>
+    </div>
   `;
 }
 
@@ -1019,10 +1034,16 @@ async function openWorkflowEditor(runId) {
   overlay.innerHTML = `
     <div class="modal" role="dialog" aria-modal="true" aria-label="Edit workflow file">
       <div class="modal-head">
-        <h2>Edit workflow file</h2>
+        <div class="modal-title">
+          <h2>Edit workflow file</h2>
+          <span class="muted" data-editor-position>Line 1, column 1</span>
+        </div>
         <button class="icon-button" type="button" title="Close" aria-label="Close" data-editor-cancel>${closeIcon()}</button>
       </div>
-      <textarea class="workflow-editor" spellcheck="false">${escapeHtml(content)}</textarea>
+      <div class="workflow-editor-shell">
+        <div class="workflow-editor-gutter" aria-hidden="true"></div>
+        <textarea class="workflow-editor" wrap="off" spellcheck="false" aria-label="Workflow file content">${escapeHtml(content)}</textarea>
+      </div>
       <div class="modal-message muted" data-editor-message></div>
       <div class="modal-actions">
         <button class="text-button" type="button" data-editor-cancel>Cancel</button>
@@ -1033,6 +1054,9 @@ async function openWorkflowEditor(runId) {
 
   document.body.append(overlay);
   const textarea = overlay.querySelector("textarea");
+  const gutter = overlay.querySelector(".workflow-editor-gutter");
+  const position = overlay.querySelector("[data-editor-position]");
+  wireWorkflowEditor(textarea, gutter, position);
   textarea.focus();
 
   overlay.querySelectorAll("[data-editor-cancel]").forEach(button => {
@@ -1073,6 +1097,43 @@ async function openWorkflowEditor(runId) {
       saveButton.disabled = false;
     }
   });
+}
+
+function wireWorkflowEditor(textarea, gutter, position) {
+  const updatePosition = () => updateWorkflowEditorPosition(textarea, gutter, position);
+  textarea.addEventListener("input", updatePosition);
+  textarea.addEventListener("click", updatePosition);
+  textarea.addEventListener("keyup", updatePosition);
+  textarea.addEventListener("select", updatePosition);
+  textarea.addEventListener("scroll", () => {
+    gutter.scrollTop = textarea.scrollTop;
+  });
+  updatePosition();
+}
+
+function updateWorkflowEditorPosition(textarea, gutter, position) {
+  const lineCount = splitLines(textarea.value).length;
+  if (Number(gutter.dataset.lineCount) !== lineCount) {
+    gutter.innerHTML = Array.from({ length: lineCount }, (_, index) =>
+      `<div class="workflow-editor-line-number">${index + 1}</div>`).join("");
+    gutter.dataset.lineCount = String(lineCount);
+  }
+
+  const cursor = textarea.selectionStart;
+  const beforeCursor = textarea.value.slice(0, cursor);
+  const line = beforeCursor.split("\n").length;
+  const lastLineBreak = beforeCursor.lastIndexOf("\n");
+  const column = cursor - lastLineBreak;
+  const previousLine = Number(gutter.dataset.activeLine);
+
+  if (previousLine > 0) {
+    gutter.children[previousLine - 1]?.classList.remove("active");
+  }
+
+  gutter.children[line - 1]?.classList.add("active");
+  gutter.dataset.activeLine = String(line);
+  gutter.scrollTop = textarea.scrollTop;
+  position.textContent = `Line ${line}, column ${column}`;
 }
 
 function setWorkflowMessage(runId, message) {
