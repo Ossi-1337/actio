@@ -256,8 +256,8 @@ async function renderDetail() {
   el.title.textContent = run.workflowName;
   el.detail.innerHTML = [
     renderSummary(run),
-    renderSecurity(run),
     renderGraph(run),
+    renderSecurity(run),
     renderArtifacts(run),
     renderOutputs(run),
     renderJobs(run),
@@ -422,7 +422,10 @@ function renderGraph(run) {
         ${run.jobs.map((job, index) => `
           ${index === 0 ? "" : `<span class="connector"></span>`}
           <div class="job-node">
-            <div class="job-name">${escapeHtml(job.name)}</div>
+            <div class="job-node-head">
+              <div class="job-name">${escapeHtml(job.name)}</div>
+              <span class="job-duration">${formatDuration(job.durationMilliseconds)}</span>
+            </div>
             <div class="muted">${escapeHtml(job.status)} · ${job.steps.length} steps</div>
             <div class="muted">${job.needs.length ? `needs ${escapeHtml(job.needs.join(", "))}` : "no dependencies"}</div>
             ${renderJobControlSummary(job)}

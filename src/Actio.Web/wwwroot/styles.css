@@ -405,6 +405,19 @@ input[type="search"] {
   padding: 10px;
 }
 
+.job-node-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+}
+
+.job-duration {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .connector {
   flex: 0 0 28px;
   height: 1px;
