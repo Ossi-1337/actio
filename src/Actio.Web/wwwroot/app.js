@@ -2,6 +2,7 @@ const pollActiveMilliseconds = 2000;
 const pollIdleMilliseconds = 5000;
 const pollHiddenMilliseconds = 15000;
 const previewLineCount = 10;
+const runsPerPage = 10;
 const themeStorageKey = "actio-theme";
 
 const state = {
@@ -11,6 +12,7 @@ const state = {
   selectedRunId: location.pathname.startsWith("/runs/") ? decodeURIComponent(location.pathname.split("/").pop()) : null,
   currentView: location.pathname.startsWith("/settings") ? "settings" : "runs",
   filter: "",
+  runPage: 1,
   projectRoot: "",
   health: null,
   cache: { cacheRoot: "", entries: [] },
@@ -46,6 +48,7 @@ applyTheme(state.theme);
 
 el.filter.addEventListener("input", () => {
   state.filter = el.filter.value.trim().toLowerCase();
+  state.runPage = 1;
   renderRuns();
 });
 
@@ -208,6 +211,7 @@ function renderWorkflows() {
       event.preventDefault();
       state.currentView = "runs";
       state.filter = item.dataset.workflow.toLowerCase();
+      state.runPage = 1;
       el.filter.value = item.dataset.workflow;
       history.pushState(null, "", selectedRunPath());
       render();
@@ -217,6 +221,8 @@ function renderWorkflows() {
 
 function renderRuns() {
   const runs = filteredRuns();
+  const totalPages = Math.max(1, Math.ceil(runs.length / runsPerPage));
+  state.runPage = Math.min(Math.max(state.runPage, 1), totalPages);
   el.runCount.textContent = `${runs.length} shown`;
 
   if (runs.length === 0) {
@@ -224,7 +230,10 @@ function renderRuns() {
     return;
   }
 
-  el.runs.innerHTML = runs.map(run => `
+  const firstIndex = (state.runPage - 1) * runsPerPage;
+  const pageRuns = runs.slice(firstIndex, firstIndex + runsPerPage);
+
+  el.runs.innerHTML = pageRuns.map(run => `
     <a class="run-row ${run.runId === state.selectedRunId ? "active" : ""}" href="/runs/${encodeURIComponent(run.runId)}" data-run="${escapeHtml(run.runId)}">
       <span class="status-dot ${statusClass(run.status)}"></span>
       <span>
@@ -233,7 +242,7 @@ function renderRuns() {
       </span>
       <span class="run-time">${formatDate(run.startedAt)}<br>${formatDuration(run.durationMilliseconds)}</span>
     </a>
-  `).join("");
+  `).join("") + renderRunPagination(runs.length, totalPages, firstIndex, pageRuns.length);
 
   el.runs.querySelectorAll("[data-run]").forEach(item => {
     item.addEventListener("click", async event => {
@@ -241,6 +250,29 @@ function renderRuns() {
       await selectRun(item.dataset.run);
     });
   });
+
+  el.runs.querySelectorAll("[data-run-page]").forEach(button => {
+    button.addEventListener("click", () => {
+      state.runPage += button.dataset.runPage === "next" ? 1 : -1;
+      renderRuns();
+    });
+  });
+}
+
+function renderRunPagination(totalRuns, totalPages, firstIndex, visibleRuns) {
+  if (totalPages <= 1) {
+    return "";
+  }
+
+  const firstVisible = firstIndex + 1;
+  const lastVisible = firstIndex + visibleRuns;
+  return `
+    <nav class="run-pagination" aria-label="Run pages">
+      <button class="icon-button" type="button" title="Previous page" aria-label="Previous page" data-run-page="previous" ${state.runPage === 1 ? "disabled" : ""}>${chevronLeftIcon()}</button>
+      <span class="run-pagination-status" aria-live="polite">${firstVisible}-${lastVisible} of ${totalRuns}</span>
+      <button class="icon-button" type="button" title="Next page" aria-label="Next page" data-run-page="next" ${state.runPage === totalPages ? "disabled" : ""}>${chevronRightIcon()}</button>
+    </nav>
+  `;
 }
 
 async function renderDetail() {
@@ -1364,6 +1396,14 @@ function downloadIcon() {
 
 function closeIcon() {
   return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>`;
+}
+
+function chevronLeftIcon() {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"></path></svg>`;
+}
+
+function chevronRightIcon() {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>`;
 }
 
 function escapeHtml(value) {
