@@ -638,6 +638,41 @@ pre {
   padding: 12px 14px;
 }
 
+.security-evidence-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 14px 0;
+}
+
+.security-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.security-count {
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.security-count.warning {
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+
+.security-count.info {
+  background: var(--running-bg);
+  color: var(--running-text);
+}
+
 .security-profile {
   border-bottom: 1px solid var(--line-soft);
 }

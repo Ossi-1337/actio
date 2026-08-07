@@ -21,6 +21,7 @@ const state = {
   workflowMessages: new Map(),
   runMessages: new Map(),
   expandedWorkflowFiles: new Set(),
+  expandedSecurityRuns: new Set(),
   refreshTimer: null,
   detailRequestId: 0,
   theme: loadTheme()
@@ -69,6 +70,23 @@ document.addEventListener("click", async event => {
   const runButton = event.target.closest("[data-run-action]");
   if (runButton) {
     await handleRunAction(runButton);
+    return;
+  }
+
+  const securityButton = event.target.closest("[data-security-action]");
+  if (securityButton) {
+    const runId = securityButton.dataset.runId;
+    if (!runId) {
+      return;
+    }
+
+    if (securityButton.dataset.securityAction === "expand") {
+      state.expandedSecurityRuns.add(runId);
+    } else {
+      state.expandedSecurityRuns.delete(runId);
+    }
+
+    updateSecurityShell(runId);
     return;
   }
 
@@ -310,7 +328,7 @@ function renderSecurity(run) {
   }
 
   return `
-    <section class="summary">
+    <section class="summary" data-security-run="${escapeHtml(run.runId)}">
       <div class="summary-head"><h2>Security</h2></div>
       ${metadata ? `
         <div class="summary-grid security-profile">
@@ -336,62 +354,149 @@ function renderSecurity(run) {
           ${summaryCell("Strict controls", (metadata.strictControls ?? []).join(", ") || "None")}
           ${summaryCell("Cleanup", formatCleanup(metadata.cleanup))}
         </div>
-        ${(metadata.javaScriptRuntimeObservations ?? []).length ? `<div class="security-list">
-          ${(metadata.javaScriptRuntimeObservations ?? []).map(observation => `
-            <div class="security-row">
-              <span class="security-level info">${escapeHtml(observation.runtime)}</span>
-              <span>
-                <span class="job-name">${escapeHtml(observation.image)}</span>
-                <span class="run-sub muted">${escapeHtml(observation.surface)}</span>
-                ${observation.baseImage ? `<span class="run-sub muted">Base: ${escapeHtml(observation.baseImage)}</span>` : ""}
-                ${observation.definitionHash ? `<span class="run-sub muted">Definition: ${escapeHtml(observation.definitionHash.slice(0, 12))}</span>` : ""}
-                ${(observation.nodeVersion || observation.gitVersion || observation.caCertificatesVersion) ? `<span class="security-message">Node ${escapeHtml(observation.nodeVersion ?? "not-reported")} · Git ${escapeHtml(observation.gitVersion ?? "not-reported")} · CA ${escapeHtml(observation.caCertificatesVersion ?? "not-reported")}</span>` : ""}
-              </span>
-            </div>
-          `).join("")}
-        </div>` : ""}
-        ${(metadata.imageUserObservations ?? []).length ? `<div class="security-list">
-          ${(metadata.imageUserObservations ?? []).map(observation => `
-            <div class="security-row">
-              <span class="security-level ${observation.status === "root" ? "warning" : "info"}">${escapeHtml(observation.status)}</span>
-              <span>
-                <span class="job-name">${escapeHtml(observation.image)}</span>
-                <span class="run-sub muted">${escapeHtml(observation.surface)}</span>
-                <span class="security-message">Configured user: ${escapeHtml(observation.configuredUser)}</span>
-              </span>
-            </div>
-          `).join("")}
-        </div>` : ""}
-        ${(metadata.networkObservations ?? []).length ? `<div class="security-list">
-          ${(metadata.networkObservations ?? []).map(observation => `
-            <div class="security-row">
-              <span class="security-level info">network</span>
-              <span>
-                <span class="job-name">${escapeHtml(observation.jobName)}</span>
-                <span class="run-sub muted">${escapeHtml(observation.networkName)}</span>
-                <span class="security-message">${escapeHtml(observation.mode)} · outbound ${observation.outboundAllowed ? "allowed" : "blocked"} · internal ${observation.internal ? "yes" : "no"}</span>
-                ${(observation.serviceAliases ?? []).length ? `<span class="security-message">Services: ${escapeHtml(observation.serviceAliases.join(", "))}</span>` : ""}
-                ${(observation.publishedPorts ?? []).map(port => `<span class="security-message">${escapeHtml(port.surface)}: ${escapeHtml(port.bindAddress)}:${escapeHtml(port.hostPort ?? "dynamic")} → ${escapeHtml(port.containerPort)}/${escapeHtml(port.protocol)}</span>`).join("")}
-              </span>
-            </div>
-          `).join("")}
-        </div>` : ""}
       ` : ""}
-      ${findings.length ? `<div class="security-list">
-        ${findings.map(finding => `
-          <div class="security-row">
-            <span class="security-level ${securityLevelClass(finding.severity)}">${escapeHtml(finding.severity)}</span>
-            <span>
-              <span class="job-name">${escapeHtml(finding.location)}</span>
-              <span class="run-sub muted">${escapeHtml(finding.category)}</span>
-              <span class="security-message">${escapeHtml(finding.message)}</span>
-              <span class="security-recommendation">${escapeHtml(finding.recommendation)}</span>
-            </span>
-          </div>
-        `).join("")}
-      </div>` : ""}
+      ${renderSecurityEvidence(run.runId, metadata, findings)}
     </section>
   `;
+}
+
+function renderSecurityEvidence(runId, metadata, findings) {
+  const evidence = buildSecurityEvidence(metadata, findings);
+  if (evidence.items.length === 0) {
+    return "";
+  }
+
+  const expanded = state.expandedSecurityRuns.has(runId);
+  const visibleItems = expanded ? evidence.items : evidence.items.slice(0, 2);
+  const evidenceId = `security-evidence-${runId}`;
+
+  return `
+    <div class="security-evidence-head">
+      <div class="security-counts" aria-label="Security evidence counts">
+        ${evidence.counts.map(count => `<span class="security-count ${count.level}">${count.value} ${escapeHtml(count.label)}</span>`).join("")}
+      </div>
+      ${evidence.items.length > 2 ? `<button class="text-button" type="button" data-security-action="${expanded ? "collapse" : "expand"}" data-run-id="${escapeHtml(runId)}" aria-expanded="${expanded}" aria-controls="${escapeHtml(evidenceId)}">${expanded ? "Show less" : `Show all (${evidence.items.length})`}</button>` : ""}
+    </div>
+    <div class="security-list" id="${escapeHtml(evidenceId)}">
+      ${visibleItems.map(item => item.html).join("")}
+    </div>
+  `;
+}
+
+function buildSecurityEvidence(metadata, findings) {
+  const runtimeObservations = metadata?.javaScriptRuntimeObservations ?? [];
+  const userObservations = metadata?.imageUserObservations ?? [];
+  const networkObservations = metadata?.networkObservations ?? [];
+  const warningFindings = findings.filter(finding => finding.severity !== "info");
+  const infoFindings = findings.filter(finding => finding.severity === "info");
+  const userCounts = countImageUserStatuses(userObservations);
+  const counts = [
+    { label: "Root", value: userCounts.root, level: "warning" },
+    { label: "Non-root", value: userCounts.nonRoot, level: "info" },
+    { label: "Unknown", value: userCounts.unknown, level: "neutral" },
+    { label: "Network", value: networkObservations.length, level: "info" },
+    { label: "Runtime", value: runtimeObservations.length, level: "info" },
+    { label: "Warnings", value: warningFindings.length, level: "warning" },
+    { label: "Info", value: infoFindings.length, level: "info" }
+  ].filter(count => count.value > 0);
+
+  const items = [
+    ...userObservations.map(renderImageUserEvidence),
+    ...findings.map(renderSecurityFindingEvidence),
+    ...runtimeObservations.map(renderRuntimeEvidence),
+    ...networkObservations.map(renderNetworkEvidence)
+  ].map((item, index) => ({ ...item, index }))
+    .sort((left, right) => left.priority - right.priority || left.index - right.index);
+
+  return { counts, items };
+}
+
+function countImageUserStatuses(observations) {
+  return observations.reduce((counts, observation) => {
+    if (observation.status === "root") {
+      counts.root += 1;
+    } else if (observation.status === "non-root") {
+      counts.nonRoot += 1;
+    } else {
+      counts.unknown += 1;
+    }
+
+    return counts;
+  }, { root: 0, nonRoot: 0, unknown: 0 });
+}
+
+function renderImageUserEvidence(observation) {
+  const isRoot = observation.status === "root";
+  const isUnknown = observation.status !== "root" && observation.status !== "non-root";
+  return {
+    priority: isRoot ? 0 : isUnknown ? 2 : 3,
+    html: `<div class="security-row">
+      <span class="security-level ${isRoot ? "warning" : "info"}">${escapeHtml(observation.status)}</span>
+      <span>
+        <span class="job-name">${escapeHtml(observation.image)}</span>
+        <span class="run-sub muted">${escapeHtml(observation.surface)}</span>
+        <span class="security-message">Configured user: ${escapeHtml(observation.configuredUser)}</span>
+      </span>
+    </div>`
+  };
+}
+
+function renderSecurityFindingEvidence(finding) {
+  return {
+    priority: finding.severity === "info" ? 3 : 0,
+    html: `<div class="security-row">
+      <span class="security-level ${securityLevelClass(finding.severity)}">${escapeHtml(finding.severity)}</span>
+      <span>
+        <span class="job-name">${escapeHtml(finding.location)}</span>
+        <span class="run-sub muted">${escapeHtml(finding.category)}</span>
+        <span class="security-message">${escapeHtml(finding.message)}</span>
+        <span class="security-recommendation">${escapeHtml(finding.recommendation)}</span>
+      </span>
+    </div>`
+  };
+}
+
+function renderRuntimeEvidence(observation) {
+  return {
+    priority: 4,
+    html: `<div class="security-row">
+      <span class="security-level info">${escapeHtml(observation.runtime)}</span>
+      <span>
+        <span class="job-name">${escapeHtml(observation.image)}</span>
+        <span class="run-sub muted">${escapeHtml(observation.surface)}</span>
+        ${observation.baseImage ? `<span class="run-sub muted">Base: ${escapeHtml(observation.baseImage)}</span>` : ""}
+        ${observation.definitionHash ? `<span class="run-sub muted">Definition: ${escapeHtml(observation.definitionHash.slice(0, 12))}</span>` : ""}
+        ${(observation.nodeVersion || observation.gitVersion || observation.caCertificatesVersion) ? `<span class="security-message">Node ${escapeHtml(observation.nodeVersion ?? "not-reported")} · Git ${escapeHtml(observation.gitVersion ?? "not-reported")} · CA ${escapeHtml(observation.caCertificatesVersion ?? "not-reported")}</span>` : ""}
+      </span>
+    </div>`
+  };
+}
+
+function renderNetworkEvidence(observation) {
+  return {
+    priority: 5,
+    html: `<div class="security-row">
+      <span class="security-level info">network</span>
+      <span>
+        <span class="job-name">${escapeHtml(observation.jobName)}</span>
+        <span class="run-sub muted">${escapeHtml(observation.networkName)}</span>
+        <span class="security-message">${escapeHtml(observation.mode)} · outbound ${observation.outboundAllowed ? "allowed" : "blocked"} · internal ${observation.internal ? "yes" : "no"}</span>
+        ${(observation.serviceAliases ?? []).length ? `<span class="security-message">Services: ${escapeHtml(observation.serviceAliases.join(", "))}</span>` : ""}
+        ${(observation.publishedPorts ?? []).map(port => `<span class="security-message">${escapeHtml(port.surface)}: ${escapeHtml(port.bindAddress)}:${escapeHtml(port.hostPort ?? "dynamic")} → ${escapeHtml(port.containerPort)}/${escapeHtml(port.protocol)}</span>`).join("")}
+      </span>
+    </div>`
+  };
+}
+
+function updateSecurityShell(runId) {
+  if (state.selectedRun?.runId !== runId) {
+    return;
+  }
+
+  const section = document.querySelector(`[data-security-run="${cssEscape(runId)}"]`);
+  if (section) {
+    section.outerHTML = renderSecurity(state.selectedRun);
+  }
 }
 
 function formatResourceLimits(limits) {
