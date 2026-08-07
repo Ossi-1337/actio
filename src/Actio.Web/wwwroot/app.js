@@ -11,6 +11,7 @@ const state = {
   selectedRun: null,
   selectedRunId: location.pathname.startsWith("/runs/") ? decodeURIComponent(location.pathname.split("/").pop()) : null,
   currentView: location.pathname.startsWith("/settings") ? "settings" : "runs",
+  runView: "details",
   filter: "",
   runPage: 1,
   projectRoot: "",
@@ -31,11 +32,9 @@ const state = {
 
 const el = {
   workflows: document.querySelector("#workflow-list"),
-  runs: document.querySelector("#run-list"),
   detail: document.querySelector("#detail"),
   title: document.querySelector("#page-title"),
   projectRoot: document.querySelector("#project-root"),
-  runCount: document.querySelector("#run-count"),
   filter: document.querySelector("#run-filter"),
   filters: document.querySelector(".filters"),
   themeToggle: document.querySelector("#theme-toggle"),
@@ -49,7 +48,7 @@ applyTheme(state.theme);
 el.filter.addEventListener("input", () => {
   state.filter = el.filter.value.trim().toLowerCase();
   state.runPage = 1;
-  renderRuns();
+  renderDetail();
 });
 
 el.themeToggle.addEventListener("click", event => {
@@ -70,6 +69,12 @@ el.navLinks.forEach(link => {
 });
 
 document.addEventListener("click", async event => {
+  const runViewButton = event.target.closest("[data-run-view]");
+  if (runViewButton) {
+    await selectRunView(runViewButton.dataset.runView);
+    return;
+  }
+
   const runButton = event.target.closest("[data-run-action]");
   if (runButton) {
     await handleRunAction(runButton);
@@ -119,9 +124,22 @@ document.addEventListener("click", async event => {
   }
 });
 
+document.addEventListener("keydown", async event => {
+  const runViewButton = event.target.closest("[data-run-view]");
+  if (!runViewButton || !["ArrowLeft", "ArrowRight"].includes(event.key)) {
+    return;
+  }
+
+  event.preventDefault();
+  const view = runViewButton.dataset.runView === "details" ? "history" : "details";
+  await selectRunView(view);
+  document.querySelector(`[data-run-view="${view}"]`)?.focus();
+});
+
 window.addEventListener("popstate", () => {
   state.currentView = location.pathname.startsWith("/settings") ? "settings" : "runs";
   state.selectedRunId = location.pathname.startsWith("/runs/") ? decodeURIComponent(location.pathname.split("/").pop()) : null;
+  state.runView = "details";
   render();
 });
 
@@ -184,13 +202,12 @@ function renderNavigation() {
 
   el.runsView.hidden = state.currentView !== "runs";
   el.settingsView.hidden = state.currentView !== "settings";
-  el.filters.hidden = state.currentView !== "runs";
+  el.filters.hidden = state.currentView !== "runs" || state.runView !== "history";
   el.title.textContent = state.currentView === "settings" ? "Settings" : "Workflow runs";
 }
 
 function renderRunsView() {
   renderWorkflows();
-  renderRuns();
 }
 
 function renderWorkflows() {
@@ -210,6 +227,7 @@ function renderWorkflows() {
     item.addEventListener("click", event => {
       event.preventDefault();
       state.currentView = "runs";
+      state.runView = "history";
       state.filter = item.dataset.workflow.toLowerCase();
       state.runPage = 1;
       el.filter.value = item.dataset.workflow;
@@ -219,44 +237,68 @@ function renderWorkflows() {
   });
 }
 
-function renderRuns() {
+function renderRunHistory() {
   const runs = filteredRuns();
   const totalPages = Math.max(1, Math.ceil(runs.length / runsPerPage));
   state.runPage = Math.min(Math.max(state.runPage, 1), totalPages);
-  el.runCount.textContent = `${runs.length} shown`;
+  const workflowName = runHistoryTitle(runs);
+  el.title.textContent = workflowName;
 
   if (runs.length === 0) {
-    el.runs.innerHTML = `<div class="empty">No matching runs.</div>`;
+    el.detail.innerHTML = `
+      <section id="run-view-panel" class="panel run-history" role="tabpanel" aria-labelledby="run-history-tab">
+        ${renderRunViewHeader(workflowName, "history", `<span class="muted">0 shown</span>`)}
+        <div class="empty">No matching runs.</div>
+      </section>
+    `;
     return;
   }
 
   const firstIndex = (state.runPage - 1) * runsPerPage;
   const pageRuns = runs.slice(firstIndex, firstIndex + runsPerPage);
 
-  el.runs.innerHTML = pageRuns.map(run => `
-    <a class="run-row ${run.runId === state.selectedRunId ? "active" : ""}" href="/runs/${encodeURIComponent(run.runId)}" data-run="${escapeHtml(run.runId)}">
-      <span class="status-dot ${statusClass(run.status)}"></span>
-      <span>
-        <span class="run-title">${escapeHtml(run.workflowName)}</span>
-        <span class="run-sub muted">${escapeHtml(shortRunId(run.runId))} · ${escapeHtml(run.trigger)} · ${run.jobCount} jobs · ${run.artifactCount} artifacts</span>
-      </span>
-      <span class="run-time">${formatDate(run.startedAt)}<br>${formatDuration(run.durationMilliseconds)}</span>
-    </a>
-  `).join("") + renderRunPagination(runs.length, totalPages, firstIndex, pageRuns.length);
+  el.detail.innerHTML = `
+    <section id="run-view-panel" class="panel run-history" role="tabpanel" aria-labelledby="run-history-tab">
+      ${renderRunViewHeader(workflowName, "history", `<span class="muted">${runs.length} shown</span>`)}
+      <div class="run-list">
+        ${pageRuns.map(run => `
+          <a class="run-row ${run.runId === state.selectedRunId ? "active" : ""}" href="/runs/${encodeURIComponent(run.runId)}" data-run="${escapeHtml(run.runId)}">
+            <span class="status-dot ${statusClass(run.status)}"></span>
+            <span>
+              <span class="run-title">${escapeHtml(run.workflowName)}</span>
+              <span class="run-sub muted">${escapeHtml(shortRunId(run.runId))} · ${escapeHtml(run.trigger)} · ${run.jobCount} jobs · ${run.artifactCount} artifacts</span>
+            </span>
+            <span class="run-time">${formatDate(run.startedAt)}<br>${formatDuration(run.durationMilliseconds)}</span>
+          </a>
+        `).join("")}
+        ${renderRunPagination(runs.length, totalPages, firstIndex, pageRuns.length)}
+      </div>
+    </section>
+  `;
 
-  el.runs.querySelectorAll("[data-run]").forEach(item => {
+  el.detail.querySelectorAll("[data-run]").forEach(item => {
     item.addEventListener("click", async event => {
       event.preventDefault();
       await selectRun(item.dataset.run);
     });
   });
 
-  el.runs.querySelectorAll("[data-run-page]").forEach(button => {
+  el.detail.querySelectorAll("[data-run-page]").forEach(button => {
     button.addEventListener("click", () => {
       state.runPage += button.dataset.runPage === "next" ? 1 : -1;
-      renderRuns();
+      renderRunHistory();
     });
   });
+}
+
+function runHistoryTitle(runs) {
+  const workflow = state.workflows.find(item => item.fileName.toLowerCase() === state.filter);
+  if (workflow) {
+    return workflow.name;
+  }
+
+  const workflowNames = [...new Set(runs.map(run => run.workflowName))];
+  return state.filter && workflowNames.length === 1 ? workflowNames[0] : "Workflow runs";
 }
 
 function renderRunPagination(totalRuns, totalPages, firstIndex, visibleRuns) {
@@ -278,9 +320,19 @@ function renderRunPagination(totalRuns, totalPages, firstIndex, visibleRuns) {
 async function renderDetail() {
   const requestId = ++state.detailRequestId;
 
+  if (state.runView === "history") {
+    renderRunHistory();
+    return;
+  }
+
   if (!state.selectedRunId) {
     state.selectedRun = null;
-    el.detail.innerHTML = `<section class="summary"><div class="empty">No run selected.</div></section>`;
+    el.detail.innerHTML = `
+      <section id="run-view-panel" class="summary" role="tabpanel" aria-labelledby="run-details-tab">
+        ${renderRunViewHeader("Workflow runs", "details")}
+        <div class="empty">No run selected.</div>
+      </section>
+    `;
     return;
   }
 
@@ -322,9 +374,12 @@ async function renderDetail() {
 function renderSummary(run) {
   const runMessage = state.runMessages.get(run.runId);
   return `
-    <section class="summary">
+    <section id="run-view-panel" class="summary" role="tabpanel" aria-labelledby="run-details-tab">
       <div class="summary-head">
-        <h2>${escapeHtml(run.workflowName)}</h2>
+        <div class="run-heading">
+          <h2>${escapeHtml(run.workflowName)}</h2>
+          ${renderRunViewTabs("details")}
+        </div>
         <div class="summary-actions">
           ${renderRunActions(run)}
           <span class="pill ${statusClass(run.status)}">${escapeHtml(run.status)}</span>
@@ -342,6 +397,32 @@ function renderSummary(run) {
       ${runMessage ? `<div class="inline-message">${escapeHtml(runMessage)}</div>` : ""}
     </section>
   `;
+}
+
+function renderRunViewHeader(workflowName, activeView, trailingContent = "") {
+  return `
+    <div class="panel-head">
+      <div class="run-heading">
+        <h2>${escapeHtml(workflowName)}</h2>
+        ${renderRunViewTabs(activeView)}
+      </div>
+      ${trailingContent}
+    </div>
+  `;
+}
+
+function renderRunViewTabs(activeView) {
+  return `
+    <div class="run-view-tabs" role="tablist" aria-label="Workflow run views">
+      ${renderRunViewTab("details", "Details", activeView)}
+      ${renderRunViewTab("history", "History", activeView)}
+    </div>
+  `;
+}
+
+function renderRunViewTab(view, label, activeView) {
+  const active = view === activeView;
+  return `<button id="run-${view}-tab" class="run-view-tab ${active ? "active" : ""}" type="button" role="tab" aria-selected="${active}" aria-controls="run-view-panel" tabindex="${active ? "0" : "-1"}" data-run-view="${view}">${label}</button>`;
 }
 
 function renderRunActions(run) {
@@ -1141,8 +1222,14 @@ function setWorkflowMessage(runId, message) {
   updateWorkflowFileShell(runId);
 }
 
+async function selectRunView(view) {
+  state.runView = view === "history" ? "history" : "details";
+  await render();
+}
+
 async function selectRun(runId, options = {}) {
   state.currentView = "runs";
+  state.runView = "details";
   state.selectedRunId = runId;
 
   if (options.replaceHistory) {
@@ -1152,8 +1239,7 @@ async function selectRun(runId, options = {}) {
   }
 
   if (options.renderNow !== false) {
-    renderRuns();
-    await renderDetail();
+    await render();
   }
 }
 
