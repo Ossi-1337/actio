@@ -319,36 +319,62 @@ internal sealed class ActionResolver
 
     private static ActionPathResult ResolveLocalActionPath(string uses, string localReferenceRoot)
     {
-        var fullLocalReferenceRoot = Path.GetFullPath(localReferenceRoot);
-        var candidate = Path.GetFullPath(Path.Combine(fullLocalReferenceRoot, uses));
-        if (!IsUnderRoot(candidate, fullLocalReferenceRoot))
+        try
         {
-            return ActionPathResult.Failed([$"uses '{uses}' must stay inside the current action root."]);
-        }
-
-        if (File.Exists(candidate))
-        {
-            return IsActionFile(candidate)
-                ? ActionPathResult.Resolved(candidate)
-                : ActionPathResult.Failed([$"uses '{uses}' must point to an action.yml or action.yaml file."]);
-        }
-
-        if (Directory.Exists(candidate))
-        {
-            var ymlPath = Path.Combine(candidate, "action.yml");
-            if (File.Exists(ymlPath))
+            var fullLocalReferenceRoot = Path.GetFullPath(localReferenceRoot);
+            var candidate = Path.GetFullPath(Path.Combine(fullLocalReferenceRoot, uses));
+            if (!IsUnderRoot(candidate, fullLocalReferenceRoot))
             {
-                return ActionPathResult.Resolved(ymlPath);
+                return ActionPathResult.Failed([$"uses '{uses}' must stay inside the current action root."]);
             }
 
-            var yamlPath = Path.Combine(candidate, "action.yaml");
-            if (File.Exists(yamlPath))
+            var canonicalRoot = FilesystemPathBoundary.ResolveExistingPath(fullLocalReferenceRoot);
+            if (File.Exists(candidate))
             {
-                return ActionPathResult.Resolved(yamlPath);
+                return IsActionFile(candidate)
+                    ? ResolveCanonicalActionFile(uses, candidate, canonicalRoot)
+                    : ActionPathResult.Failed([$"uses '{uses}' must point to an action.yml or action.yaml file."]);
             }
-        }
 
-        return ActionPathResult.Failed([$"uses '{uses}' could not be resolved to a local action.yml or action.yaml file."]);
+            if (Directory.Exists(candidate))
+            {
+                var canonicalDirectory = FilesystemPathBoundary.ResolveExistingPath(candidate);
+                if (!FilesystemPathBoundary.IsWithin(canonicalDirectory, canonicalRoot))
+                {
+                    return ActionPathResult.Failed([$"uses '{uses}' must resolve inside the current action root."]);
+                }
+
+                foreach (var fileName in new[] { "action.yml", "action.yaml" })
+                {
+                    var actionPath = Path.Combine(candidate, fileName);
+                    if (File.Exists(actionPath))
+                    {
+                        return ResolveCanonicalActionFile(uses, actionPath, canonicalRoot);
+                    }
+                }
+            }
+
+            return ActionPathResult.Failed([$"uses '{uses}' could not be resolved to a local action.yml or action.yaml file."]);
+        }
+        catch (Exception ex) when (ex is IOException
+            or UnauthorizedAccessException
+            or InvalidOperationException
+            or ArgumentException
+            or NotSupportedException)
+        {
+            return ActionPathResult.Failed([$"uses '{uses}' could not be resolved safely inside the current action root."]);
+        }
+    }
+
+    private static ActionPathResult ResolveCanonicalActionFile(
+        string uses,
+        string actionPath,
+        string canonicalRoot)
+    {
+        var canonicalPath = FilesystemPathBoundary.ResolveExistingPath(actionPath);
+        return FilesystemPathBoundary.IsWithin(canonicalPath, canonicalRoot)
+            ? ActionPathResult.Resolved(canonicalPath)
+            : ActionPathResult.Failed([$"uses '{uses}' must resolve inside the current action root."]);
     }
 
     private async Task<CompositeActionPlanResult> BuildCompositeStepsAsync(

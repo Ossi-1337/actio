@@ -43,7 +43,49 @@ public sealed class DockerRunnerProviderTests
         Assert.Contains("B=2", args);
         AssertSecureBaseline(args);
         Assert.True(imageIndex >= 0);
+        Assert.Equal("--", args[imageIndex - 1]);
         Assert.Equal(args.Length - 1, imageIndex);
+    }
+
+    [Fact]
+    public void CreateDockerActionStartInfo_EndsDockerOptionsBeforeImage()
+    {
+        var request = new DockerActionExecutionRequest(
+            "test",
+            "Use image",
+            "--privileged",
+            Directory.GetCurrentDirectory(),
+            new Dictionary<string, string>(),
+            Arguments: ["alpine:3.20", "true"]);
+
+        var args = DockerRunnerProvider.CreateDockerActionStartInfo(request, "actio-test")
+            .ArgumentList
+            .ToArray();
+        var imageIndex = Array.IndexOf(args, "--privileged");
+
+        Assert.True(imageIndex > 0);
+        Assert.Equal("--", args[imageIndex - 1]);
+        Assert.Equal(["alpine:3.20", "true"], args[(imageIndex + 1)..]);
+    }
+
+    [Fact]
+    public void CreateShellStepStartInfo_EndsDockerOptionsBeforeImage()
+    {
+        var request = new StepExecutionRequest(
+            "test",
+            "Run tests",
+            "ubuntu-latest",
+            "true",
+            Directory.GetCurrentDirectory(),
+            new Dictionary<string, string>());
+
+        var args = DockerRunnerProvider.CreateShellStepStartInfo(request, "--privileged", "actio-test")
+            .ArgumentList
+            .ToArray();
+        var imageIndex = Array.IndexOf(args, "--privileged");
+
+        Assert.True(imageIndex > 0);
+        Assert.Equal("--", args[imageIndex - 1]);
     }
 
     [Fact]
@@ -348,8 +390,9 @@ public sealed class DockerRunnerProviderTests
         Assert.Contains("NODE_ENV=test", args);
         AssertSecureBaseline(args);
         Assert.True(imageIndex >= 0);
-        Assert.Equal("--entrypoint", args[imageIndex - 2]);
-        Assert.Equal("sh", args[imageIndex - 1]);
+        Assert.Equal("--entrypoint", args[imageIndex - 3]);
+        Assert.Equal("sh", args[imageIndex - 2]);
+        Assert.Equal("--", args[imageIndex - 1]);
         Assert.Equal("-lc", args[imageIndex + 1]);
     }
 
@@ -484,7 +527,60 @@ public sealed class DockerRunnerProviderTests
         Assert.Contains($"type=bind,src={Path.GetFullPath(dbPath)},dst=/var/lib/postgresql/data", args);
         Assert.Contains("POSTGRES_PASSWORD=postgres", args);
         AssertSecureBaseline(args);
+        Assert.Equal("--", args[imageIndex - 1]);
         Assert.Equal(args.Length - 1, imageIndex);
+    }
+
+    [Fact]
+    public void CreateServiceContainerStartInfo_EndsDockerOptionsBeforeImage()
+    {
+        var service = new ServiceContainerDefinition(
+            "database",
+            "--privileged",
+            new Dictionary<string, string>(),
+            [],
+            [],
+            []);
+        var request = new JobRuntimeStartRequest(
+            "test",
+            Directory.GetCurrentDirectory(),
+            [],
+            [service]);
+
+        var args = DockerRunnerProvider.CreateServiceContainerStartInfo(
+                request,
+                service,
+                "actio-test-network",
+                "actio-database")
+            .ArgumentList
+            .ToArray();
+        var imageIndex = Array.IndexOf(args, "--privileged");
+
+        Assert.True(imageIndex > 0);
+        Assert.Equal("--", args[imageIndex - 1]);
+    }
+
+    [Fact]
+    public void CreateResourceNames_PreserveUniqueSuffixWhenPrefixesAreLong()
+    {
+        var longJobName = new string('a', 100);
+        var containerName1 = DockerRunnerProvider.CreateContainerName(longJobName, "step");
+        var containerName2 = DockerRunnerProvider.CreateContainerName(longJobName, "step");
+        var serviceName1 = DockerRunnerProvider.CreateServiceContainerName(longJobName, "database");
+        var serviceName2 = DockerRunnerProvider.CreateServiceContainerName(longJobName, "database");
+        var networkName1 = DockerRunnerProvider.CreateNetworkName(longJobName);
+        var networkName2 = DockerRunnerProvider.CreateNetworkName(longJobName);
+
+        Assert.All(
+            [containerName1, containerName2, serviceName1, serviceName2, networkName1, networkName2],
+            name =>
+            {
+                Assert.True(name.Length <= 63);
+                Assert.Equal(32, name[(name.LastIndexOf('-') + 1)..].Length);
+            });
+        Assert.NotEqual(containerName1, containerName2);
+        Assert.NotEqual(serviceName1, serviceName2);
+        Assert.NotEqual(networkName1, networkName2);
     }
 
     [Fact]
@@ -524,8 +620,9 @@ public sealed class DockerRunnerProviderTests
         var imageIndex = Array.IndexOf(args, "mcr.microsoft.com/powershell:7.5-ubuntu-24.04");
 
         Assert.True(imageIndex >= 0);
-        Assert.Equal("--entrypoint", args[imageIndex - 2]);
-        Assert.Equal("pwsh", args[imageIndex - 1]);
+        Assert.Equal("--entrypoint", args[imageIndex - 3]);
+        Assert.Equal("pwsh", args[imageIndex - 2]);
+        Assert.Equal("--", args[imageIndex - 1]);
         Assert.Equal(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"], args[(imageIndex + 1)..(imageIndex + 5)]);
         Assert.Contains("$ErrorActionPreference = 'Stop'", args[imageIndex + 5]);
         Assert.Contains("$PSNativeCommandUseErrorActionPreference = $true", args[imageIndex + 5]);

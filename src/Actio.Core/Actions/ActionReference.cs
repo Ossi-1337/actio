@@ -48,7 +48,7 @@ public sealed record ActionReference(
     {
         reference = null;
         var image = value[DockerPrefix.Length..];
-        if (string.IsNullOrWhiteSpace(image) || ContainsWhitespace(image))
+        if (string.IsNullOrWhiteSpace(image) || image.StartsWith('-') || ContainsWhitespace(image))
         {
             return false;
         }

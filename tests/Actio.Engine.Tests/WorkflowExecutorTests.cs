@@ -9,6 +9,31 @@ namespace Actio.Engine.Tests;
 
 public sealed class WorkflowExecutorTests
 {
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task ExecuteAsync_RemovesNullRunStoreEnvironmentFiles(int exitCode)
+    {
+        var runner = new FakeRunnerProvider([exitCode]);
+        var store = new NullRunStore();
+        var workflow = CreateWorkflow(
+            new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Test", "dotnet test", null)]));
+
+        await new WorkflowExecutor(runner, store).ExecuteAsync(
+            workflow,
+            new WorkflowExecutionOptions("C:\\repo"),
+            TextWriter.Null,
+            TextWriter.Null);
+
+        Assert.False(Directory.Exists(store.EnvironmentFileScopePath));
+    }
+
     [Fact]
     public async Task ExecuteAsync_RunsStepsInOrderAndReturnsSuccess()
     {
@@ -224,8 +249,9 @@ public sealed class WorkflowExecutorTests
                 new Dictionary<string, string>(),
                 [new WorkflowStep("Long test", "dotnet test", null)]));
         using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(20));
+        var store = new NullRunStore();
 
-        var result = await new WorkflowExecutor(runner).ExecuteAsync(
+        var result = await new WorkflowExecutor(runner, store).ExecuteAsync(
             workflow,
             new WorkflowExecutionOptions("C:\\repo"),
             TextWriter.Null,
@@ -234,6 +260,7 @@ public sealed class WorkflowExecutorTests
 
         Assert.Equal(WorkflowExecutionStatus.Cancelled, result.Status);
         Assert.Single(runner.StoppedRuntimes);
+        Assert.False(Directory.Exists(store.EnvironmentFileScopePath));
     }
 
     [Fact]
@@ -4024,6 +4051,142 @@ public sealed class WorkflowExecutorTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_PreservesWorkspaceMasksForReusableWorkflowSteps()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"actio-reusable-isolation-{Guid.NewGuid():N}");
+        var projectRoot = Path.Combine(root, "repo");
+        var actioHome = Path.Combine(root, "home");
+        var runDirectory = Path.Combine(actioHome, "runs", "run-reusable-isolation");
+        var isolationDirectory = Path.Combine(runDirectory, "isolation");
+        Directory.CreateDirectory(Path.Combine(projectRoot, ".workflows"));
+        Directory.CreateDirectory(Path.Combine(projectRoot, ".actio"));
+        Directory.CreateDirectory(isolationDirectory);
+        File.WriteAllText(Path.Combine(projectRoot, ".actio", "secrets.env"), "TOKEN=secret");
+        File.WriteAllText(Path.Combine(projectRoot, ".actio", "vars.env"), "CONFIGURATION=Release");
+        File.WriteAllText(
+            Path.Combine(projectRoot, ".workflows", "reusable.yml"),
+            """
+            name: Reusable
+            on:
+              workflow_call:
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Build
+                    run: dotnet build
+            """);
+        var secretMask = Path.Combine(isolationDirectory, "secrets.env.mask");
+        var varsMask = Path.Combine(isolationDirectory, "vars.env.mask");
+        File.WriteAllText(secretMask, string.Empty);
+        File.WriteAllText(varsMask, string.Empty);
+
+        try
+        {
+            var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+            var runStore = new RecordingRunStore(new RunStoragePaths(
+                "run-reusable-isolation",
+                runDirectory,
+                Path.Combine(runDirectory, "run.json"),
+                actioHome,
+                new Dictionary<string, string>
+                {
+                    [".actio/secrets.env"] = secretMask,
+                    [".actio/vars.env"] = varsMask
+                }));
+            var workflow = CreateWorkflow(CreateReusableWorkflowCallJob(
+                "build",
+                "./.workflows/reusable.yml",
+                new Dictionary<string, string>(),
+                new Dictionary<string, string>()));
+
+            var result = await new WorkflowExecutor(runner, runStore).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(
+                    projectRoot,
+                    Path.Combine(projectRoot, ".workflows", "caller.yml"),
+                    "run-reusable-isolation"),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.True(result.Success, string.Join(Environment.NewLine, result.Errors));
+            var request = Assert.Single(runner.Requests);
+            Assert.Contains(request.AdditionalMounts, mount =>
+                mount.Kind == StepExecutionMountKind.WorkspaceMask &&
+                mount.ContainerPath == "/workspace/.actio/secrets.env" &&
+                mount.HostPath == secretMask);
+            Assert.Contains(request.AdditionalMounts, mount =>
+                mount.Kind == StepExecutionMountKind.WorkspaceMask &&
+                mount.ContainerPath == "/workspace/.actio/vars.env" &&
+                mount.HostPath == varsMask);
+            var environmentMount = Assert.Single(request.AdditionalMounts, mount =>
+                mount.Kind == StepExecutionMountKind.EnvironmentFiles);
+            var scopePath = new DirectoryInfo(environmentMount.HostPath).Parent!.Parent!.Parent!.FullName;
+            Assert.False(Directory.Exists(scopePath));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_RejectsLocalActionFileLinkOutsideActionRoot()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"actio-action-link-{Guid.NewGuid():N}");
+        var projectRoot = Path.Combine(root, "repo");
+        var actionDirectory = Path.Combine(projectRoot, ".actio", "actions", "linked");
+        var outsideAction = Path.Combine(root, "outside-action.yml");
+        Directory.CreateDirectory(actionDirectory);
+        File.WriteAllText(
+            outsideAction,
+            """
+            name: Outside
+            runs:
+              using: composite
+              steps:
+                - run: echo outside
+                  shell: sh
+            """);
+
+        try
+        {
+            try
+            {
+                File.CreateSymbolicLink(Path.Combine(actionDirectory, "action.yml"), outsideAction);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+            {
+                return;
+            }
+
+            var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+            var workflow = CreateWorkflow(new WorkflowJob(
+                "test",
+                [],
+                null,
+                "ubuntu-latest",
+                new Dictionary<string, string>(),
+                [new WorkflowStep("Linked action", null, "./.actio/actions/linked")]));
+
+            var result = await new WorkflowExecutor(runner).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.False(result.Success);
+            Assert.Empty(runner.Requests);
+            Assert.Contains(result.Errors, error =>
+                error.Contains("must resolve inside the current action root", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task ExecuteAsync_SavesAndRestoresDependencyCacheAction()
     {
         var projectRoot = Path.Combine(Path.GetTempPath(), $"actio-cache-engine-{Guid.NewGuid():N}");
@@ -4959,6 +5122,62 @@ public sealed class WorkflowExecutorTests
         }
     }
 
+    [Fact]
+    public async Task ExecuteAsync_RejectsReusableWorkflowFileLinkOutsideProjectRoot()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"actio-reusable-link-{Guid.NewGuid():N}");
+        var projectRoot = Path.Combine(root, "repo");
+        var workflowDirectory = Path.Combine(projectRoot, ".workflows");
+        var outsideWorkflow = Path.Combine(root, "outside.yml");
+        Directory.CreateDirectory(workflowDirectory);
+        File.WriteAllText(
+            outsideWorkflow,
+            """
+            name: Outside
+            on:
+              workflow_call:
+            jobs:
+              build:
+                runs-on: ubuntu-latest
+                steps:
+                  - run: echo outside
+            """);
+
+        try
+        {
+            try
+            {
+                File.CreateSymbolicLink(Path.Combine(workflowDirectory, "linked.yml"), outsideWorkflow);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+            {
+                return;
+            }
+
+            var runner = new FakeRunnerProvider([new FakeRunnerStep(0)]);
+            var workflow = CreateWorkflow(CreateReusableWorkflowCallJob(
+                "build",
+                "./.workflows/linked.yml",
+                new Dictionary<string, string>(),
+                new Dictionary<string, string>()));
+
+            var result = await new WorkflowExecutor(runner).ExecuteAsync(
+                workflow,
+                new WorkflowExecutionOptions(projectRoot),
+                TextWriter.Null,
+                TextWriter.Null);
+
+            Assert.False(result.Success);
+            Assert.Empty(runner.Requests);
+            Assert.Contains(result.Errors, error =>
+                error.Contains("must resolve inside the project root", StringComparison.Ordinal));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static WorkflowDocument CreateWorkflow(params WorkflowJob[] jobs)
     {
         return new WorkflowDocument(
@@ -5375,6 +5594,13 @@ public sealed class WorkflowExecutorTests
 
     private sealed class RecordingRunStore : IRunStore
     {
+        private readonly RunStoragePaths? _storagePaths;
+
+        public RecordingRunStore(RunStoragePaths? storagePaths = null)
+        {
+            _storagePaths = storagePaths;
+        }
+
         public List<WorkflowRunRecord> SavedRecords { get; } = [];
 
         public List<string> LogLines { get; } = [];
@@ -5388,7 +5614,7 @@ public sealed class WorkflowExecutorTests
 
         public Task<RunStoragePaths> InitializeRunAsync(string runId, CancellationToken cancellationToken = default)
         {
-            return Task.FromResult(new RunStoragePaths(runId, null, null));
+            return Task.FromResult(_storagePaths ?? new RunStoragePaths(runId, null, null));
         }
 
         public Task<IStepLog> OpenStepLogAsync(

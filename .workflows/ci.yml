@@ -269,6 +269,27 @@ jobs:
       - name: Run Web tests
         run: dotnet test tests/Actio.Web.Tests/Actio.Web.Tests.csproj --configuration Release --artifacts-path /tmp/actio-artifacts
 
+  check_web_assets:
+    name: Check Web assets
+    needs: changes
+    if: >-
+      ${{
+        inputs.force_all == 'true' ||
+        github.event.new_ref == 'true' ||
+        needs.changes.outputs.shared == 'true' ||
+        needs.changes.outputs.web_src == 'true' ||
+        needs.changes.outputs.web_tests == 'true'
+      }}
+    runs-on: ubuntu-latest
+    container:
+      image: node:24
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Check browser JavaScript syntax
+        run: node --check src/Actio.Web/wwwroot/app.js
+
   test_cli:
     name: Test CLI
     needs: changes

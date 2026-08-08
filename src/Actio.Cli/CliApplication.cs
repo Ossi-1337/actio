@@ -693,8 +693,8 @@ public sealed class CliApplication
     {
         if (workflow.IsReusableOnly)
         {
-            error.WriteLine($"Workflow '{workflow.Name}' is reusable through workflow_call and cannot be run directly yet.");
-            error.WriteLine("Reusable workflow caller jobs are planned for a later milestone.");
+            error.WriteLine($"Workflow '{workflow.Name}' is reusable through workflow_call and cannot be run directly.");
+            error.WriteLine("Invoke it from a local caller job with jobs.<job_id>.uses.");
             return ExitCodes.ValidationError;
         }
 

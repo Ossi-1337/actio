@@ -57,6 +57,34 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
         TextWriter error,
         CancellationToken cancellationToken = default)
     {
+        var runId = options.RunId ?? _runStore.CreateRunId();
+        try
+        {
+            return await ExecuteCoreAsync(
+                workflow,
+                options with { RunId = runId },
+                output,
+                error,
+                inheritedFilesystemIsolation: null,
+                cancellationToken);
+        }
+        finally
+        {
+            if (_runStore is NullRunStore nullRunStore)
+            {
+                nullRunStore.CleanupEnvironmentFiles(runId);
+            }
+        }
+    }
+
+    private async Task<WorkflowExecutionResult> ExecuteCoreAsync(
+        WorkflowDocument workflow,
+        WorkflowExecutionOptions options,
+        TextWriter output,
+        TextWriter error,
+        RunFilesystemIsolation? inheritedFilesystemIsolation,
+        CancellationToken cancellationToken)
+    {
         var synchronizedOutput = TextWriter.Synchronized(output);
         var synchronizedError = TextWriter.Synchronized(error);
         var runId = options.RunId ?? _runStore.CreateRunId();
@@ -94,7 +122,9 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 securityFindings: securityFindings);
         }
 
-        var isolationResult = RunFilesystemIsolationPolicy.Prepare(options.ProjectRoot, storagePaths);
+        var isolationResult = inheritedFilesystemIsolation is null
+            ? RunFilesystemIsolationPolicy.Prepare(options.ProjectRoot, storagePaths)
+            : RunFilesystemIsolationResult.Prepared(inheritedFilesystemIsolation);
         if (!isolationResult.Success)
         {
             var isolationErrors = isolationResult.Errors.ToList();
@@ -627,9 +657,10 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 failedSteps: 1);
         }
 
+        var nestedRunStore = new NullRunStore();
         var nestedExecutor = new WorkflowExecutor(
             _runnerProvider,
-            new NullRunStore(),
+            nestedRunStore,
             _actionCache,
             _dependencyCache,
             _createJobTimeout);
@@ -649,12 +680,21 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
             RunnerPolicy = options.RunnerPolicy,
             RunnerContext = options.RunnerContext
         };
-        var nestedResult = await nestedExecutor.ExecuteAsync(
-            calleeWorkflow,
-            nestedOptions,
-            output,
-            error,
-            cancellationToken);
+        WorkflowExecutionResult nestedResult;
+        try
+        {
+            nestedResult = await nestedExecutor.ExecuteCoreAsync(
+                calleeWorkflow,
+                nestedOptions,
+                output,
+                error,
+                options.FilesystemIsolation,
+                cancellationToken);
+        }
+        finally
+        {
+            nestedRunStore.CleanupEnvironmentFiles(runId);
+        }
         var errors = new List<string>();
 
         if (!nestedResult.Success)
@@ -733,7 +773,24 @@ public sealed class WorkflowExecutor : IWorkflowExecutor
                 [$"workflow.jobs.{job.Name}.uses '{uses}' was not found at '{fullPath}'."]);
         }
 
-        return ReusableWorkflowPathResolution.Resolved(fullPath);
+        try
+        {
+            var canonicalProjectRoot = FilesystemPathBoundary.ResolveExistingPath(projectRoot);
+            var canonicalPath = FilesystemPathBoundary.ResolveExistingPath(fullPath);
+            return FilesystemPathBoundary.IsWithin(canonicalPath, canonicalProjectRoot)
+                ? ReusableWorkflowPathResolution.Resolved(canonicalPath)
+                : ReusableWorkflowPathResolution.Failed(
+                    [$"workflow.jobs.{job.Name}.uses '{uses}' must resolve inside the project root."]);
+        }
+        catch (Exception ex) when (ex is IOException
+            or UnauthorizedAccessException
+            or InvalidOperationException
+            or ArgumentException
+            or NotSupportedException)
+        {
+            return ReusableWorkflowPathResolution.Failed(
+                [$"workflow.jobs.{job.Name}.uses '{uses}' could not be resolved safely inside the project root."]);
+        }
     }
 
     private static ReusableWorkflowCallBinding BindReusableWorkflowCall(

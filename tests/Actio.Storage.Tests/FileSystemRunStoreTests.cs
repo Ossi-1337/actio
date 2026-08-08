@@ -509,6 +509,77 @@ public sealed class FileSystemRunStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task SaveArtifactAsync_RejectsStoragePathTraversalFromIdentifiers()
+    {
+        var projectRoot = Path.Combine(_root, "repo-artifact-target");
+        Directory.CreateDirectory(projectRoot);
+        await File.WriteAllTextAsync(Path.Combine(projectRoot, "report.txt"), "report");
+        var actioHome = Path.Combine(_root, "home-artifact-target");
+        var store = new FileSystemRunStore(actioHome);
+
+        var result = await store.SaveArtifactAsync(
+            "run-artifact-target",
+            "..",
+            projectRoot,
+            "..",
+            ["report.txt"]);
+
+        Assert.Empty(result.Artifacts);
+        Assert.Contains(result.Errors, error =>
+            error.Contains("storage path must stay inside the run artifact directory", StringComparison.Ordinal));
+        Assert.False(File.Exists(Path.Combine(actioHome, "report.txt")));
+    }
+
+    [Fact]
+    public async Task SaveArtifactAsync_SeparatesNamesThatSanitizeToSamePath()
+    {
+        var projectRoot = Path.Combine(_root, "repo-artifact-collision");
+        Directory.CreateDirectory(Path.Combine(projectRoot, "first"));
+        Directory.CreateDirectory(Path.Combine(projectRoot, "second"));
+        await File.WriteAllTextAsync(Path.Combine(projectRoot, "first", "report.txt"), "first");
+        await File.WriteAllTextAsync(Path.Combine(projectRoot, "second", "report.txt"), "second");
+        var store = new FileSystemRunStore(Path.Combine(_root, "home-artifact-collision"));
+
+        var first = await store.SaveArtifactAsync(
+            "run-artifact-collision",
+            "test",
+            projectRoot,
+            "release notes",
+            [Path.Combine("first", "report.txt")]);
+        var second = await store.SaveArtifactAsync(
+            "run-artifact-collision",
+            "test",
+            projectRoot,
+            "release-notes",
+            [Path.Combine("second", "report.txt")]);
+
+        var firstArtifact = Assert.Single(first.Artifacts);
+        var secondArtifact = Assert.Single(second.Artifacts);
+        Assert.NotEqual(firstArtifact.StoredPath, secondArtifact.StoredPath);
+        Assert.Equal("first", await File.ReadAllTextAsync(firstArtifact.StoredPath));
+        Assert.Equal("second", await File.ReadAllTextAsync(secondArtifact.StoredPath));
+        Assert.NotEqual(firstArtifact.Attestation?.Digest, secondArtifact.Attestation?.Digest);
+
+        var restore = await store.RestoreArtifactsAsync(
+            projectRoot,
+            [firstArtifact, secondArtifact],
+            "restored",
+            useArtifactNameSubdirectories: true);
+
+        Assert.Empty(restore.Errors);
+        Assert.Equal(2, restore.RestoredPaths.Count);
+        Assert.Equal(
+            2,
+            restore.RestoredPaths
+                .Select(path => Path.GetDirectoryName(path))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Count());
+        var restoredContents = await Task.WhenAll(
+            restore.RestoredPaths.Select(path => File.ReadAllTextAsync(path)));
+        Assert.Equal(["first", "second"], restoredContents.Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
     public async Task SaveArtifactAsync_RejectsLinksBeforeCreatingArtifactContent()
     {
         var projectRoot = Path.Combine(_root, "repo-link");

@@ -87,6 +87,7 @@ public sealed class ActionReferenceTests
     [Theory]
     [InlineData("owner/repo")]
     [InlineData("docker://")]
+    [InlineData("docker://--privileged")]
     [InlineData("docker://node@sha256:not-a-valid-digest")]
     [InlineData("owner/../action@v1")]
     [InlineData("not-a-reference")]

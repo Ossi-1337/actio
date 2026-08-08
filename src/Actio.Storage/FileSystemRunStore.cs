@@ -10,6 +10,8 @@ namespace Actio.Storage;
 
 public sealed class FileSystemRunStore : IRunStore
 {
+    private const int MaximumArtifactStorageSegmentLength = 80;
+    private const int ArtifactStorageHashLength = 24;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true
@@ -135,6 +137,11 @@ public sealed class FileSystemRunStore : IRunStore
         var errors = new List<string>();
         foreach (var artifact in artifacts)
         {
+            if (!TryResolveArtifactDirectory(runId, jobName, artifact.Name, out _))
+            {
+                errors.Add($"workflow.jobs.{jobName}.artifacts.{artifact.Name} storage path must stay inside the run artifact directory.");
+            }
+
             errors.AddRange(ValidateArtifactSourcePaths(
                 projectRoot,
                 [artifact.Path],
@@ -247,7 +254,7 @@ public sealed class FileSystemRunStore : IRunStore
         {
             var storedPath = Path.GetFullPath(artifact.StoredPath);
             var targetDirectory = useArtifactNameSubdirectories
-                ? Path.Combine(fullDestinationPath, SanitizePathSegment(artifact.Name))
+                ? Path.Combine(fullDestinationPath, CreateArtifactStorageSegment(artifact.Name))
                 : fullDestinationPath;
 
             if (File.Exists(storedPath))
@@ -395,6 +402,13 @@ public sealed class FileSystemRunStore : IRunStore
             return new ArtifactSaveResult([], [$"{errorPrefix} path is required."]);
         }
 
+        if (!TryResolveArtifactDirectory(runId, jobName, artifactName, out var artifactDirectory))
+        {
+            return new ArtifactSaveResult(
+                [],
+                [$"{errorPrefix} storage path must stay inside the run artifact directory."]);
+        }
+
         errors.AddRange(ValidateArtifactSourcePaths(projectRoot, paths, errorPrefix));
         if (errors.Count > 0)
         {
@@ -407,11 +421,6 @@ public sealed class FileSystemRunStore : IRunStore
             sourcePaths.Add(sourcePath);
         }
 
-        var artifactDirectory = Path.Combine(
-            ArtifactsPath,
-            SanitizePathSegment(runId),
-            SanitizePathSegment(jobName),
-            SanitizePathSegment(artifactName));
         string? storedPath = null;
 
         foreach (var sourcePath in sourcePaths)
@@ -567,6 +576,35 @@ public sealed class FileSystemRunStore : IRunStore
         return Path.GetFullPath(ActioHomePath);
     }
 
+    private bool TryResolveArtifactDirectory(
+        string runId,
+        string jobName,
+        string artifactName,
+        out string artifactDirectory)
+    {
+        artifactDirectory = string.Empty;
+        if (IsNavigationSegment(runId) ||
+            IsNavigationSegment(jobName) ||
+            IsNavigationSegment(artifactName))
+        {
+            return false;
+        }
+
+        var artifactsRoot = Path.GetFullPath(ArtifactsPath);
+        var runDirectory = Path.GetFullPath(Path.Combine(artifactsRoot, CreateArtifactStorageSegment(runId)));
+        var jobDirectory = Path.GetFullPath(Path.Combine(runDirectory, CreateArtifactStorageSegment(jobName)));
+        var candidate = Path.GetFullPath(Path.Combine(jobDirectory, CreateArtifactStorageSegment(artifactName)));
+        if (!IsStrictlyUnderRoot(runDirectory, artifactsRoot) ||
+            !IsStrictlyUnderRoot(jobDirectory, runDirectory) ||
+            !IsStrictlyUnderRoot(candidate, jobDirectory))
+        {
+            return false;
+        }
+
+        artifactDirectory = candidate;
+        return true;
+    }
+
     private static FileStream OpenRunRecordForRead(string path)
         => File.Open(
             path,
@@ -653,6 +691,60 @@ public sealed class FileSystemRunStore : IRunStore
             normalizedPath.StartsWith(normalizedRoot + Path.AltDirectorySeparatorChar, comparison);
     }
 
+    private static bool IsStrictlyUnderRoot(string path, string root)
+    {
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        var normalizedRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var normalizedPath = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return !string.Equals(normalizedPath, normalizedRoot, comparison) &&
+            IsUnderRoot(normalizedPath, normalizedRoot);
+    }
+
+    private static bool IsNavigationSegment(string value)
+        => value is "." or "..";
+
+    private static string CreateArtifactStorageSegment(string value)
+    {
+        if (IsPortableArtifactStorageSegment(value))
+        {
+            return value;
+        }
+
+        var prefixLength = MaximumArtifactStorageSegmentLength - ArtifactStorageHashLength - 2;
+        var prefix = new string(value
+            .Select(character => char.IsAsciiLetterOrDigit(character) || character is '.' or '-' or '_'
+                ? character
+                : '-')
+            .ToArray());
+        prefix = string.IsNullOrWhiteSpace(prefix) || IsNavigationSegment(prefix)
+            ? "unnamed"
+            : prefix[..Math.Min(prefix.Length, prefixLength)];
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)))
+            .ToLowerInvariant()[..ArtifactStorageHashLength];
+        return $"~{prefix}-{hash}";
+    }
+
+    private static bool IsPortableArtifactStorageSegment(string value)
+    {
+        if (value.Length == 0 ||
+            value.Length > MaximumArtifactStorageSegmentLength ||
+            IsNavigationSegment(value) ||
+            value.EndsWith('.') ||
+            value.Any(character =>
+                !(char.IsAsciiLetterLower(character) || char.IsAsciiDigit(character) || character is '.' or '-' or '_')))
+        {
+            return false;
+        }
+
+        var stem = value.Split('.', 2)[0];
+        return stem is not "con" and not "prn" and not "aux" and not "nul" &&
+            !(stem.Length == 4 &&
+                (stem.StartsWith("com", StringComparison.Ordinal) || stem.StartsWith("lpt", StringComparison.Ordinal)) &&
+                stem[3] is >= '1' and <= '9');
+    }
+
     private static string SanitizePathSegment(string value)
     {
         var invalidChars = Path.GetInvalidFileNameChars().ToHashSet();
@@ -660,6 +752,8 @@ public sealed class FileSystemRunStore : IRunStore
             .Select(character => invalidChars.Contains(character) || char.IsWhiteSpace(character) ? '-' : character)
             .ToArray());
 
-        return string.IsNullOrWhiteSpace(sanitized) ? "unnamed" : sanitized;
+        return string.IsNullOrWhiteSpace(sanitized) || IsNavigationSegment(sanitized)
+            ? "unnamed"
+            : sanitized;
     }
 }

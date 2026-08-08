@@ -31,7 +31,7 @@ A workflow moves through four high-level stages:
 
 ### Workflow Understanding
 
-Actio treats workflow files as declarative input. Parsing and validation produce a stable internal model before execution begins.
+Actio treats workflow files as declarative input. Parsing and validation produce a stable internal model before execution begins. Recursive YAML aliases fail structurally, and matrix expansion is bounded before Cartesian products are materialized.
 
 This layer understands:
 
@@ -54,6 +54,8 @@ It coordinates:
 - action resolution and built-in compatibility actions;
 - environment composition, outputs, artifacts, and cache requests;
 - running and final run records.
+
+Workflow files, local actions, and local reusable workflows are resolved through canonical filesystem paths before parsing or mounting. Nested reusable executions inherit the root run's workspace masks and use owner-only, isolated environment-file scopes that are removed after execution.
 
 The engine talks to runner and storage contracts. This keeps execution behavior testable without requiring Docker or filesystem integration in every test.
 
@@ -79,6 +81,8 @@ Actio stores:
 - local resource configuration.
 
 Run records are durable contracts between execution, CLI, and web UI. They remain backward compatible so older local history can still be read after Actio evolves.
+
+Artifact destinations are derived only as strict descendants of the run and job artifact roots. Navigation identifiers are rejected before any host write, and collision-safe storage keys keep distinct run, job, and artifact identities in distinct directories.
 
 ### Local Observation
 

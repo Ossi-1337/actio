@@ -25,6 +25,7 @@
   --item-hover: #21262d;
   --pre-bg: #090c10;
   --toggle-active-bg: #1f6feb;
+  --content-gutter: clamp(16px, 4vw, 2cm);
 }
 
 :root[data-theme="light"] {
@@ -182,7 +183,7 @@ input {
   align-items: center;
   justify-content: space-between;
   gap: 18px;
-  padding: 20px 28px;
+  padding: 20px var(--content-gutter);
   border-bottom: 1px solid var(--line);
 }
 
@@ -251,13 +252,13 @@ input[type="search"] {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 16px;
-  padding: 16px;
+  padding: 16px var(--content-gutter);
 }
 
 .settings-view {
   display: grid;
   gap: 16px;
-  padding: 16px;
+  padding: 16px var(--content-gutter);
 }
 
 .panel,

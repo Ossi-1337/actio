@@ -108,6 +108,40 @@ public sealed class WorkflowFileResolverTests : IDisposable
         Assert.Contains(result.Errors, error => error.Contains("was not found", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public void Resolve_RejectsWorkflowFileLinkOutsideProjectRoot()
+    {
+        var outsideDirectory = Path.Combine(Path.GetTempPath(), $"actio-outside-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(outsideDirectory);
+        var outsideWorkflow = Path.Combine(outsideDirectory, "outside.yml");
+        File.WriteAllText(outsideWorkflow, "name: Outside");
+        var workflowLink = Path.Combine(_root, ".workflows", "ci.yml");
+
+        try
+        {
+            File.CreateSymbolicLink(workflowLink, outsideWorkflow);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            Directory.Delete(outsideDirectory, recursive: true);
+            return;
+        }
+
+        try
+        {
+            var result = new WorkflowFileResolver().Resolve("ci.yml", _root);
+
+            Assert.False(result.Success);
+            Assert.Contains(
+                result.Errors,
+                error => error.Contains("must resolve inside the project root", StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            Directory.Delete(outsideDirectory, recursive: true);
+        }
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_root))

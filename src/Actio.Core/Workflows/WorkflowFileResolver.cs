@@ -34,13 +34,13 @@ public sealed class WorkflowFileResolver
         var actioWorkflowPath = Path.Combine(projectRoot, ActioWorkflowDirectoryName, workflowName);
         if (File.Exists(actioWorkflowPath))
         {
-            return WorkflowResolutionResult.Resolved(projectRoot, actioWorkflowPath);
+            return ResolveExistingWorkflow(projectRoot, actioWorkflowPath);
         }
 
         var gitHubWorkflowPath = Path.Combine(projectRoot, GitHubWorkflowDirectoryName, workflowName);
         if (File.Exists(gitHubWorkflowPath))
         {
-            return WorkflowResolutionResult.Resolved(projectRoot, gitHubWorkflowPath);
+            return ResolveExistingWorkflow(projectRoot, gitHubWorkflowPath);
         }
 
         errors.Add($"Workflow file was not found at '{actioWorkflowPath}' or '{gitHubWorkflowPath}'.");
@@ -64,5 +64,71 @@ public sealed class WorkflowFileResolver
         }
 
         return Path.GetFullPath(workingDirectory);
+    }
+
+    private static WorkflowResolutionResult ResolveExistingWorkflow(string projectRoot, string workflowPath)
+    {
+        try
+        {
+            var canonicalRoot = ResolveExistingPath(projectRoot);
+            var canonicalWorkflow = ResolveExistingPath(workflowPath);
+            return IsWithin(canonicalWorkflow, canonicalRoot)
+                ? WorkflowResolutionResult.Resolved(projectRoot, canonicalWorkflow)
+                : WorkflowResolutionResult.Failed(
+                    [$"Workflow file '{workflowPath}' must resolve inside the project root."]);
+        }
+        catch (Exception ex) when (ex is IOException
+            or UnauthorizedAccessException
+            or InvalidOperationException
+            or ArgumentException
+            or NotSupportedException)
+        {
+            return WorkflowResolutionResult.Failed(
+                [$"Workflow file '{workflowPath}' could not be resolved safely inside the project root."]);
+        }
+    }
+
+    private static string ResolveExistingPath(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(fullPath)
+            ?? throw new InvalidOperationException($"Path '{fullPath}' has no filesystem root.");
+        var current = root;
+        var remainder = fullPath[root.Length..];
+
+        foreach (var segment in remainder.Split(
+            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+            StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            var info = Directory.Exists(current)
+                ? (FileSystemInfo)new DirectoryInfo(current)
+                : new FileInfo(current);
+            if ((info.Attributes & FileAttributes.ReparsePoint) == 0)
+            {
+                continue;
+            }
+
+            current = Path.GetFullPath(
+                info.ResolveLinkTarget(returnFinalTarget: true)?.FullName
+                ?? throw new InvalidOperationException($"Reparse point '{current}' could not be resolved."));
+        }
+
+        return Path.GetFullPath(current);
+    }
+
+    private static bool IsWithin(string path, string root)
+    {
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        var normalizedRoot = Path.GetFullPath(root)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var normalizedPath = Path.GetFullPath(path)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+        return string.Equals(normalizedPath, normalizedRoot, comparison) ||
+            normalizedPath.StartsWith(normalizedRoot + Path.DirectorySeparatorChar, comparison) ||
+            normalizedPath.StartsWith(normalizedRoot + Path.AltDirectorySeparatorChar, comparison);
     }
 }

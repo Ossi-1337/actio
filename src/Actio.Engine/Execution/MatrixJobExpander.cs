@@ -5,6 +5,8 @@ namespace Actio.Engine.Execution;
 
 internal static class MatrixJobExpander
 {
+    internal const int MaximumGeneratedJobs = 256;
+
     public static MatrixJobExpansionResult Expand(IReadOnlyDictionary<string, WorkflowJob> jobs)
     {
         var errors = new List<string>();
@@ -39,9 +41,14 @@ internal static class MatrixJobExpander
 
     private static List<WorkflowJob> ExpandJob(WorkflowJob job, List<string> errors)
     {
-        var combinations = CreateCombinations(job.Strategy.Matrix);
+        var combinations = CreateCombinations(job, errors);
         if (combinations.Count == 0)
         {
+            if (job.Strategy.Matrix.Axes.Count > 0 || job.Strategy.Matrix.Include.Count > 0)
+            {
+                return [];
+            }
+
             return
             [
                 job with
@@ -88,21 +95,70 @@ internal static class MatrixJobExpander
                 continue;
             }
 
+            if (expandedNeeds.Count == 0)
+            {
+                errors.Add($"workflow.jobs.{job.Name}.needs references matrix job '{neededJob}' with no generated variants.");
+                continue;
+            }
+
             needs.AddRange(expandedNeeds.Select(item => item.Name));
         }
 
         return needs;
     }
 
-    private static IReadOnlyList<IReadOnlyDictionary<string, string>> CreateCombinations(WorkflowJobMatrix matrix)
+    private static IReadOnlyList<IReadOnlyDictionary<string, string>> CreateCombinations(
+        WorkflowJob job,
+        List<string> errors)
     {
+        var matrix = job.Strategy.Matrix;
+        if (ExceedsCartesianProductLimit(matrix.Axes))
+        {
+            AddMatrixLimitError(job.Name, errors);
+            return [];
+        }
+
         var axisNames = matrix.Axes.Keys.ToHashSet(StringComparer.Ordinal);
         var combinations = CreateAxisCombinations(matrix.Axes);
 
         ApplyExcludeEntries(combinations, matrix.Exclude);
         ApplyIncludeEntries(combinations, axisNames, matrix.Include);
 
+        if (combinations.Count > MaximumGeneratedJobs)
+        {
+            AddMatrixLimitError(job.Name, errors);
+            return [];
+        }
+
         return combinations.Select(combination => combination.Values).ToArray();
+    }
+
+    private static bool ExceedsCartesianProductLimit(
+        IReadOnlyDictionary<string, IReadOnlyList<string>> axes)
+    {
+        if (axes.Values.Any(axis => axis.Count == 0))
+        {
+            return false;
+        }
+
+        var count = 1;
+        foreach (var axis in axes.Values)
+        {
+            if (count > MaximumGeneratedJobs / axis.Count)
+            {
+                return true;
+            }
+
+            count *= axis.Count;
+        }
+
+        return false;
+    }
+
+    private static void AddMatrixLimitError(string jobName, List<string> errors)
+    {
+        errors.Add(
+            $"workflow.jobs.{jobName}.strategy.matrix cannot generate more than {MaximumGeneratedJobs} jobs.");
     }
 
     private static List<MatrixCombination> CreateAxisCombinations(

@@ -963,8 +963,8 @@ public sealed class CliApplicationTests : IDisposable
         var exitCode = CreateApplication(executor).Run(["reusable.yml"], _root, output, error);
 
         Assert.Equal(ExitCodes.ValidationError, exitCode);
-        Assert.Contains("Workflow 'Reusable Build' is reusable through workflow_call and cannot be run directly yet.", error.ToString());
-        Assert.Contains("Reusable workflow caller jobs are planned for a later milestone.", error.ToString());
+        Assert.Contains("Workflow 'Reusable Build' is reusable through workflow_call and cannot be run directly.", error.ToString());
+        Assert.Contains("Invoke it from a local caller job with jobs.<job_id>.uses.", error.ToString());
         Assert.DoesNotContain("Workflow validation failed:", error.ToString());
         Assert.Equal(string.Empty, output.ToString());
         Assert.Null(executor.Workflow);

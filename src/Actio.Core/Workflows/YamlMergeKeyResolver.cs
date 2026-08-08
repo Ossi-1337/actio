@@ -7,24 +7,52 @@ internal static class YamlMergeKeyResolver
     public static YamlMergeKeyResolutionResult Resolve(YamlMappingNode root)
     {
         var errors = new List<string>();
-        var resolved = ResolveNode(errors, root, "workflow");
+        var activeNodes = new HashSet<YamlNode>(ReferenceEqualityComparer.Instance);
+        var resolved = ResolveNode(errors, activeNodes, root, "workflow");
         return resolved is YamlMappingNode resolvedRoot
             ? new YamlMergeKeyResolutionResult(resolvedRoot, errors)
             : new YamlMergeKeyResolutionResult(root, errors);
     }
 
-    private static YamlNode ResolveNode(List<string> errors, YamlNode node, string path)
+    private static YamlNode ResolveNode(
+        List<string> errors,
+        HashSet<YamlNode> activeNodes,
+        YamlNode node,
+        string path)
     {
-        return node switch
+        if (node is not YamlMappingNode and not YamlSequenceNode)
         {
-            YamlMappingNode mapping => ResolveMapping(errors, mapping, path),
-            YamlSequenceNode sequence => ResolveSequence(errors, sequence, path),
-            _ when node.NodeType == YamlNodeType.Alias => AddUnresolvedAliasError(errors, node, path),
-            _ => node
-        };
+            return node.NodeType == YamlNodeType.Alias
+                ? AddUnresolvedAliasError(errors, node, path)
+                : node;
+        }
+
+        if (!activeNodes.Add(node))
+        {
+            errors.Add($"{path} contains a recursive YAML alias.");
+            return new YamlMappingNode();
+        }
+
+        try
+        {
+            return node switch
+            {
+                YamlMappingNode mapping => ResolveMapping(errors, activeNodes, mapping, path),
+                YamlSequenceNode sequence => ResolveSequence(errors, activeNodes, sequence, path),
+                _ => node
+            };
+        }
+        finally
+        {
+            activeNodes.Remove(node);
+        }
     }
 
-    private static YamlMappingNode ResolveMapping(List<string> errors, YamlMappingNode mapping, string path)
+    private static YamlMappingNode ResolveMapping(
+        List<string> errors,
+        HashSet<YamlNode> activeNodes,
+        YamlMappingNode mapping,
+        string path)
     {
         var resolved = new YamlMappingNode();
 
@@ -32,26 +60,30 @@ internal static class YamlMergeKeyResolver
         {
             if (IsMergeKey(keyNode))
             {
-                MergeInto(errors, resolved, valueNode, $"{path}.<<");
+                MergeInto(errors, activeNodes, resolved, valueNode, $"{path}.<<");
                 continue;
             }
 
-            var key = ResolveNode(errors, keyNode, $"{path}.<key>");
+            var key = ResolveNode(errors, activeNodes, keyNode, $"{path}.<key>");
             var childPath = GetChildPath(path, keyNode);
-            var value = ResolveNode(errors, valueNode, childPath);
+            var value = ResolveNode(errors, activeNodes, valueNode, childPath);
             AddOrSet(resolved, key, value, overwrite: true);
         }
 
         return resolved;
     }
 
-    private static YamlSequenceNode ResolveSequence(List<string> errors, YamlSequenceNode sequence, string path)
+    private static YamlSequenceNode ResolveSequence(
+        List<string> errors,
+        HashSet<YamlNode> activeNodes,
+        YamlSequenceNode sequence,
+        string path)
     {
         var resolved = new YamlSequenceNode();
 
         for (var index = 0; index < sequence.Children.Count; index++)
         {
-            resolved.Add(ResolveNode(errors, sequence.Children[index], $"{path}[{index}]"));
+            resolved.Add(ResolveNode(errors, activeNodes, sequence.Children[index], $"{path}[{index}]"));
         }
 
         return resolved;
@@ -59,11 +91,12 @@ internal static class YamlMergeKeyResolver
 
     private static void MergeInto(
         List<string> errors,
+        HashSet<YamlNode> activeNodes,
         YamlMappingNode target,
         YamlNode mergeNode,
         string path)
     {
-        var resolvedMerge = ResolveNode(errors, mergeNode, path);
+        var resolvedMerge = ResolveNode(errors, activeNodes, mergeNode, path);
 
         if (resolvedMerge is YamlMappingNode mergeMap)
         {

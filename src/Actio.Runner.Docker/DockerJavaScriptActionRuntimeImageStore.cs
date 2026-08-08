@@ -100,6 +100,7 @@ internal sealed class DockerJavaScriptActionRuntimeImageStore : IJavaScriptActio
         startInfo.ArgumentList.Add("inspect");
         startInfo.ArgumentList.Add("--format");
         startInfo.ArgumentList.Add("{{json .Config.Labels}}");
+        startInfo.ArgumentList.Add("--");
         startInfo.ArgumentList.Add(image);
         return startInfo;
     }

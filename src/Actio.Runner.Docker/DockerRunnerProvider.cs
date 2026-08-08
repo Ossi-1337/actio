@@ -808,6 +808,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             startInfo.ArgumentList.Add(request.EntryPoint);
         }
 
+        startInfo.ArgumentList.Add("--");
         startInfo.ArgumentList.Add(request.Image);
         foreach (var argument in request.Arguments)
         {
@@ -870,6 +871,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             startInfo.ArgumentList.Add(runtime.StrictUser);
         }
 
+        startInfo.ArgumentList.Add("--");
         startInfo.ArgumentList.Add(runtime.Image);
         startInfo.ArgumentList.Add("node");
         startInfo.ArgumentList.Add(ToActionContainerPath(request.ActionPath, scriptPath));
@@ -940,6 +942,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
             startInfo.ArgumentList.Add($"{key}={value}");
         }
 
+        startInfo.ArgumentList.Add("--");
         startInfo.ArgumentList.Add(service.Image);
         return startInfo;
     }
@@ -1052,6 +1055,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
     {
         var startInfo = CreateDockerStartInfo();
         startInfo.ArgumentList.Add("pull");
+        startInfo.ArgumentList.Add("--");
         startInfo.ArgumentList.Add(image);
         return startInfo;
     }
@@ -1088,6 +1092,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         var shell = NormalizeShell(configuredShell);
         startInfo.ArgumentList.Add("--entrypoint");
         startInfo.ArgumentList.Add(shell);
+        startInfo.ArgumentList.Add("--");
         startInfo.ArgumentList.Add(image);
 
         if (string.Equals(shell, WorkflowShells.PowerShell, StringComparison.Ordinal))
@@ -1259,6 +1264,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         var startInfo = CreateDockerStartInfo();
         startInfo.ArgumentList.Add("image");
         startInfo.ArgumentList.Add("inspect");
+        startInfo.ArgumentList.Add("--");
         startInfo.ArgumentList.Add(image);
         return startInfo;
     }
@@ -1270,6 +1276,7 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         startInfo.ArgumentList.Add("inspect");
         startInfo.ArgumentList.Add("--format");
         startInfo.ArgumentList.Add("{{json .Config.User}}");
+        startInfo.ArgumentList.Add("--");
         startInfo.ArgumentList.Add(image);
         return startInfo;
     }
@@ -1690,22 +1697,31 @@ public sealed class DockerRunnerProvider : IRunnerProvider
         }
     }
 
-    private static string CreateContainerName(string jobName, string stepName)
+    internal static string CreateContainerName(string jobName, string stepName)
     {
-        var name = $"actio-{SanitizeName(jobName)}-{SanitizeName(stepName)}-{Guid.NewGuid():N}";
-        return name.Length <= 63 ? name : name[..63].TrimEnd('-');
+        return CreateUniqueResourceName($"actio-{SanitizeName(jobName)}-{SanitizeName(stepName)}");
     }
 
-    private static string CreateServiceContainerName(string jobName, string serviceName)
+    internal static string CreateServiceContainerName(string jobName, string serviceName)
     {
-        var name = $"actio-{SanitizeName(jobName)}-{SanitizeName(serviceName)}-{Guid.NewGuid():N}";
-        return name.Length <= 63 ? name : name[..63].TrimEnd('-');
+        return CreateUniqueResourceName($"actio-{SanitizeName(jobName)}-{SanitizeName(serviceName)}");
     }
 
-    private static string CreateNetworkName(string jobName)
+    internal static string CreateNetworkName(string jobName)
     {
-        var name = $"actio-{SanitizeName(jobName)}-net-{Guid.NewGuid():N}";
-        return name.Length <= 63 ? name : name[..63].TrimEnd('-');
+        return CreateUniqueResourceName($"actio-{SanitizeName(jobName)}-net");
+    }
+
+    private static string CreateUniqueResourceName(string prefix)
+    {
+        const int maxLength = 63;
+        var suffix = Guid.NewGuid().ToString("N");
+        var prefixLength = maxLength - suffix.Length - 1;
+        var truncatedPrefix = prefix.Length <= prefixLength
+            ? prefix
+            : prefix[..prefixLength].TrimEnd('-');
+
+        return $"{truncatedPrefix}-{suffix}";
     }
 
     private static string SanitizeName(string value)

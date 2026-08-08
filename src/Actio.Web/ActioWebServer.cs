@@ -33,6 +33,7 @@ public sealed class ActioWebServer
         builder.Services.AddSingleton<ActioWebDataService>();
 
         var app = builder.Build();
+        app.Use(EnforceBoundHostAsync);
         app.Use(EnforceLocalMutationOriginAsync);
         MapRoutes(app, options);
         return app;
@@ -252,6 +253,24 @@ public sealed class ActioWebServer
                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
                 return;
             }
+        }
+
+        await next(context);
+    }
+
+    internal static async Task EnforceBoundHostAsync(
+        HttpContext context,
+        RequestDelegate next)
+    {
+        var runtime = context.RequestServices.GetRequiredService<ActioWebRuntimeState>();
+        if (!Uri.TryCreate(runtime.ServerUrl, UriKind.Absolute, out var serverUri) ||
+            !string.Equals(
+                context.Request.Host.ToUriComponent(),
+                serverUri.Authority,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
         }
 
         await next(context);

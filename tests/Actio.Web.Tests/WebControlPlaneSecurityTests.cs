@@ -93,6 +93,36 @@ public sealed class WebControlPlaneSecurityTests
         Assert.Equal(StatusCodes.Status403Forbidden, context.Response.StatusCode);
     }
 
+    [Fact]
+    public async Task HostPolicyAllowsOnlyBoundAuthority()
+    {
+        var allowed = CreateContext("http://127.0.0.1:17345");
+        allowed.Request.Host = new HostString("127.0.0.1", 17345);
+        var allowedReached = false;
+        await ActioWebServer.EnforceBoundHostAsync(
+            allowed,
+            _ =>
+            {
+                allowedReached = true;
+                return Task.CompletedTask;
+            });
+
+        var spoofed = CreateContext("http://127.0.0.1:17345");
+        spoofed.Request.Host = new HostString("evil.example", 17345);
+        var spoofedReached = false;
+        await ActioWebServer.EnforceBoundHostAsync(
+            spoofed,
+            _ =>
+            {
+                spoofedReached = true;
+                return Task.CompletedTask;
+            });
+
+        Assert.True(allowedReached);
+        Assert.False(spoofedReached);
+        Assert.Equal(StatusCodes.Status403Forbidden, spoofed.Response.StatusCode);
+    }
+
     private static DefaultHttpContext CreateContext(string serverUrl)
     {
         var services = new ServiceCollection()

@@ -138,6 +138,26 @@ public sealed class WorkflowParserTests
     }
 
     [Fact]
+    public void Parse_RejectsRecursiveYamlAlias()
+    {
+        var result = Parse(
+            """
+            name: CI
+            jobs:
+              test: &loop
+                <<: *loop
+                runs-on: ubuntu-latest
+                steps:
+                  - name: Test
+                    run: dotnet test
+            """);
+
+        Assert.False(result.Success);
+        Assert.Contains(result.Errors, error =>
+            error.Contains("recursive YAML alias", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Parse_RequiresWorkflowName()
     {
         var result = Parse(
